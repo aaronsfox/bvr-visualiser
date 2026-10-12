@@ -1,0 +1,38 @@
+# Builds the double-clickable app for Windows, macOS and Linux whenever you push a tag like v0.1.0,
+# or when run by hand from the repository's Actions tab. Download the results from the run's "Artifacts".
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q   # sample-data tests are skipped unless BVR_SAMPLE_DATA is set
+
+  package:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e ".[dev]"
+      - name: Build
+        working-directory: packaging
+        run: pyinstaller bvr_viewer.spec --noconfirm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BVR-Motion-Viewer-${{ runner.os }}
+          path: packaging/dist/

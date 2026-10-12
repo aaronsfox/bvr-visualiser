@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Builds (PyInstaller)
+build/
+dist/
+packaging/build/
+packaging/dist/
+
+# Data and outputs: sample data and your trials stay out of the repository
+sample_data/
+*.tif
+*.tiff
+*.stl
+*.tra
+*.mp4
+*.bvrsession.json
+
+# OS
+.DS_Store
+Thumbs.db
