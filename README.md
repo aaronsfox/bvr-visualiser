@@ -15,6 +15,17 @@ The first run sets up a private Python environment in a `.venv` folder (a few mi
 
 **By hand:** `pip install -e .` then `python -m bvrviewer` (or `bvr-viewer`).
 
+**In an IDE such as PyCharm:** create a virtual environment, run `pip install -e .` in it, and add a Python run configuration with the *module* `bvrviewer` and the repository folder as the working directory. Don't run `bvrviewer/__main__.py` as a script; it fails with a relative-import error. `packaging/launcher.py` can be run as a script instead.
+
+### Windows: use Python from python.org, not Anaconda/Miniconda
+
+Two problems come from Anaconda/Miniconda on Windows:
+
+- **A virtual environment built from conda's Python** fails at start-up with `ImportError: DLL load failed while importing QtWidgets: The specified procedure could not be found`. Conda's `python.exe` loads its own older Microsoft C++ runtime, which PySide6 can't use. Check with `python -c "import sys; print(sys.base_prefix)"`: if it prints a `miniconda3` or `anaconda3` folder, recreate the environment from a python.org Python.
+- **A conda environment from conda-forge** can fail to install with `InvalidArchiveError … viskores` (a VTK dependency), because its folders exceed Windows' path-length limit unless long paths are enabled.
+
+The reliable route is Python 3.12 from https://www.python.org/downloads/windows/ (it installs per user, without admin rights), a virtual environment based on it, and `pip install -e .`.
+
 **As a stand-alone app (no Python needed for users):** see [Building the app](#building-the-app).
 
 ## Using it
