@@ -285,10 +285,10 @@ for c in tab.state.cameras:
     tab._set_camera(c, "show_beams", False)
 tab.refresh_all()
 expected = [
-    ("models", None, ["Add model…", "Show all", "Hide all"]),
+    ("models", None, ["Add bone…", "Load model (bones, coordinate systems, joints)…", "Show all", "Hide all"]),
     ("model", tab.state.models[0], ["Replace tracking…", "Tracking format…", "Detach tracking",
                                      "Add coordinate system…", "Hold this bone still", "Hide", "Rename", "Use file name as name",
-                                     "Replace model file…", "Voxel size / surface…", "Remove model"]),
+                                     "Replace surface file…", "Voxel size / surface…", "Remove bone"]),
     ("tracking", tab.state.models[2], ["Attach tracking…"]),
     ("cameras", None, ["Add X-ray camera…", "Import cameras from .cfg…"]),
     ("camera", tab.state.cameras[0], ["View through this camera", "Hide", "Rename",

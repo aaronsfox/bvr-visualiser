@@ -74,7 +74,7 @@ class Navigator(QTreeWidget):
         self.roots: dict[str, QTreeWidgetItem] = {}
         bold = QFont()
         bold.setBold(True)
-        for kind, text in [(MODELS, "Models"), (CAMERAS, "X-ray cameras"), (JOINTS, "Joints"), (SCENE, "Scene")]:
+        for kind, text in [(MODELS, "Bones"), (CAMERAS, "X-ray cameras"), (JOINTS, "Joints"), (SCENE, "Scene")]:
             it = QTreeWidgetItem([text])
             it.setData(0, KIND_ROLE, kind)
             it.setFont(0, bold)
@@ -82,9 +82,9 @@ class Navigator(QTreeWidget):
             self.addTopLevelItem(it)
             it.setExpanded(True)
             self.roots[kind] = it
-        self.roots[MODELS].setToolTip(0, "Right-click to add a model")
+        self.roots[MODELS].setToolTip(0, "Right-click to add a bone, or load a model")
         self.roots[CAMERAS].setToolTip(0, "Optional. Right-click to add an X-ray camera")
-        self.roots[JOINTS].setToolTip(0, "Optional. Right-click to add joints from a Model Builder file")
+        self.roots[JOINTS].setToolTip(0, "Optional. Right-click to add joints from a model")
         self.roots[SCENE].setToolTip(0, "Axes, grid, background, motion trail, untracked frames")
 
     # ---- building
@@ -96,10 +96,10 @@ class Navigator(QTreeWidget):
         for root in (self.roots[MODELS], self.roots[CAMERAS], self.roots[JOINTS]):
             root.takeChildren()
         n_models, n_cams = len(state.models), len(state.cameras)
-        self.roots[MODELS].setText(0, f"Models ({n_models})" if n_models else "Models")
+        self.roots[MODELS].setText(0, f"Bones ({n_models})" if n_models else "Bones")
         self.roots[CAMERAS].setText(0, f"X-ray cameras ({n_cams})" if n_cams else "X-ray cameras")
         if not n_models:
-            self._placeholder(self.roots[MODELS], "Right-click Models to add one")
+            self._placeholder(self.roots[MODELS], "Right-click Bones to add one, or load a model")
         for m in state.models:
             it = QTreeWidgetItem([m.name])
             self._set(it, MODEL, m)
@@ -202,7 +202,7 @@ class Navigator(QTreeWidget):
             else:
                 it.setText(0, "No tracking (right-click to attach)")
                 it.setForeground(0, QBrush(QColor("#F2C48D")))
-                it.setToolTip(0, "This model stays in its model pose until a .tra file is attached.")
+                it.setToolTip(0, "This bone stays untracked (in its own model space) until a .tra file is attached.")
         elif kind == AXES:
             m = obj
             if m.has_axes:
@@ -217,7 +217,7 @@ class Navigator(QTreeWidget):
                 it.setText(0, "No coordinate system (right-click to add)")
                 it.setData(0, Qt.CheckStateRole, None)
                 it.setForeground(0, QBrush(QColor("#7A8291")))
-                it.setToolTip(0, "Optional: axes from a Model Builder file give this bone's motion about its own "
+                it.setToolTip(0, "Optional: axes from a model give this bone's motion about its own "
                                  "axes, and are used by joints.")
         elif kind == CAMERA:
             cam: XrayCamera = obj

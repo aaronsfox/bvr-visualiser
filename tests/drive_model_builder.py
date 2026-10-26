@@ -304,5 +304,23 @@ for it in list(vt.state.joints):
 for mm in vt.state.models:
     vt.remove_axes(mm)
 assert not vt.curves.isVisible() and not vt._joint_actors
+# Load model: a new tab gets every bone (from the model's surface files), its coordinate system and the joint
+vt3 = win.open_tool("visualiser")
+vt3.load_full_model(str(path))
+end = time.time() + 120
+while vt3._threads and time.time() < end:
+    pump(0.1)
+pump(0.5)
+assert [mm.name for mm in vt3.state.models] == ["Femur", "Tibia"], [mm.name for mm in vt3.state.models]
+assert [mm.axes_segment for mm in vt3.state.models] == ["Femur", "Tibia"] and all(mm.acs is not None
+                                                                                 for mm in vt3.state.models)
+assert [j.name for j in vt3.state.joints] == ["Knee"]
+assert vt3.nav.roots["models"].text(0) == "Bones (2)"
+assert vt3.joint_values(vt3.state.joints[0]) is None                 # no tracking yet: no joint values
+shot("vis_04_load_model")
+# loading it into a tab that already has those bones reuses them (no duplicates)
+vt3.load_full_model(str(path))
+pump(0.3)
+assert len(vt3.state.models) == 2 and len(vt3.state.joints) == 1
 print("VISUALISER OK", flush=True)
 win.close()

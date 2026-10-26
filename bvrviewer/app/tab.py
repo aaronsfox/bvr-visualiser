@@ -60,6 +60,7 @@ class _Relay(QObject):
 
 class EmptyState(QFrame):
     addModel = Signal()
+    loadModel = Signal()
     openSession = Signal()
 
     def __init__(self):
@@ -78,11 +79,12 @@ class EmptyState(QFrame):
         v.addWidget(label("Everything in the tab is listed in the navigator on the left. Right-click an item "
                           "there for its actions, and select it to edit its properties below."))
         for n, head, body in [
-            (1, "Add a model", "Right-click Models (or use the button below). STL surfaces or TIF partial volumes; "
-                               "the file name becomes the bone's name, which you can change."),
-            (2, "Attach its tracking file", "Right-click the model and choose Attach tracking. The .tra format "
+            (1, "Add a bone", "Right-click Bones (or use the button below). STL surfaces or TIF partial volumes; "
+                              "the file name becomes the bone's name, which you can change. Or load a model from the "
+                              "Model Builder to bring in all its bones, coordinate systems and joints at once."),
+            (2, "Attach its tracking file", "Right-click the bone and choose Attach tracking. The .tra format "
                                             "is detected automatically."),
-            (3, "Set how it looks", "Select the model to change its colour, opacity and display in Properties."),
+            (3, "Set how it looks", "Select the bone to change its colour, opacity and display in Properties."),
         ]:
             r = QHBoxLayout()
             num = QLabel(str(n))
@@ -98,18 +100,23 @@ class EmptyState(QFrame):
             r.addLayout(col, 1)
             v.addLayout(r)
         r = QHBoxLayout()
-        add = QPushButton("+  Add model (STL / TIF)")
+        add = QPushButton("+  Add bone (STL / TIF)")
         add.setObjectName("Primary")
         add.setMinimumHeight(40)
         add.clicked.connect(self.addModel.emit)
+        lm = QPushButton("Load model…")
+        lm.setMinimumHeight(40)
+        lm.setToolTip("A model from the Model Builder: its bones, coordinate systems and joints")
+        lm.clicked.connect(self.loadModel.emit)
         op = QPushButton("Open saved session…")
         op.setMinimumHeight(40)
         op.clicked.connect(self.openSession.emit)
         r.addWidget(add)
+        r.addWidget(lm)
         r.addWidget(op)
         r.addStretch(1)
         v.addLayout(r)
-        v.addWidget(label("Tip: select several files at once and each is added as a model."))
+        v.addWidget(label("Tip: select several files at once and each is added as a bone."))
         outer.addWidget(box)
 
 
@@ -200,6 +207,7 @@ class VisualiserTab(QWidget):
         self.stack = QStackedWidget()
         self.empty = EmptyState()
         self.empty.addModel.connect(self.add_models)
+        self.empty.loadModel.connect(self.load_full_model)
         self.empty.openSession.connect(self.open_session)
         self.stack.addWidget(self.empty)
         self.plotter = QtInteractor(self.stack)
@@ -412,7 +420,8 @@ class VisualiserTab(QWidget):
             return a
 
         if kind == MODELS:
-            add("Add model…", self.add_models)
+            add("Add bone…", self.add_models)
+            add("Load model (bones, coordinate systems, joints)…", self.load_full_model)
             menu.addSeparator()
             add("Show all", lambda: self._show_all(True), enabled=bool(self.state.models))
             add("Hide all", lambda: self._show_all(False), enabled=bool(self.state.models))
@@ -434,7 +443,7 @@ class VisualiserTab(QWidget):
                 add("Rename", lambda: self.nav.start_rename(MODEL, m))
                 add("Use file name as name", lambda: self._rename(m, m.path.stem))
                 menu.addSeparator()
-                add("Replace model file…", lambda: self.replace_model(m))
+                add("Replace surface file…", lambda: self.replace_model(m))
                 if m.is_volume:
                     add("Voxel size / surface…", lambda: self.edit_voxel(m))
                 elif m.tfm_path:
@@ -442,7 +451,7 @@ class VisualiserTab(QWidget):
                 else:
                     add("Apply .tfm transform…", lambda: self.load_tfm(m))
                 menu.addSeparator()
-                add("Remove model", lambda: self.remove_model(m))
+                add("Remove bone", lambda: self.remove_model(m))
         elif kind == AXES:
             m: BoneModel = obj
             add("Replace coordinate system…" if m.has_axes else "Add coordinate system…", lambda: self.add_axes(m))
@@ -524,15 +533,15 @@ class VisualiserTab(QWidget):
 
     def _props_models(self) -> None:
         p = self.props
-        p.clear("Models")
+        p.clear("Bones")
         n = len(self.state.models)
         tracked = sum(1 for m in self.state.models if m.tracking)
-        p.value("Models", str(n))
+        p.value("Bones", str(n))
         p.value("With tracking", f"{tracked} of {n}" if n else "–")
         if n:
             p.value("Frames", str(self.scene.n_frames))
-        p.note("Select a model in the navigator to edit it. Right-click a model for its actions.")
-        p.buttons([("Add model…", self.add_models)] +
+        p.note("Select a bone in the navigator to edit it. Right-click a bone for its actions.")
+        p.buttons([("Add bone…", self.add_models), ("Load model…", self.load_full_model)] +
                   ([("Show all", lambda: self._show_all(True)), ("Hide all", lambda: self._show_all(False))]
                    if n else []))
 
@@ -547,16 +556,16 @@ class VisualiserTab(QWidget):
         p.combo("Display as", [("surface", "Surface"), ("volume", "Volume", m.image_data is not None),
                                ("both", "Surface and volume", m.image_data is not None)],
                 m.display, lambda v: self._set_model(m, "display", v),
-                tip=None if m.image_data is not None else "Volume display needs a TIF model.")
+                tip=None if m.image_data is not None else "Volume display needs a TIF surface.")
         p.section("Motion")
         if m.tracking:
             p.value("Tracking", f"{m.tracking.path.name} · {m.tracking.n_frames} frames", tip=str(m.tracking.path))
         else:
-            p.value("Tracking", "None. Shown in its model pose.", kind="Warn")
+            p.value("Tracking", "None. Shown untracked, in its own model space.", kind="Warn")
         p.check("Hold still", self.state.settings.hold_still == m.name, lambda on: self.hold_still(m, on),
                 caption="Others move relative to it", enabled=m.tracking is not None)
         p.buttons([("Replace tracking…" if m.tracking else "Attach tracking…", lambda: self.attach_tracking(m))])
-        p.section("Model file")
+        p.section("Surface file")
         p.value("File", m.path.name, tip=str(m.path))
         if m.is_volume:
             vs = " × ".join(f"{x:g}" for x in m.voxel_size) if m.voxel_size else "?"
@@ -569,14 +578,14 @@ class VisualiserTab(QWidget):
             p.buttons([("Replace…", lambda: self.replace_model(m)),
                        ("Remove .tfm", lambda: self.clear_tfm(m)) if m.tfm_path else
                        ("Apply .tfm…", lambda: self.load_tfm(m))])
-        p.buttons([("Remove model", lambda: self.remove_model(m))], danger="Remove model")
+        p.buttons([("Remove bone", lambda: self.remove_model(m))], danger="Remove bone")
 
     def _props_tracking(self, m: BoneModel) -> None:
         p = self.props
         t = m.tracking
         p.clear(f"Tracking · {m.name}")
         if t is None:
-            p.note("No tracking file attached, so this model stays in its model pose.", "Warn")
+            p.note("No tracking file attached, so this bone stays untracked, in its own model space.", "Warn")
             p.buttons([("Attach tracking…", lambda: self.attach_tracking(m))])
             return
         p.section("Tracking file")
@@ -692,7 +701,7 @@ class VisualiserTab(QWidget):
 
     # ---------------------------------------------------------------- models
     def add_models(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "Add bone models", "", MODEL_FILTER)
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add bones (surface files)", "", MODEL_FILTER)
         if not paths:
             return
         models = []
@@ -734,7 +743,7 @@ class VisualiserTab(QWidget):
 
     def _models_built(self, res, err, then) -> None:
         if err:
-            self._error("Couldn't load models", err)
+            self._error("Couldn't load the bones", err)
             return
         built, errors = res
         first = not self.state.models
@@ -745,7 +754,7 @@ class VisualiserTab(QWidget):
             self.select(built[-1], refresh=False)
             self.sel_kind, self.sel_obj = MODEL, built[-1]
         if errors:
-            self._error("Some models couldn't be loaded", "\n\n".join(errors))
+            self._error("Some bones couldn't be loaded", "\n\n".join(errors))
         self.refresh_all()
         self.scene.apply_settings()
         if first and built:
@@ -776,7 +785,7 @@ class VisualiserTab(QWidget):
         self.scene.update_frame(self.scene.frame)
 
     def replace_model(self, m: BoneModel) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Replace model", str(m.path.parent), MODEL_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, "Replace surface file", str(m.path.parent), MODEL_FILTER)
         if not path:
             return
         new = BoneModel.from_dict({**m.to_dict(), "path": path, "tfm_path": None})
@@ -799,7 +808,7 @@ class VisualiserTab(QWidget):
 
         def done(res, err):
             if err:
-                self._error("Couldn't update the model", err)
+                self._error("Couldn't update the bone", err)
                 return
             i = self.state.models.index(old)
             self.state.models[i] = res
@@ -829,7 +838,7 @@ class VisualiserTab(QWidget):
                                                   "threshold": level}))
 
     def remove_model(self, m: BoneModel) -> None:
-        if QMessageBox.question(self, "Remove model", f"Remove {m.name} from this tab?") != QMessageBox.Yes:
+        if QMessageBox.question(self, "Remove bone", f"Remove {m.name} from this tab?") != QMessageBox.Yes:
             return
         self.scene.remove_model(m)
         self.state.models.remove(m)
@@ -875,7 +884,7 @@ class VisualiserTab(QWidget):
         self._tracking_changed(m)
         if t.warnings:
             self._error("Check the tracking format", "\n".join(t.warnings) +
-                        "\n\nRight-click the model and choose Tracking format… to correct it.")
+                        "\n\nRight-click the bone and choose Tracking format… to correct it.")
 
     def _tracking_changed(self, m: BoneModel) -> None:
         if self.state.cameras:
@@ -1115,7 +1124,7 @@ class VisualiserTab(QWidget):
             add_cams()
 
     # ---------------------------------------------------------------- coordinate systems and joints
-    MODEL_FILE_FILTER = "Model Builder file (*.bvrmodel.json *.json)"
+    MODEL_FILE_FILTER = "Model from the Model Builder (*.bvrmodel.json *.json)"
 
     def _kin_model(self, path):
         from ..core.joints import KinematicModel
@@ -1126,7 +1135,7 @@ class VisualiserTab(QWidget):
         return self._kin_models[key]
 
     def add_axes(self, m: BoneModel) -> None:
-        """Right-click a model → Add coordinate system: a segment from a Model Builder file."""
+        """Right-click a bone → Add coordinate system: one of the bones of a Model Builder model."""
         start = str(m.axes_path.parent) if m.axes_path else str(m.path.parent)
         path, _ = QFileDialog.getOpenFileName(self, f"Coordinate system for {m.name}", start, self.MODEL_FILE_FILTER)
         if path:
@@ -1143,7 +1152,7 @@ class VisualiserTab(QWidget):
         km = self._kin_model(path)
         segs = [sg for sg in km.segments if sg.acs is not None]
         if not segs:
-            raise JointModelError("No segment in this file has axes yet. Define them in the Model Builder and "
+            raise JointModelError("No bone in this file has axes yet. Define them in the Model Builder and "
                                   "save again.")
         if segment is None:
             guess = guess_segment_map(km, [m]).items()
@@ -1152,8 +1161,8 @@ class VisualiserTab(QWidget):
                 segment = segs[0].name
             if segment is None:
                 names = [sg.name for sg in segs]
-                choice, ok = QInputDialog.getItem(self, "Which segment?", f"{Path(path).name} has several "
-                                                  f"segments. Which one is {m.name}?", names, 0, False)
+                choice, ok = QInputDialog.getItem(self, "Which bone?", f"{Path(path).name} has several "
+                                                  f"bones. Which one is {m.name}?", names, 0, False)
                 if not ok:
                     return False
                 segment = choice
@@ -1163,13 +1172,68 @@ class VisualiserTab(QWidget):
         if warn:
             sg = km.segment(segment)
             if sg.surface is not None and Path(sg.surface.path).name != Path(m.path).name:
-                self._error("Check the bone", f"{segment} was defined on {Path(sg.surface.path).name}, but this model "
+                self._error("Check the bone", f"{segment} was defined on {Path(sg.surface.path).name}, but this bone "
                             f"is {Path(m.path).name}. The axes only fit if both use the same surface (same model "
                             "space).")
         self.curve_joint = m
         self.sel_kind, self.sel_obj = AXES, m
         self.refresh_all()
         return True
+
+    def load_full_model(self, path=None) -> None:
+        """Load a model: all its bones (reusing bones already here with the same surface file), each with its
+        coordinate system, and all its joints."""
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Load model", "", self.MODEL_FILE_FILTER)
+            if not path:
+                return
+        self._kin_models.pop(str(Path(path).resolve()), None)
+        try:
+            km = self._kin_model(path)
+        except Exception as e:  # noqa: BLE001
+            self._error("Couldn't open the model", str(e))
+            return
+        segs = [sg for sg in km.segments if sg.acs is not None and sg.surface is not None]
+        if not segs:
+            self._error("Nothing to load", "None of the model's bones has a surface and axes yet. Finish them in the "
+                                           "Model Builder and save again.")
+            return
+        pairs, new = [], []
+        taken = {m.name for m in self.state.models}
+        for sg in segs:
+            same = next((m for m in self.state.models
+                         if Path(m.path).resolve() == Path(sg.surface.path).resolve()), None)
+            if same is None:
+                d = sg.surface.to_dict()
+                name, k = sg.name, 2
+                while name in taken:
+                    name, k = f"{sg.name} {k}", k + 1
+                taken.add(name)
+                same = BoneModel.from_dict({**d, "name": name,
+                                            "color": PALETTE[(len(self.state.models) + len(new)) % len(PALETTE)]})
+                new.append(same)
+            pairs.append((sg.name, same))
+
+        def finish():
+            here = [(s, m) for s, m in pairs if any(m is x for x in self.state.models)]
+            for sname, m in here:
+                m.axes_path, m.axes_segment, m.axes_model = Path(path), sname, km
+                m.axes_reference, m.axes_zero = "first", None
+            smap = {s: m.name for s, m in here}
+            if any(j.proximal in smap and j.distal in smap for j in km.joints):
+                self.load_joint_model_file(path, segment_map=smap, ask=False)
+            else:
+                if here:
+                    self.curve_joint = here[0][1]
+                    self.sel_kind, self.sel_obj = AXES, here[0][1]
+                self.refresh_all()
+            self.scene.apply_settings()
+            self.scene.zoom_to_bones()
+
+        if new:
+            self._build_models(new, then=finish)
+        else:
+            finish()
 
     def remove_axes(self, m: BoneModel) -> None:
         m.axes_path = m.axes_segment = m.axes_model = None
@@ -1185,7 +1249,7 @@ class VisualiserTab(QWidget):
             self.show_properties()
 
     def load_joint_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Add joints from a Model Builder file", "", self.MODEL_FILE_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, "Add joints from a model", "", self.MODEL_FILE_FILTER)
         if path:
             self.load_joint_model_file(path)
 
@@ -1197,12 +1261,12 @@ class VisualiserTab(QWidget):
             self._kin_models.pop(str(Path(path).resolve()), None)
             km = self._kin_model(path)
         except Exception as e:  # noqa: BLE001
-            self._error("Couldn't open the model file", str(e))
+            self._error("Couldn't open the model", str(e))
             return []
         joints = [j for j in km.joints
                   if km.segment(j.proximal).acs is not None and km.segment(j.distal).acs is not None]
         if not joints:
-            self._error("No joints", "This file has no joints with both segments' axes defined. Add joints in the "
+            self._error("No joints", "This file has no joints with both bones' axes defined. Add joints in the "
                                      "Model Builder (step 2) and save again.")
             return []
         if segment_map is None:
@@ -1223,11 +1287,18 @@ class VisualiserTab(QWidget):
             smap = segment_map
         added = []
         for j in joints:
+            dup = any(Path(x.model_path).resolve() == Path(path).resolve() and x.name == j.name and
+                      x.model_map == {n: smap.get(n) for n in (j.proximal, j.distal)} for x in self.state.joints)
+            if dup:
+                continue                                      # already in this tab
             if j.proximal in smap and j.distal in smap:
                 added.append(KinItem(Path(path), "joint", j.name, {n: smap[n] for n in (j.proximal, j.distal)},
                                      label=j.name, model=km))
         if not added:
-            self._error("Nothing to add", "The joints' segments weren't matched to models in this tab.")
+            if not any(Path(x.model_path).resolve() == Path(path).resolve() for x in self.state.joints):
+                self._error("Nothing to add", "The joints' bones weren't matched to bones in this tab.")
+            else:
+                self.refresh_all()
             return []
         for jl in added:                                     # give bones without axes the joint's segments
             for sname, mname in jl.model_map.items():
@@ -1298,8 +1369,8 @@ class VisualiserTab(QWidget):
                     pass
         for jl in self.state.joints:
             models = [self._model_named(x) for x in jl.tab_models()]
-            if any(mm is None for mm in models):
-                continue
+            if any(mm is None or mm.tracking is None for mm in models):
+                continue                  # untracked bones sit in unrelated model spaces: no joint values
             try:
                 self._kin[self._kin_key(jl)] = jl.model.joint_kinematics(
                     jl.name, self._poses(models[0], n), self._poses(models[1], n), normalise=jl.use_reference)
@@ -1444,10 +1515,10 @@ class VisualiserTab(QWidget):
                 return
         write_csv(path, k, self.state.settings.fps)
 
-    def _frame_values(self, p, k) -> None:
+    def _frame_values(self, p, k, missing: str = "Its bones need to be in this tab, with axes.") -> None:
         p.section(f"Frame {self.scene.frame + 1}")
         if k is None:
-            p.note("Its bones need to be in this tab, with axes.", "Warn")
+            p.note(missing, "Warn")
             return
         f = min(self.scene.frame, len(k["angles"]) - 1)
         if np.isnan(k["angles"][f]).any():
@@ -1462,17 +1533,17 @@ class VisualiserTab(QWidget):
         p = self.props
         p.clear(f"{m.name}: coordinate system")
         if not m.has_axes:
-            p.note("No coordinate system yet. Add one from a file saved in the Model Builder: pick the file, then the "
-                   "segment that is this bone. Its axes then show on the bone, its motion about its own axes is "
-                   "plotted, and joints can use it.")
+            p.note("No coordinate system yet. Add one from a model saved in the Model Builder: pick the file, and "
+                   "the model's bone that matches this one is chosen (or you're asked). Its axes then show on the "
+                   "bone, its motion about its own axes is plotted, and joints can use it.")
             p.buttons([("Add coordinate system…", lambda: self.add_axes(m))])
             return
         seg = m.axes_model.segment(m.axes_segment) if m.acs is not None else None
-        p.value("File", Path(m.axes_path).name, tip=str(m.axes_path))
-        p.value("Segment", m.axes_segment if seg is None else
+        p.value("Model", Path(m.axes_path).name, tip=str(m.axes_path))
+        p.value("Model bone", m.axes_segment if seg is None else
                 f"{seg.name} ({seg.stype.title.lower()}" + (f", {seg.side})" if seg.side != "none" else ")"))
         if seg is None:
-            p.note("This segment isn't in the file any more, or has no axes.", "Warn")
+            p.note("This bone isn't in the file any more, or has no axes.", "Warn")
         else:
             p.value("Axes from", "Landmarks" if seg.axes_source == "landmarks" else
                     AUTO_METHODS[seg.axes_source].title)
@@ -1506,7 +1577,7 @@ class VisualiserTab(QWidget):
         p.clear("Joints")
         p.note("Joints come from a file saved in the Model Builder. Each pairs two bones with a joint definition, "
                "optionally relative to the file's reference pose. Bones without a coordinate system get the joint's "
-               "segments.")
+               "bones.")
         if self.state.joints:
             p.check("Curves", self.show_curves, lambda on: self.show_curves != on and self._toggle_curves(),
                     "Show curves under the view")
@@ -1531,7 +1602,7 @@ class VisualiserTab(QWidget):
                 "Show these curves")
         p.section("Reference pose")
         if j.reference is None:
-            p.note("The file has no reference pose for this joint, so zero is anatomical (the segments' axes lined "
+            p.note("The file has no reference pose for this joint, so zero is anatomical (the bones' axes lined "
                    "up). Add one in the Model Builder, or zero at a frame below.")
         else:
             what = {"trial": "a neutral trial", "scan": "the scan pose", "scan_space": "the scan pose"}.get(
@@ -1543,7 +1614,8 @@ class VisualiserTab(QWidget):
                 tip="Values at this frame of the trial are subtracted.")
         p.buttons([("Zero at this frame", lambda: self._set_reference(jl, self.scene.frame)),
                    ("Clear", lambda: self._set_reference(jl, None))])
-        self._frame_values(p, self.joint_values(jl))
+        self._frame_values(p, self.joint_values(jl), "Joint values need both bones in this tab, each with its "
+                                                     "tracking attached (right-click a bone → Attach tracking).")
         p.buttons([("Export CSV…", lambda: self.export_joint_csv(jl)), ("Remove", lambda: self.remove_joint(jl))])
 
     def screenshot(self) -> None:

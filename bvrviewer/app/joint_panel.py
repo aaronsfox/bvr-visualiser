@@ -56,10 +56,10 @@ class SegmentMapDialog(QDialog):
 
     def __init__(self, parent, model, models, guess: dict, path: Path):
         super().__init__(parent)
-        self.setWindowTitle("Match the model's segments")
+        self.setWindowTitle("Match the model's bones to this tab")
         v = QVBoxLayout(self)
-        v.addWidget(label(f"{path.name}: pick the tab model for each segment. It must be the same surface file "
-                          "(same model space) the segment was defined on. Segments left out aren't shown, nor are "
+        v.addWidget(label(f"{path.name}: pick which bone in this tab is each of the model's bones. It must be the same surface file "
+                          "(same model space) the bone was defined on. Bones left out aren't shown, nor are "
                           "joints that use them.", wrap=True))
         form = QFormLayout()
         self.combos = {}
@@ -70,7 +70,7 @@ class SegmentMapDialog(QDialog):
                 cb.addItem(m.name, m.name)
             if seg.acs is None:
                 cb.setEnabled(False)
-                cb.setToolTip("This segment has no axes in the model yet.")
+                cb.setToolTip("This bone has no axes in the model yet.")
             elif seg.name in guess:
                 cb.setCurrentIndex(max(cb.findData(guess[seg.name]), 0))
             surf = f"  ({Path(seg.surface.path).name})" if seg.surface is not None else ""
@@ -88,10 +88,10 @@ class SegmentMapDialog(QDialog):
     def _ok(self) -> None:
         names = [n for n in self.values().values()]
         if len(set(names)) < len(names):
-            self.warn.setText("Choose a different model for each segment.")
+            self.warn.setText("Choose a different bone in this tab for each.")
             return
         if not names:
-            self.warn.setText("Match at least one segment.")
+            self.warn.setText("Match at least one bone.")
             return
         self.accept()
 

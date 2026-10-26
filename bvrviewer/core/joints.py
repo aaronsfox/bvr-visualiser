@@ -313,13 +313,13 @@ JOINT_TYPES: dict[str, JointType] = {t.key: t for t in [
               "floating axis between them. Left knees are mirrored so positive values mean the same motion on both "
               "sides. ISB doesn't define the knee; this is the convention most BVR knee studies use.",
               (GROOD, WU2002), "Knee"),
-    JointType("jcs_zxy", "Joint coordinate system (ISB style, any two segments)", ("femur", "tibia"),
+    JointType("jcs_zxy", "Joint coordinate system (ISB style, any two bones)", ("femur", "tibia"),
               ("femur", "tibia"), "jcs_zxy",
-              "Rotation about the proximal segment's Z axis, then the floating axis, then the distal segment's Y axis. "
+              "Rotation about the proximal bone's Z axis, then the floating axis, then the distal bone's Y axis. "
               "No clinical names or side mirroring.", (GROOD,)),
-    JointType("cardan_xyz", "Cardan X-Y-Z (any two segments)", (), (), "cardan_xyz",
+    JointType("cardan_xyz", "Cardan X-Y-Z (any two bones)", (), (), "cardan_xyz",
               "Rotations of the distal axes relative to the proximal axes as an X-Y-Z Cardan sequence. Works for any "
-              "segments, including inertial axes; the angles have no clinical names."),
+              "bones, including inertial axes; the angles have no clinical names."),
 ]}
 
 PRESETS = {
@@ -469,7 +469,7 @@ class KinematicModel:
         for s in self.segments:
             if s.name == name:
                 return s
-        raise JointModelError(f"No segment named {name!r}.")
+        raise JointModelError(f"No bone named {name!r}.")
 
     def joint(self, name: str) -> Joint:
         for j in self.joints:
@@ -516,11 +516,11 @@ class KinematicModel:
         jt = JOINT_TYPES[type_key]
         p, d = self.segment(proximal), self.segment(distal)
         if p is d:
-            raise JointModelError("A joint needs two different segments.")
+            raise JointModelError("A joint needs two different bones.")
         if jt.proximal_types and p.type not in jt.proximal_types:
-            raise JointModelError(f"{jt.title} needs a {' or '.join(jt.proximal_types)} as the proximal segment.")
+            raise JointModelError(f"{jt.title} needs a {' or '.join(jt.proximal_types)} as the proximal bone.")
         if jt.distal_types and d.type not in jt.distal_types:
-            raise JointModelError(f"{jt.title} needs a {' or '.join(jt.distal_types)} as the distal segment.")
+            raise JointModelError(f"{jt.title} needs a {' or '.join(jt.distal_types)} as the distal bone.")
         j = Joint(self._unique(name or jt.default_name, {x.name for x in self.joints}), type_key, p.name, d.name)
         self.joints.append(j)
         return j
@@ -567,7 +567,7 @@ class KinematicModel:
 
     def set_axes_source(self, seg: str, source: str) -> None:
         if source not in dict(self.axes_sources(seg)):
-            raise JointModelError(f"{source!r} isn't a way to make axes for this segment.")
+            raise JointModelError(f"{source!r} isn't a way to make axes for this bone.")
         self.segment(seg).axes_source = source
 
     def _auto_result(self, s: Segment, source: str, options: dict):
@@ -649,7 +649,7 @@ class KinematicModel:
     def _joint_acs(self, j: Joint, normalise: bool):
         A, B = self.segment(j.proximal).acs, self.segment(j.distal).acs
         if A is None or B is None:
-            raise JointModelError(f"{j.name}: both segments need complete axes first.")
+            raise JointModelError(f"{j.name}: both bones need complete axes first.")
         B = B.copy()
         if normalise and j.reference is not None and j.reference.mode == "realign":
             Q0 = np.linalg.inv(A) @ j.reference.G0 @ B          # distal ACS in proximal ACS at the reference
@@ -710,7 +710,7 @@ class KinematicModel:
             tr[f] = R0.T @ (W[f, :3, 3] - o0)
         names, short, tn, ts = SEGMENT_NAMES[s.stype.anatomical and s.axes_source != "inertial"]
         return {"angles": ang, "translations": tr, "names": names, "short": short, "t_names": tn, "t_short": ts,
-                "title": "Segment rotation about its own axes (Z-X-Y)"}
+                "title": "Bone rotation about its own axes (Z-X-Y)"}
 
     def compare_methods(self, joint: str, prox_pose: np.ndarray, dist_pose: np.ndarray) -> list[dict]:
         """Joint angles at one pose for every combination of the two segments' axis sources (no reference)."""
@@ -782,7 +782,7 @@ class KinematicModel:
         m = cls(name=d.get("name", "Model"))
         for sd in d.get("segments", []):
             if sd.get("type") not in SEGMENT_TYPES:
-                raise JointModelError(f"Unknown segment type {sd.get('type')!r}.")
+                raise JointModelError(f"Unknown bone type {sd.get('type')!r}.")
             s = Segment(name=sd["name"], type=sd["type"], side=sd.get("side", "right"),
                         surface=BoneModel.from_dict(sd["surface"]) if sd.get("surface") else None,
                         landmarks=sd.get("landmarks") or {}, auto_options=dict(sd.get("auto_options") or {}),

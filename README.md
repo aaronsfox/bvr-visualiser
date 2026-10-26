@@ -2,7 +2,7 @@
 
 A desktop app for watching bone motion tracked in **Autoscoper / SlicerAutoscoperM** from biplanar videoradiography.
 
-Each tab is one trial. In a tab you add bone models, attach each model's own tracking file, and press play. Radiographs are optional: add the X-ray cameras' calibration files and images to see the radiographs behind the bones in 3D, or to look "through" an X-ray camera with the bones overlaid on the image.
+Each tab is one trial. In a tab you add bones (surface files), attach each bone's own tracking file, and press play. Bones can also come from a model built in the Model Builder, with their coordinate systems and joints. Radiographs are optional: add the X-ray cameras' calibration files and images to see the radiographs behind the bones in 3D, or to look "through" an X-ray camera with the bones overlaid on the image.
 
 ## Running it
 
@@ -35,22 +35,23 @@ The app opens on a **Start** page with one box per tool. Click a box to open tha
 | Tool | Status | What it's for |
 |---|---|---|
 | **Visualiser** | available | Watch tracked bone motion in 3D, with radiographs if you have them, and joint angle curves from a joint model (below). |
-| **Model Builder** | available (knee first) | Define axes on bone surfaces (segments), optionally joints between them and reference poses, and save a model for the other tools. |
-| **Reliability Analysis** | coming soon | Load models and repeated tracking of the same trial, by the same tester or different testers, and get accuracy and reliability metrics across them. |
-| **Validity Analysis** | coming soon | Load models, criterion tracking data and testers' tracking, and get accuracy against the criterion. |
+| **Model Builder** | available (knee first) | Define axes on bone surfaces, optionally joints between them and reference poses, and save a model for the other tools. |
+| **Reliability Analysis** | coming soon | Load bones and repeated tracking of the same trial, by the same tester or different testers, and get accuracy and reliability metrics across them. |
+| **Validity Analysis** | coming soon | Load bones, criterion tracking data and testers' tracking, and get accuracy against the criterion. |
 
 Adding a tool: describe it in `bvrviewer/app/tools.py` (it then appears on the Start page as "Coming soon"), write its tab widget, and register it in `MainWindow.TAB_CLASSES`.
 
 ## Using the Visualiser
 
-The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** lists what's in the tab under **Models**, **X-ray cameras** and **Scene**. Below it, **Properties** shows the settings of whatever is selected there. The 3D view and timeline are on the right. **Right-click** any level or item in the navigator for its actions.
+The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** lists what's in the tab under **Bones**, **X-ray cameras**, **Joints** and **Scene**. Below it, **Properties** shows the settings of whatever is selected there. The 3D view and timeline are on the right. **Right-click** any level or item in the navigator for its actions.
 
 1. **Open a Visualiser tab** from the Start page (or File → New Visualiser tab, Ctrl+T). Each tab starts empty.
-2. **Add a model:** right-click **Models → Add model…** (or File → Add model). STL, OBJ, PLY, VTK or TIF; you can select several at once. Each model is listed by name, which starts as its file name.
-   - **TIF partial volumes** ask for the voxel size, which TIFs don't store. Type it in, or read it from the trial's `.cfg`. The surface is built from the edge of the masked volume, which reproduces SlicerAutoscoperM's `AUT_*.stl` meshes. TIF models can also be shown as a volume rendering (Display as: Volume).
+2. **Add a bone:** right-click **Bones → Add bone…** (or File → Add bone). STL, OBJ, PLY, VTK or TIF; you can select several at once. Each bone is listed by name, which starts as its file name.
+   - Or **load a model** built in the Model Builder: right-click **Bones → Load model…** (or File → Load model, Ctrl+M). This brings in all of the model's bones (from the surface files it was built on; bones already in the tab with the same surface file are reused), each with its coordinate system, and all its joints. Then attach each bone's tracking for the trial.
+   - **TIF partial volumes** ask for the voxel size, which TIFs don't store. Type it in, or read it from the trial's `.cfg`. The surface is built from the edge of the masked volume, which reproduces SlicerAutoscoperM's `AUT_*.stl` meshes. TIF bones can also be shown as a volume rendering (Display as: Volume).
    - **STL surfaces** are assumed to be in Autoscoper space, like SlicerAutoscoperM's `AUT_*.stl`. If a surface is in CT space instead (e.g. SlicerAutoscoperM's `Models/rad.stl`), right-click it and choose **Apply .tfm transform…** with its `*-DICOM2AUT.tfm`.
-3. **Attach tracking:** right-click the model → **Attach tracking…**. The tracking file then shows under the model. The format is detected: matrix or x y z yaw pitch roll, row or column order, comma or space, and several bones in one file (you'll be asked which). Untracked frames (`NaN`) show in orange on the timeline. If something looks wrong, right-click → **Tracking format…** to change the units (mm/cm, degrees/radians) or the order.
-4. **Change how it looks:** select the model and use **Properties**: name, colour, opacity, visible, and surface or volume display. The tick box beside each model in the navigator shows or hides it, and F2 (or clicking a selected name) renames it.
+3. **Attach tracking:** right-click the bone → **Attach tracking…**. The tracking file then shows under the bone. The format is detected: matrix or x y z yaw pitch roll, row or column order, comma or space, and several bones in one file (you'll be asked which). Untracked frames (`NaN`) show in orange on the timeline. If something looks wrong, right-click → **Tracking format…** to change the units (mm/cm, degrees/radians) or the order.
+4. **Change how it looks:** select the bone and use **Properties**: name, colour, opacity, visible, and surface or volume display. The tick box beside each bone in the navigator shows or hides it, and F2 (or clicking a selected name) renames it.
 5. **Look around:** drag to rotate, Shift-drag to pan, scroll to zoom, right-click a bone in the 3D view to select it. Use the Free 3D / XY / YZ / XZ buttons, and **Flip** to look from the other side.
 6. **Play** with Space, step with ← →. Speed and Loop are on the timeline.
 
@@ -58,30 +59,32 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 
 | Select… | Properties | Right-click |
 |---|---|---|
-| **Models** | count, frames | Add model, Show all, Hide all |
-| a **model** | name, colour, opacity, visible, display; hold this bone still; model file details | attach/replace/detach tracking, tracking format, add/remove coordinate system, hold still, show/hide, rename, replace file, .tfm or voxel size, remove |
+| **Bones** | count, frames | Add bone, Load model, Show all, Hide all |
+| a **bone** | name, colour, opacity, visible, display; hold this bone still; surface file details | attach/replace/detach tracking, tracking format, add/remove coordinate system, hold still, show/hide, rename, replace surface file, .tfm or voxel size, remove |
 | its **tracking** | file, frames, untracked frames, detected format | attach/replace, format, detach |
 | **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
 | a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); which image is frame 1; files | view through it, show/hide, rename, change files, remove |
-| its **coordinate system** | file and segment, axes and curves on/off, motion relative to, zero at a frame, values at this frame | add/replace, show curves, show/hide axes, zero, export CSV, remove |
+| its **coordinate system** | model file and the model's bone, axes and curves on/off, motion relative to, zero at a frame, values at this frame | add/replace, show curves, show/hide axes, zero, export CSV, remove |
 | **Joints** | show curves | Add joint, show/hide curves |
-| a **joint** | file, which tab models are its bones, axes and curves on/off, use the reference pose, zero at a frame, values at this frame | show curves, show/hide axes, reference pose, zero, export CSV, rename, change bones, remove |
+| a **joint** | model file, which bones in the tab it joins, axes and curves on/off, use the reference pose, zero at a frame, values at this frame | show curves, show/hide axes, reference pose, zero, export CSV, rename, change bones, remove |
 | **Scene** | axes, grid, background, motion trail, untracked frames | fit bones in view |
 
-- **Hold this bone still** (model properties or right-click): view the other bones' motion relative to it.
+- **Hold this bone still** (bone properties or right-click): view the other bones' motion relative to it.
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4).
 - **Save tab as session** (Ctrl+S) saves file paths and every setting to a `.json`. **Open saved session** restores it.
 
 ### Coordinate systems and joints (optional)
 
-Both come from a file saved in the **Model Builder** (next section): one `.bvrmodel.json` holds every segment's axes and every joint.
+Both come from a **model** built in the **Model Builder** (next section): one `.bvrmodel.json` holds all of a model's bones, each with its coordinate system, and its joints. Build one model with every bone and joint you need; **Load model…** (above) then brings it all in at once. They can also be added piece by piece:
 
-- **Coordinate system on a model:** right-click the model → **Add coordinate system…**, pick the file, and the segment that is this bone is chosen for you (by surface file) or asked for. It's listed under the model, next to its tracking. Its axes are drawn on the bone (tick box), and selecting it plots the bone's motion about its own axes (rotation as a Z-X-Y sequence, and the origin's movement), relative to its first tracked frame, a chosen frame, or the lab (tracking) axes.
-- **Joints:** right-click **Joints → Add joint…** and pick the file. Its joints are matched to the tab's models (models already using that file's segments first, then by surface file; you're asked if that's ambiguous, and can change it later with **Change bones…**). Models with no coordinate system get the joint's segments. A joint gives its angles and translations, anatomical or relative to the file's **reference pose** if it has one (**Use it** in Properties).
+- **Coordinate system on a bone:** right-click the bone → **Add coordinate system…** and pick the model; the model's bone that matches (by surface file) is chosen, or you're asked. It's listed under the bone, next to its tracking. Its axes are drawn on the bone (tick box), and selecting it plots the bone's motion about its own axes (rotation as a Z-X-Y sequence, and the origin's movement), relative to its first tracked frame, a chosen frame, or the lab (tracking) axes.
+- **Joints:** right-click **Joints → Add joint…** and pick the model. Its joints are matched to the tab's bones (bones already using that model first, then by surface file; you're asked if that's ambiguous, and can change it later with **Change bones…**). Bones without a coordinate system get the model's. A joint gives its angles and translations, anatomical or relative to the model's **reference pose** if it has one (**Use it** in Properties). Joint values need both bones tracked.
 
 The selected coordinate system's or joint's curves are plotted under the 3D view with a cursor at the current frame (click a plot to jump there). **Zero at this frame** also subtracts the values at a frame of this trial. **Export CSV** writes every frame. All of this is saved with the session.
 
-The axes only fit a model built from the **same surface file in the same model space** as the segment, so use the same STL/TIF (and the same voxel size or .tfm) in both tabs.
+The axes only fit a bone loaded from the **same surface file in the same model space** as in the model, so use the same STL/TIF (and the same voxel size or .tfm) in both tabs.
+
+**Terms.** A **bone** is one surface (plus its tracking and, optionally, its coordinate system). A **model** is what the Model Builder saves: bones with coordinate systems, joints between them, and reference poses.
 
 ### Radiographs (optional)
 
@@ -99,34 +102,34 @@ Radiographs are decoded in the background as soon as a camera is added, so playb
 
 ## The Model Builder
 
-A model is built in three steps; the navigator is laid out the same way (**1 Segments**, **2 Joints**, **3 Reference pose** under each joint), with **Properties** for the selected item. Right-click for actions. **Start a knee** (on the model's properties) adds a femur, a tibia and a Grood & Suntay knee in one go.
+A model is built in three steps; the navigator is laid out the same way (**1 Bones**, **2 Joints**, **3 Reference pose** under each joint), with **Properties** for the selected item. Right-click for actions. **Start a knee** (on the model's properties) adds a femur, a tibia and a Grood & Suntay knee in one go.
 
-**1. Segments: axes on each bone.** Right-click **Segments → Add segment** and choose its type: **Femur**, **Tibia** or **Other bone**. The type decides how its axes can be made.
+**1. Bones: axes on each bone.** Right-click **Bones → Add bone** and choose its type: **Femur**, **Tibia** or **Other bone**. The type decides how its axes can be made.
 - Load its surface (right-click → **Load surface…**): the same file, in the same model space, that you track with. Set its **side**.
-- **Axes from**: an automatic method fitted to the surface (the default; see below), or **landmarks** placed by hand: select a landmark under the segment, then **right-click the surface** (point), or right-click and drag to paint a region (its centre, or a sphere fitted to it). Left-drag still rotates.
+- **Axes from**: an automatic method fitted to the surface (the default; see below), or **landmarks** placed by hand: select a landmark under the bone, then **right-click the surface** (point), or right-click and drag to paint a region (its centre, or a sphere fitted to it). Left-drag still rotates.
 - Femur and tibia axes use ISB names: X anterior, Y superior, Z right (Wu et al. 2002). "Other bone" uses its principal axes of inertia (axis 1 = long axis), with no anatomical names.
 
-A segment's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, segments already give each bone's motion about its own axes in the Visualiser (right-click a model → **Add coordinate system…**).
+A bone's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, bones already give each bone's motion about its own axes in the Visualiser (right-click a bone → **Add coordinate system…**, or **Load model…**).
 
-**2. Joints (optional).** Right-click **Joints → Add joint…**, choose a definition and its proximal and distal segments:
+**2. Joints (optional).** Right-click **Joints → Add joint…**, choose a definition and its proximal and distal bones:
 - **Knee (tibiofemoral): Grood & Suntay**, femur → tibia. ISB doesn't define the knee; this is the convention most BVR knee studies use. Left knees are mirrored, so positive values mean the same motion on both sides: flexion, adduction (varus), internal rotation; lateral, anterior and proximal translation of the tibia.
-- **Joint coordinate system (ISB style)** between any two femur/tibia-type segments (proximal Z, floating axis, distal Y), without clinical names.
-- **Cardan X-Y-Z** between any two segments, e.g. two carpals with inertial axes.
+- **Joint coordinate system (ISB style)** between any two femur/tibia-type bones (proximal Z, floating axis, distal Y), without clinical names.
+- **Cardan X-Y-Z** between any two bones, e.g. two carpals with inertial axes.
 
-With no reference pose, a joint's zero is **anatomical**: all angles are 0 when the two segments' axes line up. No neutral pose is needed for that, so the overlapping model spaces you see when surfaces are loaded don't matter. Tracking places each bone at every frame, and the angles come from the axes' relative orientation.
+With no reference pose, a joint's zero is **anatomical**: all angles are 0 when the two bones' axes line up. No neutral pose is needed for that, so the overlapping model spaces you see when surfaces are loaded don't matter. Tracking places each bone at every frame, and the angles come from the axes' relative orientation.
 
 **3. Reference pose (optional, per joint).** Select **Reference pose** under the joint, then:
-- **From a neutral trial…**: the .tra files of a static/neutral trial for the two bones (the segments' preview tracking is offered), averaged over every frame both are tracked, or over a range of frames.
-- **From the scan pose…**: where the bones were in the CT/MRI. For SlicerAutoscoperM models, pick each bone's `*-DICOM2AUT.tfm` (found automatically when it sits in the usual `Transforms` folder). If both surfaces are already in the scan's space, choose that option instead.
+- **From a neutral trial…**: the .tra files of a static/neutral trial for the two bones (the bones' preview tracking is offered), averaged over every frame both are tracked, or over a range of frames.
+- **From the scan pose…**: where the bones were in the CT/MRI. For SlicerAutoscoperM surfaces, pick each bone's `*-DICOM2AUT.tfm` (found automatically when it sits in the usual `Transforms` folder). If both surfaces are already in the scan's space, choose that option instead.
 - **Normalise by**: *subtract the reference values* (everything is 0 in the reference pose), or *realign the distal axes to the proximal axes in the reference pose* (rotations are exactly 0 there; translations are subtracted).
 
-The reference is stored as the two bones' relative pose, so it stays valid if a segment's axes are changed later. The view shows the joint in its reference pose, and Properties lists the anatomical values that are being removed.
+The reference is stored as the two bones' relative pose, so it stays valid if a bone's axes are changed later. The view shows the joint in its reference pose, and Properties lists the anatomical values that are being removed.
 
-**Preview and checks.** Attach a tracking file to a segment (right-click → **Preview tracking**) to see joints in a tracked pose with their values, anatomical and relative to the reference. **Compare methods** lists the joint's anatomical angles for every combination of the segments' axis methods. **Save model…** writes a `.bvrmodel.json`: segments (surface, axes method, landmarks, axes), joints and reference poses. Open it again here to edit it. In a Visualiser tab, give models their coordinate systems from it (right-click a model) and add its joints (right-click Joints). Version-1 files (one template) are converted on opening.
+**Preview and checks.** Attach a tracking file to a bone (right-click → **Preview tracking**) to see joints in a tracked pose with their values, anatomical and relative to the reference. **Compare methods** lists the joint's anatomical angles for every combination of the bones' axis methods. **Save model…** writes a `.bvrmodel.json`: bones (surface, axes method, landmarks, axes), joints and reference poses. Open it again here to edit it. In a Visualiser tab, **Load model…** brings in its bones, coordinate systems and joints together. Version-1 files (one template) are converted on opening.
 
 ### Automatic axes (no landmarks)
 
-Each segment's axes can come from an automatic method that fits shapes to the bone surface **or** from landmarks you place. Select the segment and choose **Axes from** in Properties (or right-click it). For the knee:
+Each bone's axes can come from an automatic method that fits shapes to the bone surface **or** from landmarks you place. Select the bone and choose **Axes from** in Properties (or right-click it). For the knee:
 
 | Bone | Method | What it fits | After |
 |---|---|---|---|
@@ -140,11 +143,11 @@ In every method Y is the **shaft line** (a line through the centres of shaft cro
 
 These are our own implementations written from the published descriptions (Modenese & Renault 2021 compared these algorithm families in STAPLE); STAPLE's code is not used.
 
-**Compare methods** (select the joint, with preview tracking on both segments) lists the joint angles at the preview frame for every combination of the bones' methods, including landmarks if placed. Different definitions give different offsets: on the knee sample, the femur and tibia method choices each shift flexion by about 8–9°, mainly because the landmark long axis runs from the joint centre to the shaft centre while the automatic methods use the shaft line itself. Report the method you used, and use a reference pose when comparing across definitions.
+**Compare methods** (select the joint, with preview tracking on both bones) lists the joint angles at the preview frame for every combination of the bones' methods, including landmarks if placed. Different definitions give different offsets: on the knee sample, the femur and tibia method choices each shift flexion by about 8–9°, mainly because the landmark long axis runs from the joint centre to the shaft centre while the automatic methods use the shaft line itself. Report the method you used, and use a reference pose when comparing across definitions.
 
 Partial bones: Autoscoper surfaces often stop part way up the femur and down the tibia. Where the landmark definition needs the hip centre or the malleoli, paint a band around the shaft end instead — the shaft centre gives a long axis that follows the bone. Report that substitution with your results.
 
-**Planned:** more segment and joint types (ISB ankle/hip, multi-segment foot models), automatic foot and ankle axes (as in AAFACT, Peterson et al. 2023), and your own joint definitions.
+**Planned:** more bone and joint types (ISB ankle/hip, multi-segment foot models), automatic foot and ankle axes (as in AAFACT, Peterson et al. 2023), and your own joint definitions.
 
 ## How the files are interpreted
 
@@ -165,7 +168,7 @@ BVR_SAMPLE_DATA=/path/to/sample_data pytest   # plus the real-data tests
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.
 
-`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_model_builder.py` builds a knee model (segments with automatic and landmark axes, the joint, the method comparison and reference poses) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
+`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
 
 ## Building the app
 

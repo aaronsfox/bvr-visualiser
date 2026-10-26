@@ -91,8 +91,8 @@ class AddJointDialog(QDialog):
         self.setWindowTitle("Add a joint")
         self.model = model
         v = QVBoxLayout(self)
-        v.addWidget(label("A joint uses the axes already defined on its two segments. Its angles are the distal "
-                          "segment's axes relative to the proximal segment's, by the definition chosen here."))
+        v.addWidget(label("A joint uses the axes already defined on its two bones. Its angles are the distal "
+                          "bone's axes relative to the proximal bone's, by the definition chosen here."))
         form = QFormLayout()
         self.type = QComboBox()
         for k, t in J.JOINT_TYPES.items():
@@ -104,8 +104,8 @@ class AddJointDialog(QDialog):
         self.name = QLineEdit()
         self.summary = label("", "Muted")
         form.addRow("Definition", self.type)
-        form.addRow("Proximal segment", self.prox)
-        form.addRow("Distal segment", self.dist)
+        form.addRow("Proximal bone", self.prox)
+        form.addRow("Distal bone", self.dist)
         form.addRow("Name", self.name)
         v.addLayout(form)
         v.addWidget(self.summary)
@@ -137,7 +137,7 @@ class AddJointDialog(QDialog):
 
     def _ok(self) -> None:
         if self.prox.currentData() == self.dist.currentData():
-            self.warn.setText("Choose two different segments.")
+            self.warn.setText("Choose two different bones.")
             return
         self.accept()
 
@@ -178,7 +178,7 @@ class ReferenceDialog(QDialog):
         v = QVBoxLayout(self)
         v.addWidget(label("The joint's values in this pose are taken as zero. Use a neutral or static trial "
                           "tracked like any other, or the pose the bones had in the scan. Without a reference, "
-                          "zero is anatomical (the two segments' axes lined up)."))
+                          "zero is anatomical (the two bones' axes lined up)."))
         self.group = QButtonGroup(self)
         self.r_trial = QRadioButton("Neutral / static trial (tracking files)")
         self.r_scan = QRadioButton("Pose in the scan (each bone's *-DICOM2AUT.tfm)")
@@ -411,10 +411,10 @@ class ModelBuilderTab(QWidget):
         current = None
         top = self._item(m.name, "model", bold=True)
         self.tree.addTopLevelItem(top)
-        segs = self._item("1  Segments", "segments", bold=True, tip="Right-click to add a segment")
+        segs = self._item("1  Bones", "segments", bold=True, tip="Right-click to add a bone")
         self.tree.addTopLevelItem(segs)
         if not m.segments:
-            self._placeholder(segs, "Right-click to add a segment (femur, tibia, other bone)")
+            self._placeholder(segs, "Right-click to add a bone (femur, tibia, other bone)")
         for s in m.segments:
             auto = s.axes_source != "landmarks"
             si = self._item(self._segment_text(s), "segment", s,
@@ -440,7 +440,7 @@ class ModelBuilderTab(QWidget):
         joints = self._item("2  Joints (optional)", "joints", bold=True, tip="Right-click to add a joint")
         self.tree.addTopLevelItem(joints)
         if not m.joints:
-            self._placeholder(joints, "Right-click to add a joint between two segments")
+            self._placeholder(joints, "Right-click to add a joint between two bones")
         for j in m.joints:
             ji = self._item(self._joint_text(j), "joint", j, tip=j.jtype.title)
             joints.addChild(ji)
@@ -498,7 +498,7 @@ class ModelBuilderTab(QWidget):
             return a
 
         if kind in ("model", "segments"):
-            sub = menu.addMenu("Add segment")
+            sub = menu.addMenu("Add bone")
             for k, t in J.SEGMENT_TYPES.items():
                 add(t.title, lambda k=k: self.add_segment(k), parent=sub)
             for k, p in J.PRESETS.items():
@@ -519,7 +519,7 @@ class ModelBuilderTab(QWidget):
                     lambda src=src: self.set_axes_source(s, src), checked=s.axes_source == src)
             menu.addSeparator()
             add("Clear all landmarks", lambda: self.clear_landmarks(s), enabled=bool(s.landmarks))
-            add("Remove segment", lambda: self.remove_segment(s))
+            add("Remove bone", lambda: self.remove_segment(s))
         elif kind == "landmark":
             add("Clear this landmark", lambda: self.clear_landmark(obj, key),
                 enabled=self.model.landmark(obj.name, key) is not None)
@@ -558,16 +558,16 @@ class ModelBuilderTab(QWidget):
         p.clear(m.name)
         p.line("Name", m.name, self._rename)
         p.section("Steps")
-        p.note("1  Segments: load each bone's surface and define its axes (landmarks, or an automatic method). "
+        p.note("1  Bones: load each bone's surface and define its axes (landmarks, or an automatic method). "
                "On its own this gives each bone's motion about its own axes in the Visualiser.")
-        p.note("2  Joints (optional): pair two segments with a published joint definition, e.g. Grood & Suntay "
+        p.note("2  Joints (optional): pair two bones with a published joint definition, e.g. Grood & Suntay "
                "for femur → tibia.")
         p.note("3  Reference pose (optional, per joint): a neutral trial or the scan pose whose joint values are "
-               "taken as zero. Without one, zero is anatomical (the segments' axes lined up).")
-        p.buttons([("Add segment…", self._add_segment_menu), ("Add joint…", self.add_joint)])
+               "taken as zero. Without one, zero is anatomical (the bones' axes lined up).")
+        p.buttons([("Add bone…", self._add_segment_menu), ("Add joint…", self.add_joint)])
         p.buttons([("Start a knee (femur + tibia + joint)", lambda: self.add_preset("knee"))])
         p.section("Contents")
-        p.value("Segments", ", ".join(s.name for s in m.segments) or "none")
+        p.value("Bones", ", ".join(s.name for s in m.segments) or "none")
         p.value("Joints", ", ".join(j.name for j in m.joints) or "none")
         p.section("File")
         p.value("Saved as", m.path.name if m.path else "Not saved yet", tip=str(m.path) if m.path else None)
@@ -575,8 +575,8 @@ class ModelBuilderTab(QWidget):
 
     def _props_segments(self) -> None:
         p = self.props
-        p.clear("Segments")
-        p.note("A segment is one bone surface with its own axes. Choose its type: the type decides which "
+        p.clear("Bones")
+        p.note("Each bone is one surface with its own axes. Choose its type: the type decides which "
                "landmarks and automatic methods it can use.")
         for k, t in J.SEGMENT_TYPES.items():
             p.buttons([(f"Add {t.title.lower()}", lambda k=k: self.add_segment(k))])
@@ -584,7 +584,7 @@ class ModelBuilderTab(QWidget):
     def _props_joints(self) -> None:
         p = self.props
         p.clear("Joints")
-        p.note("Joints are optional. Each pairs two existing segments with a definition:")
+        p.note("Joints are optional. Each pairs two existing bones with a definition:")
         for t in J.JOINT_TYPES.values():
             p.note(f"• {t.title}")
         p.buttons([("Add joint…", self.add_joint)])
@@ -653,7 +653,7 @@ class ModelBuilderTab(QWidget):
                 tip="Lets joints be previewed in a tracked pose, and offered as the reference trial.")
         p.buttons([("Attach .tra…", lambda: self.attach_preview(s))])
         p.section("")
-        p.buttons([("Remove segment", lambda: self.remove_segment(s))])
+        p.buttons([("Remove bone", lambda: self.remove_segment(s))])
 
     def _props_landmark(self, s: J.Segment, key: str) -> None:
         p = self.props
@@ -695,7 +695,7 @@ class ModelBuilderTab(QWidget):
         p.note(j.jtype.summary)
         for ref in j.jtype.references:
             p.note(ref)
-        p.section("Segments")
+        p.section("Bones")
         p.combo("Proximal", [(s.name, s.name) for s in m.candidates(j.type, "proximal")], j.proximal,
                 lambda n: self._set_joint_segment(j, "proximal", n))
         p.combo("Distal", [(s.name, s.name) for s in m.candidates(j.type, "distal")], j.distal,
@@ -706,7 +706,7 @@ class ModelBuilderTab(QWidget):
         p.section("Preview")
         k = self._preview_kinematics(j)
         if k is None:
-            p.note("Attach preview tracking to both segments to see the joint in a tracked pose.")
+            p.note("Attach preview tracking to both bones to see the joint in a tracked pose.")
         else:
             f, raw, norm = k
             p.value("Frame", str(f + 1))
@@ -724,7 +724,7 @@ class ModelBuilderTab(QWidget):
             p.section("Compare axis methods")
             cmp = self._compare if self._compare and self._compare[0] is j else None
             if cmp is None:
-                p.note("Anatomical joint angles at the preview frame for every combination of the segments' axis "
+                p.note("Anatomical joint angles at the preview frame for every combination of the bones' axis "
                        "methods (landmarks, if placed, and each automatic method).")
             else:
                 p.note(f"Frame {cmp[1] + 1}. " + " / ".join(conv["short"]) + " (°). ▸ marks the methods in use.")
@@ -752,9 +752,9 @@ class ModelBuilderTab(QWidget):
         p.clear(f"{j.name}: reference pose")
         p.note("Optional. The joint's values in this pose are taken as zero, e.g. a standing/neutral trial, or the "
                "pose the bones had in the scan. It's stored as the two bones' relative pose, so it stays valid if "
-               "either segment's axes are changed later.")
+               "either bone's axes are changed later.")
         if r is None:
-            p.value("Reference", "None: zero is anatomical (the segments' axes lined up)")
+            p.value("Reference", "None: zero is anatomical (the bones' axes lined up)")
         else:
             src = r.source
             kind = src.get("kind")
@@ -829,7 +829,7 @@ class ModelBuilderTab(QWidget):
     def remove_segment(self, s: J.Segment) -> None:
         used = [j.name for j in self.model.joints if s.name in (j.proximal, j.distal)]
         msg = f"Remove {s.name}?" + (f" Its joint(s) {', '.join(used)} will be removed too." if used else "")
-        if QMessageBox.question(self, "Remove segment", msg) != QMessageBox.Yes:
+        if QMessageBox.question(self, "Remove bone", msg) != QMessageBox.Yes:
             return
         self.model.remove_segment(s.name)
         self.sel = ("segments", None, None)
@@ -881,7 +881,7 @@ class ModelBuilderTab(QWidget):
         if proximal is None or distal is None:
             dlg = AddJointDialog(self, self.model, type_key)
             if dlg.type.count() == 0:
-                QMessageBox.information(self, "Add a joint", "Add at least two segments first.")
+                QMessageBox.information(self, "Add a joint", "Add at least two bones first.")
                 return None
             if dlg.exec() != QDialog.Accepted:
                 return None
@@ -898,7 +898,7 @@ class ModelBuilderTab(QWidget):
     def _set_joint_segment(self, j: J.Joint, end: str, name: str) -> None:
         other = j.distal if end == "proximal" else j.proximal
         if name == other:
-            QMessageBox.warning(self, "Joint segments", "A joint needs two different segments.")
+            QMessageBox.warning(self, "Joint bones", "A joint needs two different bones.")
             self.show_properties()
             return
         setattr(j, end, name)
@@ -933,8 +933,8 @@ class ModelBuilderTab(QWidget):
     def compare_methods(self, j: J.Joint) -> list | None:
         pp = self._preview_poses([self.model.segment(j.proximal), self.model.segment(j.distal)])
         if pp is None:
-            QMessageBox.information(self, "Compare methods", "Attach a preview tracking file to both segments first "
-                                    "(right-click each segment → Preview tracking).")
+            QMessageBox.information(self, "Compare methods", "Attach a preview tracking file to both bones first "
+                                    "(right-click each bone → Preview tracking).")
             return None
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -1117,7 +1117,7 @@ class ModelBuilderTab(QWidget):
         if self.sel[0] in ("segment", "landmark") and segs:
             label_ = f"Showing: {segs[0].name} (its own model space)"
         elif many and poses is None:
-            label_ = "Showing: segments side by side (no common pose: attach preview tracking, or set a reference)"
+            label_ = "Showing: bones side by side (no common pose: attach preview tracking, or set a reference)"
         self.showing.setText(label_)
         shown = tuple(id(s) for s in segs) + (poses is not None, self.sel[0] == "reference")
         if self._actors and shown != getattr(self, "_last_shown", None):   # new set of bones: fit them
@@ -1206,14 +1206,14 @@ class ModelBuilderTab(QWidget):
             self.hint.setText("Automatic axes: purple = fitted shape, orange = surface points used, teal = shaft "
                               "centres. X red, Y green, Z blue.")
         elif kind == "segment":
-            self.hint.setText("Select a landmark under this segment in the navigator, then right-click the surface "
+            self.hint.setText("Select a landmark under this bone in the navigator, then right-click the surface "
                               "to place it.")
         elif kind == "reference":
             self.hint.setText("Shown in the reference pose when one is set. Its joint values are taken as zero.")
         elif kind == "joint":
-            self.hint.setText("Both segments' axes are shown. X red (anterior), Y green (superior), Z blue (right).")
+            self.hint.setText("Both bones' axes are shown. X red (anterior), Y green (superior), Z blue (right).")
         else:
-            self.hint.setText("1 Add segments and define their axes · 2 add joints (optional) · 3 set a reference "
+            self.hint.setText("1 Add bones and define their axes · 2 add joints (optional) · 3 set a reference "
                               "pose (optional). Right-click in the navigator for actions.")
 
     # ---- picking and painting (right mouse button; left button still rotates)
