@@ -15,7 +15,7 @@ import pyvista as pv  # noqa: E402
 
 pv.global_theme.allow_empty_mesh = True
 from bvrviewer.app.main_window import MainWindow  # noqa: E402
-from bvrviewer.app.style import QSS  # noqa: E402
+from bvrviewer.app.style import apply_theme  # noqa: E402
 from bvrviewer.core.config import read_cfg  # noqa: E402
 from bvrviewer.core.models import BoneModel  # noqa: E402
 from bvrviewer.core.session import XrayCamera  # noqa: E402
@@ -27,7 +27,7 @@ W = S / "2025-02-19-Wrist"
 A = S / "2025-01-12-Ankle"
 
 app = QApplication(sys.argv)
-app.setStyleSheet(QSS)
+apply_theme(app)
 win = MainWindow()
 win.resize(1500, 920)
 win.show()
@@ -239,6 +239,33 @@ b1 = np.array(t4.scene._bone_actors[id(t4.state.models[0])]["surface"].GetBounds
 b2 = np.array(t4.scene._bone_actors[id(t4.state.models[1])]["surface"].GetBounds())
 print("tfm vs tif bounds max diff (mm):", round(float(np.abs(b1 - b2).max()), 2), flush=True)
 assert np.abs(b1 - b2).max() < 2.0
+
+# ---- grid follows bones when tracking is attached after the model (reported bug)
+t5 = win.new_tab()
+bare = BoneModel(name="mc3", path=W / "Models" / "AUT_Models" / "AUT_mc3.stl", color="#B78AF0")
+t5._build_models([bare])
+wait_threads(t5)
+m5 = t5.state.models[0]
+m5.tracking_path, m5.tracking = W / "Tracking_SAM" / "flx_ext_mc3.tra", load_tracking(W / "Tracking_SAM" / "flx_ext_mc3.tra")
+t5._tracking_changed(m5)
+cube = t5.plotter.renderer.cube_axes_actor
+gb = np.array(cube.GetBounds())
+bb = np.array(t5.scene._bone_actors[id(m5)]["surface"].GetBounds())
+inside = np.all(bb[::2] >= gb[::2] - 1e-6) and np.all(bb[1::2] <= gb[1::2] + 1e-6)
+print("grid contains tracked bone:", bool(inside), flush=True)
+assert inside
+shot("18_grid_after_tracking", t5)
+
+# ---- bottom options panel: radiographs page open, then folded away
+win.tabs.setCurrentIndex(0)
+tab.settings_panel.show_page(1)
+shot("19_options_radiographs", tab)
+tab.settings_panel.show_page(0)
+shot("20_options_scene", tab)
+tab.settings_panel.set_collapsed(True)
+assert not tab.settings_panel.stack.isVisible()
+shot("21_options_folded", tab)
+tab.settings_panel.set_collapsed(False)
 
 # Video export of the wrist tab (no dialogs): reuse the export loop directly
 import imageio.v2 as imageio  # noqa: E402

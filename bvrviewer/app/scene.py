@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pyvista as pv
 
-from ..core.images import adjust
+from ..core.images import adjust_lut
 from ..core.models import BoneModel
 from ..core.session import TabState, XrayCamera
 
@@ -141,21 +141,45 @@ class SceneController:
         faces = [4, 0, 1, 2, 3] if np.dot(normal, cal.source - corners[0]) > 0 else [4, 0, 3, 2, 1]
         quad = pv.PolyData(corners, faces=faces)
         quad.active_texture_coordinates = np.array([[0, 1], [1, 1], [1, 0], [0, 0]], float)
-        plane = self.p.add_mesh(quad, texture=pv.Texture(np.zeros((8, 8, 3), np.uint8)), lighting=False,
-                                pickable=False, reset_camera=False, culling="back")
+        # One grayscale texture per camera, at display size, whose pixels are overwritten each frame
+        # (building a new full-resolution texture every frame was what made playback stall).
+        tex, scalars = self._new_texture(self._display_shape(cam))
+        plane = self.p.add_mesh(quad, texture=tex, lighting=False, pickable=False, reset_camera=False,
+                                culling="back")
         src = self.p.add_mesh(pv.Sphere(radius=8, center=cal.source), color="#F2C48D", pickable=False,
                               reset_camera=False)
         beams_mesh = pv.merge([pv.Line(cal.source, c) for c in corners])
         beams = self.p.add_mesh(beams_mesh, color="#5A6170", line_width=1, pickable=False, reset_camera=False)
-        self._cam_actors[id(cam)] = {"plane": plane, "source": src, "beams": beams, "image": None}
-        self.update_camera_image(cam)
+        self._cam_actors[id(cam)] = {"plane": plane, "source": src, "beams": beams, "image": None,
+                                     "tex": tex, "scalars": scalars}
+        # Start decoding radiographs in the background, from the first frame onwards.
+        cam.images.prefetch(range(cam.first_image, len(cam.images)))
         self.refresh_camera_style()
+        self.update_camera_image(cam)
+
+    @staticmethod
+    def _display_shape(cam: XrayCamera) -> tuple[int, int]:
+        s = cam.images.display_step
+        return -(-cam.images.height // s), -(-cam.images.width // s)
+
+    @staticmethod
+    def _new_texture(shape: tuple[int, int]):
+        tex = pv.Texture(np.zeros(shape, np.uint8))
+        tex.interpolate = True
+        return tex, tex.to_image().active_scalars
 
     def remove_camera(self, cam: XrayCamera) -> None:
+        """Remove a camera's actors (its images stay loaded; see forget_camera)."""
         e = self._cam_actors.pop(id(cam), None)
         if e:
             for k in ("plane", "source", "beams"):
                 self.p.remove_actor(e[k], render=False)
+
+    def forget_camera(self, cam: XrayCamera) -> None:
+        """Remove a camera for good, stopping its background image decoding."""
+        self.remove_camera(cam)
+        if cam.images is not None:
+            cam.images.close()
 
     def reposition_cameras(self) -> None:
         for cam in self.state.cameras:
@@ -163,21 +187,34 @@ class SceneController:
                 self.add_camera(cam)
         self.update_frame(self.frame)
 
+    def _lut(self) -> np.ndarray:
+        st = self.state.settings
+        key = (st.brightness, st.contrast, st.invert)
+        if getattr(self, "_lut_key", None) != key:
+            self._lut_key, self._lut_table = key, adjust_lut(*key)
+        return self._lut_table
+
     def update_camera_image(self, cam: XrayCamera) -> None:
         e = self._cam_actors.get(id(cam))
-        if not e:
-            return
+        if not e or not e["plane"].GetVisibility():
+            return                     # hidden planes aren't updated (or decoded) at all
         i = cam.image_index(self.frame)
         st = self.state.settings
-        if i is None:
-            img = np.zeros((8, 8), np.uint8)
-        else:
-            img = adjust(cam.images.get(i), st.brightness, st.contrast, st.invert)
         key = (i, st.brightness, st.contrast, st.invert)
         if e["image"] == key:
             return
         e["image"] = key
-        e["plane"].texture = pv.Texture(np.ascontiguousarray(np.dstack([img] * 3)))
+        if i is None:
+            pixels = np.zeros(self._display_shape(cam), np.uint8)
+        else:
+            pixels = self._lut()[cam.images.get_display(i)]
+            # keep the background decoder ahead of playback
+            cam.images.prefetch(range(i + 1, i + 40))
+        if pixels.size != e["scalars"].size:          # an image of a different size: new texture
+            e["tex"], e["scalars"] = self._new_texture(pixels.shape)
+            e["plane"].texture = e["tex"]
+        e["scalars"][:] = pixels[::-1].ravel()
+        e["tex"].to_image().Modified()
 
     def refresh_camera_style(self) -> None:
         st = self.state.settings
@@ -219,9 +256,9 @@ class SceneController:
                 a.SetVisibility(m.visible and p is not None and self.frame - k * st.trail_step >= 0)
                 if p is not None:
                     a.user_matrix = p
+        self.refresh_camera_style()
         for cam in self.state.cameras:
             self.update_camera_image(cam)
-        self.refresh_camera_style()
         if self.view_mode.startswith("xray"):
             self._apply_xray_camera(int(self.view_mode.split(":")[1]))
         self.p.render()

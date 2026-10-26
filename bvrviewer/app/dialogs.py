@@ -72,6 +72,8 @@ class VoxelDialog(QDialog):
         self.cfg_msg = label("")
         v.addWidget(self.cfg_msg)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        for btn in bb.buttons():
+            btn.setIcon(QIcon())
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
@@ -127,6 +129,8 @@ class FormatDialog(QDialog):
         form.addRow("Bone in file", self.volume)
         v.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        for btn in bb.buttons():
+            btn.setIcon(QIcon())
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)

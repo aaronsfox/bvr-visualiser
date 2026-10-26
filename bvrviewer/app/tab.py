@@ -20,7 +20,7 @@ from ..core.session import TabState, XrayCamera, load_session, save_session
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
-from .panels import ModelRow, ModelsPanel, SettingsPanel, Timeline, label
+from .panels import ModelRow, ModelsPanel, OptionsPanel, Timeline, label
 from .scene import SceneController
 
 MODEL_FILTER = "Bone models (*.stl *.STL *.tif *.tiff *.TIF *.obj *.ply *.vtk *.vtp);;All files (*)"
@@ -174,16 +174,16 @@ class TrialTab(QWidget):
         cv.addWidget(self.hint)
         split.addWidget(center)
 
-        self._split = split
-        self.settings_panel = self._make_settings_panel()
-        split.addWidget(self.settings_panel)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
-        split.setStretchFactor(2, 0)
-        split.setSizes([380, 820, 340])
+        split.setSizes([380, 1120])
         root.addWidget(split, 1)
         self.timeline = Timeline(self.state.settings)
         root.addWidget(self.timeline)
+        # Options live in a foldable, tabbed panel along the bottom (Scene, Radiographs).
+        self._root = root
+        self.settings_panel = self._make_settings_panel()
+        root.addWidget(self.settings_panel)
 
         self.scene = SceneController(self.plotter, self.state)
         self.plotter.enable_mesh_picking(self._picked, use_actor=True, show=False, show_message=False)
@@ -213,9 +213,8 @@ class TrialTab(QWidget):
         self._negative = False
         self.refresh_all()
 
-    def _make_settings_panel(self) -> SettingsPanel:
-        p = SettingsPanel(self.state.settings)
-        p.setMinimumWidth(340)
+    def _make_settings_panel(self, collapsed: bool = False, page: int = 0) -> OptionsPanel:
+        p = OptionsPanel(self.state.settings, collapsed=collapsed, page=page)
         p.changed.connect(self._settings_changed)
         p.addCamera.connect(self.add_camera)
         p.importCfg.connect(self.import_cfg)
@@ -226,8 +225,9 @@ class TrialTab(QWidget):
     def _rebuild_settings_panel(self) -> None:
         """Recreate the settings panel so it shows settings loaded from a session."""
         old = self.settings_panel
-        self.settings_panel = self._make_settings_panel()
-        self._split.replaceWidget(2, self.settings_panel)
+        self.settings_panel = self._make_settings_panel(old.collapsed, old.stack.currentIndex())
+        self._root.replaceWidget(old, self.settings_panel)
+        old.setParent(None)
         old.deleteLater()
         self.timeline.loop.setChecked(self.state.settings.loop)
         i = self.timeline.speed.findData(self.state.settings.speed)
@@ -490,7 +490,8 @@ class TrialTab(QWidget):
             self.state.settings.hold_still = None
         self.select(self.state.models[-1] if self.state.models else None, refresh=False)
         self.refresh_all()
-        self.scene.update_frame(min(self.scene.frame, self.scene.n_frames - 1))
+        self.scene.frame = min(self.scene.frame, self.scene.n_frames - 1)
+        self.scene.apply_settings()
 
     def hold_still(self, m: BoneModel, on: bool) -> None:
         self.state.settings.hold_still = m.name if on else None
@@ -530,7 +531,8 @@ class TrialTab(QWidget):
             self.scene.reposition_cameras()
         self.select(m, refresh=False)
         self.refresh_all()
-        self.scene.update_frame(min(self.scene.frame, self.scene.n_frames - 1))
+        self.scene.frame = min(self.scene.frame, self.scene.n_frames - 1)
+        self.scene.apply_settings()          # grid and axes now cover where the bones move
         self.scene.zoom_to_bones()
 
     def detach_tracking(self, m: BoneModel) -> None:
@@ -610,13 +612,17 @@ class TrialTab(QWidget):
             self.state.cameras.append(dlg.result_camera)
             self.scene.add_camera(dlg.result_camera)
             self.refresh_all()
+            self.settings_panel.show_page(1)
             self.scene.update_frame(self.scene.frame)
 
     def edit_camera(self, i: int) -> None:
         old = self.state.cameras[i]
         dlg = AddCameraDialog(self, self.scene.n_frames, self._preview_bones(), existing=old)
         if dlg.exec() == QDialog.Accepted and dlg.result_camera:
-            self.scene.remove_camera(old)
+            if dlg.result_camera.images is not old.images:
+                self.scene.forget_camera(old)
+            else:
+                self.scene.remove_camera(old)
             self.state.cameras[i] = dlg.result_camera
             self.scene.add_camera(dlg.result_camera)
             self.refresh_all()
@@ -624,7 +630,7 @@ class TrialTab(QWidget):
 
     def remove_camera(self, i: int) -> None:
         cam = self.state.cameras.pop(i)
-        self.scene.remove_camera(cam)
+        self.scene.forget_camera(cam)
         if self.scene.view_mode.startswith("xray"):
             self.set_view("3d")
         self.refresh_all()
@@ -653,6 +659,8 @@ class TrialTab(QWidget):
             self.scene.add_camera(cam)
         self.refresh_all()
         self.scene.update_frame(self.scene.frame)
+        if cams:
+            self.settings_panel.show_page(1)
         msg = f"Added {len(cams)} camera(s) from {Path(path).name}."
         counts = {len(c.images) for c in cams}
         if cams and self.state.models and any(n != self.scene.n_frames for n in counts):
@@ -746,4 +754,7 @@ class TrialTab(QWidget):
 
     def close_tab(self) -> None:
         self.timer.stop()
+        for cam in self.state.cameras:
+            if cam.images is not None:
+                cam.images.close()
         self.plotter.close()

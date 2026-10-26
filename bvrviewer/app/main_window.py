@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QInputDialog, QMainWindow, QMessageBox, QPushButton, QTabWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout, QInputDialog, QMainWindow, QMessageBox, QPushButton, QTabWidget, QWidget,
+)
 
 from .. import __version__
 from .tab import TrialTab
@@ -16,15 +18,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("BVR Motion Viewer")
         self.resize(1500, 920)
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("TrialTabs")
+        self.tabs.setAttribute(Qt.WA_StyledBackground, True)    # lets the stylesheet paint the tab strip dark
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
         self.tabs.setDocumentMode(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.tabBar().tabBarDoubleClicked.connect(self.rename_tab)
+        corner = QWidget()
+        corner.setObjectName("TabCorner")
+        corner.setAttribute(Qt.WA_StyledBackground, True)
+        cl = QHBoxLayout(corner)
+        cl.setContentsMargins(0, 4, 8, 4)
         plus = QPushButton("+  New tab")
         plus.setObjectName("Small")
         plus.clicked.connect(self.new_tab)
-        self.tabs.setCornerWidget(plus, Qt.TopRightCorner)
+        cl.addWidget(plus)
+        self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
         self.setCentralWidget(self.tabs)
         self._menus()
         self.new_tab()

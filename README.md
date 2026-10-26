@@ -40,16 +40,16 @@ The reliable route is Python 3.12 from https://www.python.org/downloads/windows/
 
 **Other options**
 
-- **Hold this bone still**: view the other bones' motion relative to the selected bone.
-- **Motion trail**: ghost copies of the selected bone at earlier frames.
-- **Untracked frames**: hide the bone, show its last tracked pose, or interpolate across the gap.
-- **Background**: dark, light grey, or white for figures.
+Scene and radiograph options are in the tabbed panel along the bottom of the window. Click a tab to open it; click the open tab again (or **Hide**) to fold the panel away.
+
+- **Hold this bone still** (on the selected model): view the other bones' motion relative to it.
+- **Scene tab:** axes and grid; background (dark, light grey, or white for figures); a motion trail of ghost copies of the selected bone at earlier frames; and what to do on untracked frames (hide the bone, show its last tracked pose, or interpolate across the gap).
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4).
 - **Save tab as session** (Ctrl+S) saves file paths and every setting to a `.json`. **Open saved session** restores it.
 
 ### Radiographs (optional)
 
-In the right-hand panel, choose **Add X-ray camera** and pick:
+In the **Radiographs** tab of the bottom panel (or the Radiographs menu), choose **Add X-ray camera** and pick:
 
 1. the calibration file (MayaCam 2.0 text, as in SlicerAutoscoperM's sample data);
 2. the radiographs: a folder, selected files, or one multi-page TIFF. Images are ordered by the last number in each file name, so any naming works;
@@ -58,6 +58,8 @@ In the right-hand panel, choose **Add X-ray camera** and pick:
 The dialog previews your tracked bones on that image. If they sit on their shadows, everything is matched up. Or use **Import from .cfg…** to add every camera listed in an Autoscoper trial file at once.
 
 With cameras added, the radiographs appear on detector planes behind the bones. The planes are see-through from behind, so they don't hide the bones. The **Through X-ray** buttons look from each X-ray source with the bones overlaid on the image.
+
+Radiographs are decoded in the background as soon as a camera is added, so playback may be slower for the first few seconds of a long trial. They're shown at up to 1024 pixels across, and hidden cameras aren't decoded at all.
 
 ## How the files are interpreted
 

@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QRadioButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QTabBar, QVBoxLayout, QWidget,
 )
 
 from ..core.models import BoneModel
@@ -374,75 +374,150 @@ class ModelsPanel(QWidget):
             r.set_selected(r.model is model)
 
 
-# ---------------------------------------------------------------- settings
+# ---------------------------------------------------------------- options (bottom panel)
 
-class SettingsPanel(QWidget):
+class OptionsPanel(QWidget):
+    """Tabbed options along the bottom of the window, like an IDE's tool windows.
+
+    Click a tab to open it; click the open tab again (or Hide) to fold the panel away,
+    leaving just the tab strip.
+    """
+
     changed = Signal(str)          # name of what changed
     addCamera = Signal()
     importCfg = Signal()
     editCamera = Signal(int)
     removeCamera = Signal(int)
+    collapsedChanged = Signal(bool)
 
-    def __init__(self, settings: SceneSettings):
+    BODY_HEIGHT = 170
+
+    def __init__(self, settings: SceneSettings, collapsed: bool = False, page: int = 0):
         super().__init__()
-        self.setObjectName("Panel")
+        self.setObjectName("OptionsBar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.s = settings
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        inner = QWidget()
-        inner.setObjectName("Panel")
-        v = QVBoxLayout(inner)
-        v.setContentsMargins(14, 14, 14, 14)
-        v.setSpacing(6)
+        outer.setSpacing(0)
 
-        v.addWidget(h2("Scene"))
+        head = QHBoxLayout()
+        head.setContentsMargins(8, 0, 8, 0)
+        self.bar = QTabBar()
+        self.bar.setDrawBase(False)
+        self.bar.setExpanding(False)
+        self.bar.addTab("Scene")
+        self.bar.addTab("Radiographs")
+        self.bar.tabBarClicked.connect(self._tab_clicked)
+        head.addWidget(self.bar)
+        head.addStretch(1)
+        self.fold = small_button("Hide ▾")
+        self.fold.setToolTip("Fold the options panel away (click a tab to bring it back)")
+        self.fold.clicked.connect(lambda: self.set_collapsed(not self.collapsed))
+        head.addWidget(self.fold)
+        outer.addLayout(head)
+
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("OptionsBody")
+        self.stack.setAttribute(Qt.WA_StyledBackground, True)
+        self.stack.setFixedHeight(self.BODY_HEIGHT)
+        self.stack.addWidget(self._scroll(self._scene_page()))
+        self.stack.addWidget(self._scroll(self._xray_page()))
+        outer.addWidget(self.stack)
+        self.collapsed = False
+        self.bar.setCurrentIndex(page)
+        self.stack.setCurrentIndex(page)
+        self.set_collapsed(collapsed)
+
+    # ---- layout helpers
+    @staticmethod
+    def _scroll(page: QWidget) -> QScrollArea:
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        page.setObjectName("OptionsBody")
+        page.setAttribute(Qt.WA_StyledBackground, True)
+        sc.setWidget(page)
+        return sc
+
+    @staticmethod
+    def _column(row: QHBoxLayout, title: str, width: int = 250) -> QVBoxLayout:
+        box = QWidget()
+        box.setFixedWidth(width)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addWidget(h2(title))
+        row.addWidget(box, 0, Qt.AlignTop)
+        return v
+
+    @staticmethod
+    def _divider(row: QHBoxLayout) -> None:
+        line = QFrame()
+        line.setFixedWidth(1)
+        line.setStyleSheet("background: #262A33;")
+        row.addWidget(line)
+
+    def _scene_page(self) -> QWidget:
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(18, 12, 18, 12)
+        row.setSpacing(22)
+        v = self._column(row, "Display", 230)
         self._check(v, "Global axes at origin", "show_axes")
         self._check(v, "Grid with mm scale", "show_grid")
-        self._check(v, "Motion trail for selected bone", "trail")
-        r = QHBoxLayout()
-        r.setContentsMargins(26, 0, 0, 0)
-        r.addWidget(label("Every", wrap=False))
-        self.trail_step = QSpinBox()
-        self.trail_step.setRange(1, 100)
-        self.trail_step.setValue(settings.trail_step)
-        self.trail_step.valueChanged.connect(lambda x: self._set("trail_step", x))
-        r.addWidget(self.trail_step)
-        r.addWidget(label("frames, last", wrap=False))
-        self.trail_count = QSpinBox()
-        self.trail_count.setRange(1, 8)
-        self.trail_count.setValue(settings.trail_count)
-        self.trail_count.valueChanged.connect(lambda x: self._set("trail_count", x))
-        r.addWidget(self.trail_count)
-        r.addStretch(1)
-        v.addLayout(r)
         r = QHBoxLayout()
         r.addWidget(QLabel("Background"))
         self.bg = QComboBox()
         for k, t in [("dark", "Dark"), ("light", "Light grey"), ("white", "White (for figures)")]:
             self.bg.addItem(t, k)
-        self.bg.setCurrentIndex(["dark", "light", "white"].index(settings.background))
+        self.bg.setCurrentIndex(["dark", "light", "white"].index(self.s.background))
         self.bg.currentIndexChanged.connect(lambda _: self._set("background", self.bg.currentData()))
         r.addWidget(self.bg, 1)
         v.addLayout(r)
+        v.addStretch(1)
+        self._divider(row)
 
-        v.addSpacing(12)
-        v.addWidget(h2("Untracked frames"))
-        grp = QButtonGroup(self)
+        v = self._column(row, "Motion trail", 250)
+        self._check(v, "Show trail for the selected bone", "trail")
+        r = QHBoxLayout()
+        r.addWidget(label("Every", wrap=False))
+        self.trail_step = QSpinBox()
+        self.trail_step.setRange(1, 100)
+        self.trail_step.setValue(self.s.trail_step)
+        self.trail_step.valueChanged.connect(lambda x: self._set("trail_step", x))
+        r.addWidget(self.trail_step)
+        r.addWidget(label("frames, last", wrap=False))
+        self.trail_count = QSpinBox()
+        self.trail_count.setRange(1, 8)
+        self.trail_count.setValue(self.s.trail_count)
+        self.trail_count.valueChanged.connect(lambda x: self._set("trail_count", x))
+        r.addWidget(self.trail_count)
+        r.addStretch(1)
+        v.addLayout(r)
+        v.addStretch(1)
+        self._divider(row)
+
+        v = self._column(row, "Untracked frames", 240)
+        grp = QButtonGroup(page)
         for key, text in [("hide", "Hide the bone"), ("hold", "Show last tracked pose"),
                           ("interpolate", "Interpolate across gaps")]:
             rb = QRadioButton(text)
-            rb.setChecked(settings.untracked == key)
+            rb.setChecked(self.s.untracked == key)
             rb.toggled.connect(lambda on, k=key: on and self._set("untracked", k))
             grp.addButton(rb)
             v.addWidget(rb)
+        v.addStretch(1)
+        row.addStretch(1)
+        return page
 
-        v.addSpacing(12)
-        v.addWidget(h2("Radiographs (optional)"))
-        v.addWidget(label("Not needed to view motion. Add each X-ray camera's calibration and images "
-                          "to show the radiographs too."))
+    def _xray_page(self) -> QWidget:
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(18, 12, 18, 12)
+        row.setSpacing(22)
+        v = self._column(row, "X-ray cameras", 360)
         r = QHBoxLayout()
         b = small_button("+ Add X-ray camera")
         b.clicked.connect(self.addCamera.emit)
@@ -452,31 +527,67 @@ class SettingsPanel(QWidget):
         r.addWidget(b)
         r.addStretch(1)
         v.addLayout(r)
+        self.no_cams = label("Optional: not needed to view motion. Add each X-ray camera's calibration and "
+                             "images to show the radiographs too.")
+        v.addWidget(self.no_cams)
         self.cam_box = QVBoxLayout()
         self.cam_box.setSpacing(6)
         v.addLayout(self.cam_box)
-        self.xray_opts = QWidget()
-        xv = QVBoxLayout(self.xray_opts)
-        xv.setContentsMargins(0, 4, 0, 0)
-        xv.setSpacing(6)
-        self._check(xv, "Radiographs on detector planes", "xray_in_scene")
-        self._check(xv, "X-ray sources", "xray_sources")
-        self._check(xv, "Beam outlines", "xray_beams")
-        self._slider(xv, "Image opacity", "xray_opacity", 0, 100, 100, "%")
-        self._slider(xv, "Distance behind bones", "xray_distance", 0, 800, 1, " mm", reposition=True)
-        xv.addWidget(label("Through-X-ray views", wrap=False))
-        self._slider(xv, "Bone opacity", "xray_bone_opacity", 0, 100, 100, "%")
-        self._check(xv, "Draw bones as wireframe", "xray_outline")
-        xv.addWidget(label("Image", wrap=False))
-        self._slider(xv, "Brightness", "brightness", -100, 100, 100, "")
-        self._slider(xv, "Contrast", "contrast", 20, 300, 100, "×")
-        self._check(xv, "Invert", "invert")
-        v.addWidget(self.xray_opts)
-        self.xray_opts.setVisible(False)
         v.addStretch(1)
-        scroll.setWidget(inner)
-        outer.addWidget(scroll)
 
+        self.xray_opts = QWidget()
+        opts = QHBoxLayout(self.xray_opts)
+        opts.setContentsMargins(0, 0, 0, 0)
+        opts.setSpacing(22)
+        self._divider(opts)
+        c = self._column(opts, "In the 3D scene", 300)
+        self._check(c, "Radiographs on detector planes", "xray_in_scene")
+        r = QHBoxLayout()
+        self._check(r, "X-ray sources", "xray_sources")
+        self._check(r, "Beam outlines", "xray_beams")
+        r.addStretch(1)
+        c.addLayout(r)
+        self._slider(c, "Image opacity", "xray_opacity", 0, 100, 100, "%")
+        self._slider(c, "Distance behind", "xray_distance", 0, 800, 1, " mm", reposition=True)
+        c.addStretch(1)
+        self._divider(opts)
+        c = self._column(opts, "Through-X-ray views", 260)
+        self._slider(c, "Bone opacity", "xray_bone_opacity", 0, 100, 100, "%")
+        self._check(c, "Draw bones as wireframe", "xray_outline")
+        c.addStretch(1)
+        self._divider(opts)
+        c = self._column(opts, "Image", 260)
+        self._slider(c, "Brightness", "brightness", -100, 100, 100, "")
+        self._slider(c, "Contrast", "contrast", 20, 300, 100, "×")
+        self._check(c, "Invert", "invert")
+        c.addStretch(1)
+        row.addWidget(self.xray_opts, 0, Qt.AlignTop)
+        row.addStretch(1)
+        self.xray_opts.setVisible(False)
+        return page
+
+    # ---- folding
+    def _tab_clicked(self, i: int) -> None:
+        if i < 0:
+            return
+        if i == self.stack.currentIndex() and not self.collapsed:
+            self.set_collapsed(True)
+        else:
+            self.stack.setCurrentIndex(i)
+            self.set_collapsed(False)
+
+    def set_collapsed(self, on: bool) -> None:
+        self.collapsed = on
+        self.stack.setVisible(not on)
+        self.fold.setText("Show ▴" if on else "Hide ▾")
+        self.collapsedChanged.emit(on)
+
+    def show_page(self, i: int) -> None:
+        self.bar.setCurrentIndex(i)
+        self.stack.setCurrentIndex(i)
+        self.set_collapsed(False)
+
+    # ---- controls
     def _set(self, key: str, value) -> None:
         setattr(self.s, key, value)
         self.changed.emit(key)
@@ -492,7 +603,7 @@ class SettingsPanel(QWidget):
                 reposition: bool = False) -> None:
         r = QHBoxLayout()
         lab = QLabel(text)
-        lab.setFixedWidth(140)
+        lab.setFixedWidth(110)
         r.addWidget(lab)
         sl = QSlider(Qt.Horizontal)
         sl.setRange(lo, hi)
@@ -526,34 +637,35 @@ class SettingsPanel(QWidget):
         for i, cam in enumerate(cameras):
             card = QFrame()
             card.setObjectName("Card")
-            cv = QVBoxLayout(card)
-            cv.setContentsMargins(10, 8, 10, 8)
-            cv.setSpacing(3)
-            top = QHBoxLayout()
+            cv = QHBoxLayout(card)
+            cv.setContentsMargins(10, 6, 8, 6)
+            cv.setSpacing(6)
             cb = QCheckBox(cam.name)
             cb.setChecked(cam.visible)
             cb.setStyleSheet("font-weight: 600;")
+            n = len(cam.images) if cam.images else 0
+            first = cam.images.label(cam.first_image) if cam.images else "?"
+            cb.setToolTip(f"{cam.calibration_path.name}\n"
+                          f"{cam.images.source.name if cam.images else '?'}\n"
+                          f"{n} images · frame 1 = image {first}")
 
             def toggle(on, c=cam):
                 c.visible = on
                 self.changed.emit("cameras")
 
             cb.toggled.connect(toggle)
-            top.addWidget(cb, 1)
+            cv.addWidget(cb)
+            cv.addWidget(label(f"{n} images · starts at {first}", "Mono", wrap=False), 1)
             e = small_button("Edit")
             e.clicked.connect(lambda _=False, k=i: self.editCamera.emit(k))
             x = small_button("Remove")
             x.clicked.connect(lambda _=False, k=i: self.removeCamera.emit(k))
-            top.addWidget(e)
-            top.addWidget(x)
-            cv.addLayout(top)
-            cv.addWidget(label(cam.calibration_path.name, "Mono", wrap=False))
-            src = cam.images.source.name if cam.images else "?"
-            cv.addWidget(label(src, "Mono", wrap=False))
-            cv.addWidget(label(f"{len(cam.images)} images · frame 1 = image {cam.images.label(cam.first_image)}",
-                               "Mono", wrap=False))
+            cv.addWidget(e)
+            cv.addWidget(x)
             self.cam_box.addWidget(card)
         self.xray_opts.setVisible(bool(cameras))
+        self.no_cams.setVisible(not cameras)
+        self.bar.setTabText(1, f"Radiographs ({len(cameras)})" if cameras else "Radiographs")
 
 
 # ---------------------------------------------------------------- timeline

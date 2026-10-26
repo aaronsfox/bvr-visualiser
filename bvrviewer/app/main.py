@@ -17,9 +17,9 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName("BVR Motion Viewer")
     from .main_window import MainWindow
-    from .style import QSS
+    from .style import apply_theme
 
-    app.setStyleSheet(QSS)
+    apply_theme(app)
     win = MainWindow()
     win.show()
     if "--selftest" in argv:
