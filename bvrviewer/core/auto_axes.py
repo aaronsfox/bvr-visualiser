@@ -487,6 +487,23 @@ def _tibia_notes(res, L, ratio, options=None):
                          "anterior/posterior if not.")
 
 
+# ---------------------------------------------------------------- any bone
+
+def inertial_axes(mesh, side, options) -> AutoResult:
+    """Principal axes of inertia of the bone as a solid (axis 1 = long axis)."""
+    A, mom = inertial_frame(mesh)
+    if options.get("flip_long"):
+        A[:3, 0], A[:3, 1] = -A[:3, 0], -A[:3, 1]          # keep right-handed: flip 1 and 2
+    if options.get("flip_ap"):
+        A[:3, 1], A[:3, 2] = -A[:3, 1], -A[:3, 2]          # flip 2 and 3
+    res = AutoResult(A)
+    res.quality = {"Moment ratios": f"{mom[0] / mom[2]:.2f} : {mom[1] / mom[2]:.2f} : 1",
+                   "Volume": f"{abs(mesh.volume) / 1000:.1f} cm³"}
+    if mom[1] / mom[2] > 0.95:
+        res.notes.append("Axes 2 and 3 have nearly equal moments, so their directions are poorly defined.")
+    return res
+
+
 # ---------------------------------------------------------------- registry
 
 MIRANDA = "Miranda DL et al. (2010) J Biomech 43:1623–1626"
@@ -516,6 +533,11 @@ AUTO_METHODS: dict[str, AutoMethod] = {m.key: m for m in [
                "The top 15 mm of the tibia is treated as a solid: Z along its widest principal axis, origin at its "
                "centroid. Y = the shaft line. After Miranda et al. (2010).", (MIRANDA, MODENESE),
                tibia_plateau_inertia),
+    AutoMethod("inertial", "Principal axes of inertia", "any",
+               "The bone is treated as a solid of uniform density: axis 1 is its long axis (smallest moment), then "
+               "axes 2 and 3; origin at the centroid. Works for any bone (e.g. carpals), but the axes carry no "
+               "anatomical names.", ("Principal inertial axes, as used for carpal bones: Coburn JC et al. (2007) "
+                                     "J Biomech 40:203–209",), inertial_axes),
 ]}
 
 

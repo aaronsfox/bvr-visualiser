@@ -85,7 +85,7 @@ def _angle(a, b):
 
 
 @sample
-@pytest.mark.parametrize("key", list(AA.AUTO_METHODS))
+@pytest.mark.parametrize("key", [k for k, v in AA.AUTO_METHODS.items() if v.bone in ("femur", "tibia")])
 def test_auto_methods_agree_with_landmarks_on_the_sample(key):
     """Each automatic method gives axes close to landmark-based ones (same direction, near the same origin)."""
     F, T, L = _sample()
@@ -105,29 +105,41 @@ def test_auto_methods_agree_with_landmarks_on_the_sample(key):
 
 
 @sample
-def test_joint_model_with_automatic_axes(tmp_path):
+def test_model_with_automatic_axes_and_scan_reference(tmp_path):
     from bvrviewer.core.models import BoneModel
     from bvrviewer.core.tracking import load_tracking
+    from bvrviewer.core.transforms import model_to_aut_from_tfm
 
     K = SAMPLE / "Knee_SampleData"
-    m = J.JointModel.new(J.KNEE.key, "left")
-    for role, f in [("femur", "Femur"), ("tibia", "Tibia")]:
+    m = J.KinematicModel.preset("knee", "left")
+    for f in ("Femur", "Tibia"):
         bm = BoneModel(name=f, path=K / "Models" / f"AUT_Left_{f}.stl")
         bm.build()
-        m.bones[role].surface = bm
-    m.set_axes_source("femur", "femur_cylinder")
-    m.set_axes_source("tibia", "tibia_ellipse")
+        m.segment(f).surface = bm
+    assert m.segment("Femur").axes_source == "femur_cylinder" and m.segment("Tibia").axes_source == "tibia_ellipse"
     m.compute()
-    assert m.missing("femur") == [] and m.bones["femur"].acs is not None, m.bones["femur"].error
+    assert m.segment("Femur").acs is not None, m.segment("Femur").error
     assert m.checks() == []
     Tf = load_tracking(K / "Tracking" / "Left_Femur.tra").poses
     Tt = load_tracking(K / "Tracking" / "Left_Tibia.tra").poses
-    k = m.joint_kinematics("knee", Tf, Tt)
+    k = m.joint_kinematics("Knee", Tf, Tt)
     print("auto knee angles", k["angles"][0].round(1), "translations", k["translations"][0].round(1))
     assert np.all(np.abs(k["angles"][0]) < 20)
+    # Reference from the scan: each AUT model's pose in CT space is the inverse of its DICOM2AUT
+    # mapping. In this sample, frame 1 of the tracking is that same pose (rotated as a whole), so the
+    # normalised knee is zero there.
+    scan = {f: np.linalg.inv(model_to_aut_from_tfm(K / "Transforms" / f"Left_{f}-DICOM2AUT.tfm"))
+            for f in ("Femur", "Tibia")}
+    for mode in ("subtract", "realign"):
+        m.set_reference_from_poses("Knee", scan["Femur"], scan["Tibia"], mode=mode, source={"kind": "scan"})
+        z = m.joint_kinematics("Knee", Tf, Tt)
+        np.testing.assert_allclose(z["angles"][0], 0, atol=1e-6)
+        np.testing.assert_allclose(z["translations"][0], 0, atol=1e-6)
     m.save(tmp_path / "auto.bvrmodel.json")
-    m2 = J.JointModel.load(tmp_path / "auto.bvrmodel.json")
-    assert m2.bones["femur"].axes_source == "femur_cylinder"
-    np.testing.assert_allclose(m2.bones["femur"].acs, m.bones["femur"].acs, atol=1e-9)
+    m2 = J.KinematicModel.load(tmp_path / "auto.bvrmodel.json")
+    assert m2.segment("Femur").axes_source == "femur_cylinder" and m2.joint("Knee").reference.mode == "realign"
+    np.testing.assert_allclose(m2.segment("Femur").acs, m.segment("Femur").acs, atol=1e-9)
     with pytest.raises(J.JointModelError):
-        m.set_axes_source("femur", "tibia_ellipse")
+        m.set_axes_source("Femur", "tibia_ellipse")
+    rows = m.compare_methods("Knee", Tf[0], Tt[0])
+    assert len(rows) == 3 * 4          # femur: 2 methods + landmarks; tibia: 3 methods + landmarks

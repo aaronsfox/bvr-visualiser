@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
 
-from ..core.session import JointLink
 from .panels import label
 
 CURVE_COLOURS = ("#E5534B", "#57AB5A", "#539BF5")
@@ -27,52 +26,56 @@ def _norm(p) -> str:
         return str(p).lower()
 
 
-def guess_role_map(joint_model, models) -> dict:
-    """role -> tab model name, by surface file path first and then by name; missing roles are left out."""
+def guess_segment_map(model, models) -> dict:
+    """segment name -> tab model name, by surface file path first and then by name; unmatched are left out."""
     out = {}
     used = set()
-    for role in joint_model.template.bones:
-        e = joint_model.bones[role.key]
-        if e.surface is None:
+    for seg in model.segments:
+        if seg.surface is None or seg.acs is None:
             continue
-        hit = next((m for m in models if id(m) not in used and _norm(m.path) == _norm(e.surface.path)), None)
+        hit = next((m for m in models if id(m) not in used and _norm(m.path) == _norm(seg.surface.path)), None)
         if hit is None:
-            stem = Path(e.surface.path).stem.lower()
+            stem = Path(seg.surface.path).stem.lower()
             hit = next((m for m in models if id(m) not in used and
                         (m.name.lower() == stem or Path(m.path).stem.lower() == stem)), None)
         if hit is None:
-            hit = next((m for m in models if id(m) not in used and role.key in m.name.lower()), None)
+            key = seg.name.lower()
+            hit = next((m for m in models if id(m) not in used and (key in m.name.lower() or seg.type in
+                                                                       m.name.lower())), None)
         if hit is not None:
-            out[role.key] = hit.name
+            out[seg.name] = hit.name
             used.add(id(hit))
     return out
 
 
-class RoleMapDialog(QDialog):
-    """Choose which of the tab's models is each bone of the joint."""
+NOT_HERE = "(not in this tab)"
 
-    def __init__(self, parent, link: JointLink, models):
+
+class SegmentMapDialog(QDialog):
+    """Choose which of the tab's models is each segment of a model, and what to show."""
+
+    def __init__(self, parent, model, models, guess: dict, path: Path):
         super().__init__(parent)
-        self.setWindowTitle("Match the joint's bones")
-        self.link = link
+        self.setWindowTitle("Match the model's segments")
         v = QVBoxLayout(self)
-        j = link.joint()
-        v.addWidget(label(f"{j.title} from {link.model_path.name}. Pick the tab model for each bone. It must be the "
-                          "same surface file (same model space) the joint model was built on.", wrap=True))
+        v.addWidget(label(f"{path.name}: pick the tab model for each segment. It must be the same surface file "
+                          "(same model space) the segment was defined on. Segments left out aren't shown, nor are "
+                          "joints that use them.", wrap=True))
         form = QFormLayout()
         self.combos = {}
-        jm = link.joint_model
-        for role_key in (j.proximal, j.distal):
-            role = jm.template.role(role_key)
+        for seg in model.segments:
             cb = QComboBox()
+            cb.addItem(NOT_HERE, None)
             for m in models:
                 cb.addItem(m.name, m.name)
-            cur = link.role_map.get(role_key)
-            if cur is not None:
-                cb.setCurrentIndex(max(cb.findData(cur), 0))
-            surf = jm.bones[role_key].surface
-            form.addRow(f"{role.title}" + (f"  ({Path(surf.path).name})" if surf is not None else ""), cb)
-            self.combos[role_key] = cb
+            if seg.acs is None:
+                cb.setEnabled(False)
+                cb.setToolTip("This segment has no axes in the model yet.")
+            elif seg.name in guess:
+                cb.setCurrentIndex(max(cb.findData(guess[seg.name]), 0))
+            surf = f"  ({Path(seg.surface.path).name})" if seg.surface is not None else ""
+            form.addRow(seg.name + surf, cb)
+            self.combos[seg.name] = cb
         v.addLayout(form)
         self.warn = QLabel("")
         self.warn.setObjectName("Warn")
@@ -83,14 +86,17 @@ class RoleMapDialog(QDialog):
         v.addWidget(bb)
 
     def _ok(self) -> None:
-        names = [cb.currentData() for cb in self.combos.values()]
+        names = [n for n in self.values().values()]
         if len(set(names)) < len(names):
-            self.warn.setText("Choose a different model for each bone.")
+            self.warn.setText("Choose a different model for each segment.")
+            return
+        if not names:
+            self.warn.setText("Match at least one segment.")
             return
         self.accept()
 
     def values(self) -> dict:
-        return {k: cb.currentData() for k, cb in self.combos.items()}
+        return {k: cb.currentData() for k, cb in self.combos.items() if cb.currentData() is not None}
 
 
 # ---------------------------------------------------------------- curves

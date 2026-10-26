@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.models import BoneModel
-from ..core.session import JointLink, TabState, XrayCamera
+from ..core.session import KinItem, TabState, XrayCamera
 from .panels import ColorButton, h2, label
 
 KIND_ROLE = Qt.UserRole
@@ -70,7 +70,8 @@ class Navigator(QTreeWidget):
         self.roots: dict[str, QTreeWidgetItem] = {}
         bold = QFont()
         bold.setBold(True)
-        for kind, text in [(MODELS, "Models"), (CAMERAS, "X-ray cameras"), (JOINTS, "Joints"), (SCENE, "Scene")]:
+        for kind, text in [(MODELS, "Models"), (CAMERAS, "X-ray cameras"), (JOINTS, "Segments & joints"),
+                           (SCENE, "Scene")]:
             it = QTreeWidgetItem([text])
             it.setData(0, KIND_ROLE, kind)
             it.setFont(0, bold)
@@ -80,7 +81,7 @@ class Navigator(QTreeWidget):
             self.roots[kind] = it
         self.roots[MODELS].setToolTip(0, "Right-click to add a model")
         self.roots[CAMERAS].setToolTip(0, "Optional. Right-click to add an X-ray camera")
-        self.roots[JOINTS].setToolTip(0, "Optional. Right-click to load a joint model from the Model Builder")
+        self.roots[JOINTS].setToolTip(0, "Optional. Right-click to load a model from the Model Builder")
         self.roots[SCENE].setToolTip(0, "Axes, grid, background, motion trail, untracked frames")
 
     # ---- building
@@ -117,11 +118,11 @@ class Navigator(QTreeWidget):
             self.roots[CAMERAS].addChild(it)
             self.refresh_item(it)
         n_j = len(state.joints)
-        self.roots[JOINTS].setText(0, f"Joints ({n_j})" if n_j else "Joints")
+        self.roots[JOINTS].setText(0, f"Segments & joints ({n_j})" if n_j else "Segments & joints")
         if not n_j:
-            self._placeholder(self.roots[JOINTS], "Optional: right-click to load a joint model")
+            self._placeholder(self.roots[JOINTS], "Optional: right-click to load a model")
         for jl in state.joints:
-            it = QTreeWidgetItem([jl.name])
+            it = QTreeWidgetItem([jl.label])
             self._set(it, JOINT, jl)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable | Qt.ItemIsUserCheckable)
             self.roots[JOINTS].addChild(it)
@@ -203,13 +204,13 @@ class Navigator(QTreeWidget):
             it.setToolTip(0, f"{cam.calibration_path.name}\n{n} images · double-click to view through it")
             it.setForeground(0, QBrush(QColor("#E6E8EC" if cam.visible else "#7A8291")))
         elif kind == JOINT:
-            jl: JointLink = obj
-            it.setText(0, jl.name)
-            it.setIcon(0, _dot_icon("#B78AF0"))
+            jl: KinItem = obj
+            it.setText(0, jl.label)
+            it.setIcon(0, _dot_icon("#5CC8A8" if jl.kind == "segment" else "#B78AF0"))
             it.setCheckState(0, Qt.Checked if jl.visible else Qt.Unchecked)
-            bones = " · ".join(jl.role_map.get(r, "?") for r in (jl.joint().proximal, jl.joint().distal)) \
-                if jl.joint_model is not None else ""
-            it.setToolTip(0, f"{jl.model_path.name}\n{bones}\nTick to show the bones' axes.")
+            bones = " · ".join(str(n) for n in jl.tab_models()) if jl.model is not None else ""
+            what = "Segment" if jl.kind == "segment" else "Joint"
+            it.setToolTip(0, f"{what} from {jl.model_path.name}\n{bones}\nTick to show the axes.")
             it.setForeground(0, QBrush(QColor("#E6E8EC" if jl.visible else "#7A8291")))
         self._building = was
 
@@ -245,7 +246,8 @@ class Navigator(QTreeWidget):
         if on != obj.visible:
             self.visibilityToggled.emit(obj, on)
         text = it.text(0).strip()
-        if text and text != obj.name:
+        current = obj.label if kind == JOINT else obj.name
+        if text and text != current:
             self.renamed.emit(obj, text)
         elif not text:
             self.refresh_item(it)
@@ -338,7 +340,7 @@ class PropertySheet(QWidget):
                 continue
             _r, col, _rs, cs = self.grid.getItemPosition(i)
             width = full if cs > 1 else (self.LABEL_WIDTH if col == 0 else value_w)
-            w.setMinimumHeight(w.heightForWidth(width) + 2)
+            w.setMinimumHeight(w.heightForWidth(max(width - 10, 60)) + 4)   # a little slack for rounding
         self.grid.invalidate()
 
     def resizeEvent(self, e):  # noqa: N802

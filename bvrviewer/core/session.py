@@ -81,43 +81,52 @@ class SceneSettings:
 
 
 @dataclass(eq=False)
-class JointLink:
-    """A joint from a saved joint model (.bvrmodel.json), shown in a Visualiser tab.
+class KinItem:
+    """A segment or joint from a saved model (.bvrmodel.json), shown in a Visualiser tab.
 
-    role_map maps the joint model's bone roles to the names of this tab's models.
+    model_map maps the model's segment names to the names of this tab's models.
     """
 
     model_path: Path
-    joint_key: str
-    role_map: dict = field(default_factory=dict)     # role -> tab model name
-    name: str = ""
-    visible: bool = True                              # draw the bones' axes in the 3D view
-    reference_frame: int | None = None                # zero the curves at this frame (0-based)
+    kind: str                                         # "segment" or "joint"
+    name: str                                         # the segment's or joint's name in the model
+    model_map: dict = field(default_factory=dict)     # segment name -> tab model name
+    label: str = ""
+    visible: bool = True                              # draw the axes in the 3D view
+    use_reference: bool = True                        # joints: relative to the model's reference pose, if any
+    zero_frame: int | None = None                     # subtract the values at this trial frame (0-based)
+    seg_reference: object = "first"                   # segments: "first", "lab" or a frame index
 
     # runtime
-    joint_model: object = None                        # core.joints.JointModel (surfaces not rebuilt)
+    model: object = None                              # core.joints.KinematicModel (surfaces not rebuilt)
 
     def to_dict(self) -> dict:
-        return {"model_path": str(self.model_path), "joint_key": self.joint_key, "role_map": dict(self.role_map),
-                "name": self.name, "visible": self.visible, "reference_frame": self.reference_frame}
+        return {"model_path": str(self.model_path), "kind": self.kind, "name": self.name,
+                "model_map": dict(self.model_map), "label": self.label, "visible": self.visible,
+                "use_reference": self.use_reference, "zero_frame": self.zero_frame,
+                "seg_reference": self.seg_reference}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "JointLink":
-        return cls(model_path=Path(d["model_path"]), joint_key=d["joint_key"], role_map=d.get("role_map", {}),
-                   name=d.get("name", ""), visible=d.get("visible", True),
-                   reference_frame=d.get("reference_frame"))
+    def from_dict(cls, d: dict) -> "KinItem":
+        if "joint_key" in d:                          # version-1 sessions held joints of a template model
+            names = {"femur": "Femur", "tibia": "Tibia", "proximal": "Proximal bone", "distal": "Distal bone"}
+            return cls(model_path=Path(d["model_path"]), kind="joint",
+                       name={"knee": "Knee", "joint": "Joint"}.get(d["joint_key"], d["joint_key"]),
+                       model_map={names.get(r, r): n for r, n in d.get("role_map", {}).items()},
+                       label=d.get("name", ""), visible=d.get("visible", True), zero_frame=d.get("reference_frame"))
+        return cls(model_path=Path(d["model_path"]), kind=d["kind"], name=d["name"], model_map=d.get("model_map", {}),
+                   label=d.get("label", ""), visible=d.get("visible", True),
+                   use_reference=d.get("use_reference", True), zero_frame=d.get("zero_frame"),
+                   seg_reference=d.get("seg_reference", "first"))
 
-    def load(self) -> None:
-        from .joints import JointModel
+    def segment_names(self) -> list[str]:
+        if self.kind == "segment":
+            return [self.name]
+        j = self.model.joint(self.name)
+        return [j.proximal, j.distal]
 
-        self.joint_model = JointModel.load(self.model_path, build_surfaces=False)
-        if self.joint_key not in {j.key for j in self.joint_model.template.joints}:
-            raise ValueError(f"{self.model_path.name} has no joint {self.joint_key!r}.")
-        if not self.name:
-            self.name = self.joint().title
-
-    def joint(self):
-        return next(j for j in self.joint_model.template.joints if j.key == self.joint_key)
+    def tab_models(self) -> list:
+        return [self.model_map.get(n) for n in self.segment_names()]
 
 
 @dataclass
@@ -126,7 +135,7 @@ class TabState:
     models: list[BoneModel] = field(default_factory=list)
     cameras: list[XrayCamera] = field(default_factory=list)
     settings: SceneSettings = field(default_factory=SceneSettings)
-    joints: list[JointLink] = field(default_factory=list)
+    joints: list[KinItem] = field(default_factory=list)     # segments and joints from models
 
     def to_dict(self) -> dict:
         return {"version": SESSION_VERSION, "tool": "visualiser", "name": self.name,
@@ -144,7 +153,7 @@ class TabState:
         return cls(name=d.get("name", "Untitled tab"),
                    models=[BoneModel.from_dict(m) for m in d.get("models", [])],
                    cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])], settings=s,
-                   joints=[JointLink.from_dict(j) for j in d.get("joints", [])])
+                   joints=[KinItem.from_dict(j) for j in d.get("joints", [])])
 
 
 def save_session(state: TabState, path: str | Path) -> None:

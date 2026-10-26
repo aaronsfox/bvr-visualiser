@@ -39,8 +39,10 @@ def run(win, sample_dir: str, out: str) -> None:
 
         from ..core import joints as J
 
-        jm = J.JointModel.new(J.GENERIC.key)
-        jm.bones["proximal"].surface, jm.bones["distal"].surface = tab.state.models[0], tab.state.models[1]
+        jm = J.KinematicModel(name="Self-test")
+        jm.add_segment("generic", "Radius").surface = tab.state.models[0]
+        jm.add_segment("generic", "MC3").surface = tab.state.models[1]
+        jm.add_joint("cardan_xyz", "Radius", "MC3", "Wrist")
         jm.compute()
         jpath = Path(tempfile.gettempdir()) / "bvr_selftest.bvrmodel.json"
         jm.save(jpath)
@@ -51,7 +53,9 @@ def run(win, sample_dir: str, out: str) -> None:
         def finish():
             tab.plotter.screenshot(out)
             ok = len(tab.state.models) == 2 and all(m.tracking for m in tab.state.models)
-            k = tab.joint_values(tab.state.joints[0]) if tab.state.joints else None
+            items = {(i.kind, i.name): i for i in tab.state.joints}
+            k = tab.joint_values(items[("joint", "Wrist")]) if ("joint", "Wrist") in items else None
+            ok = ok and len(items) == 3 and tab.joint_values(items[("segment", "MC3")]) is not None
             ok = ok and k is not None and not tab.curves.isHidden()
             print("SELFTEST", "OK" if ok else "FAILED", out, flush=True)
             win.close()

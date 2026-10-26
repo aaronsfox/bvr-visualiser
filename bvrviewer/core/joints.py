@@ -1,13 +1,21 @@
-"""Joint models: landmarks on bone surfaces -> anatomical coordinate systems -> joint angles.
+"""Kinematic models: segment axes on bone surfaces, optional joints, optional reference poses.
 
-Vocabulary
-----------
-* **Template**: what a model needs. Bone roles (e.g. femur, tibia), the landmarks for each role,
-  the recipe that turns landmarks into the bone's anatomical coordinate system (ACS), and the
-  joints between roles with their angle convention. Built-in templates are in TEMPLATES.
-* **Joint model**: a template applied to one participant's bone surfaces. It stores which surface
-  fills each role and the landmarks picked or painted on it (in that surface's own model space,
-  the space the .tra poses act on), so one model serves every trial of that participant.
+A model is built in three steps (the Model Builder follows them):
+
+1. **Segments.** Each segment is one bone surface with an anatomical coordinate system (ACS),
+   made from landmarks picked or painted on the surface, or by an automatic method fitted to it.
+   The ACS lives in the surface's own model space (the space its .tra poses act on), so it never
+   depends on where any other bone is. A segment alone already gives its motion in a trial.
+2. **Joints (optional).** A joint pairs two segments with a published definition (e.g. Grood &
+   Suntay for the knee: femur -> tibia). Angles are the distal ACS relative to the proximal ACS at
+   each frame, so their zero is anatomical: all angles are 0 when the two ACSs line up.
+3. **Reference pose (optional, per joint).** A pose of the two bones (from a neutral/static
+   trial's tracking, or the pose they had in the scan) whose joint values are taken as zero,
+   either by subtracting them or by realigning the distal axes to the proximal ones there.
+
+Segment types (femur, tibia, other) say which landmarks and automatic methods a segment can use;
+joint types say which segment types they connect and their angle convention. One model file
+serves every trial of a participant.
 
 Coordinates and conventions
 ---------------------------
@@ -33,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 
 class JointModelError(ValueError):
@@ -139,7 +147,7 @@ def inertial_frame(mesh) -> tuple[np.ndarray, np.ndarray]:
     return m, np.abs(w)
 
 
-# ---------------------------------------------------------------- templates
+# ---------------------------------------------------------------- definitions
 
 @dataclass(frozen=True)
 class LandmarkDef:
@@ -150,39 +158,27 @@ class LandmarkDef:
 
 
 @dataclass(frozen=True)
-class BoneRole:
+class SegmentType:
     key: str
     title: str
-    recipe: str                     # name in RECIPES
-    landmarks: tuple = ()
+    landmarks: tuple = ()           # LandmarkDefs, for landmark axes
+    recipe: str | None = None       # name in RECIPES (landmarks -> ACS)
+    auto_methods: tuple = ()        # keys in core.auto_axes.AUTO_METHODS
+    anatomical: bool = True         # axes follow ISB names (X anterior, Y superior, Z right)
     axes_note: str = ""
-    auto_methods: tuple = ()        # keys in core.auto_axes.AUTO_METHODS that can replace the landmarks
+    references: tuple = ()
 
 
 @dataclass(frozen=True)
-class JointDef:
+class JointType:
     key: str
     title: str
-    proximal: str
-    distal: str
+    proximal_types: tuple           # segment type keys allowed (empty = any)
+    distal_types: tuple
     convention: str                 # name in JOINT_CONVENTIONS
-
-
-@dataclass(frozen=True)
-class Template:
-    key: str
-    title: str
-    summary: str
-    references: tuple
-    bones: tuple
-    joints: tuple
-    sided: bool = True
-
-    def role(self, key: str) -> BoneRole:
-        for b in self.bones:
-            if b.key == key:
-                return b
-        raise KeyError(key)
+    summary: str = ""
+    references: tuple = ()
+    default_name: str = "Joint"
 
 
 def _femur_isb(L: dict, side: str, mesh) -> np.ndarray:
@@ -241,64 +237,96 @@ JOINT_CONVENTIONS = {
     },
 }
 
-TEMPLATES: dict[str, Template] = {}
 
+# Joint conventions: rotation sequence (intrinsic, axes of the distal ACS relative to the proximal),
+# names of the three angles and three translations, and sign flips per side so that positive is
+# the same anatomical motion on both sides.
+JOINT_CONVENTIONS = {
+    "grood_suntay_knee": {
+        "title": "Grood & Suntay joint coordinate system (e1 = femur Z, e3 = tibia Y)",
+        "sequence": "ZXY",
+        "angles": ("Flexion (+) / extension", "Adduction (+) / abduction", "Internal (+) / external rotation"),
+        "short": ("Flexion", "Adduction", "Int. rotation"),
+        "translations": ("Lateral (+) / medial", "Anterior (+) / posterior", "Proximal (+) / distal"),
+        "short_t": ("Lateral", "Anterior", "Proximal"),
+        "signs": {"right": ((-1, 1, 1), (1, 1, 1)), "left": ((-1, -1, -1), (-1, 1, 1))},
+    },
+    "jcs_zxy": {
+        "title": "Joint coordinate system: e1 = proximal Z, e3 = distal Y, e2 floating (ISB style)",
+        "sequence": "ZXY",
+        "angles": ("About proximal Z (medial–lateral)", "About the floating axis", "About distal Y (long axis)"),
+        "short": ("About Z", "Floating", "About Y"),
+        "translations": ("Along proximal Z", "Along the floating axis", "Along distal Y"),
+        "short_t": ("Along Z", "Floating", "Along Y"),
+        "signs": {"right": ((1, 1, 1), (1, 1, 1)), "left": ((1, 1, 1), (1, 1, 1))},
+    },
+    "cardan_xyz": {
+        "title": "Cardan sequence X-Y-Z of the distal axes relative to the proximal axes",
+        "sequence": "XYZ",
+        "angles": ("Rotation about axis 1", "Rotation about axis 2", "Rotation about axis 3"),
+        "short": ("Axis 1", "Axis 2", "Axis 3"),
+        "translations": ("Along axis 1", "Along axis 2", "Along axis 3"),
+        "short_t": ("Along 1", "Along 2", "Along 3"),
+        "signs": {"right": ((1, 1, 1), (1, 1, 1)), "left": ((1, 1, 1), (1, 1, 1))},
+    },
+}
 
-def _register(t: Template) -> Template:
-    TEMPLATES[t.key] = t
-    return t
+# How a segment's own motion is reported: rotation about its own axes relative to a reference
+# orientation, as an intrinsic Z-X-Y sequence (medial-lateral axis first, long axis last).
+SEGMENT_SEQUENCE = "ZXY"
+SEGMENT_NAMES = {True: (("About Z (medial–lateral)", "About X (anterior–posterior)", "About Y (long axis)"),
+                        ("About Z", "About X", "About Y"),
+                        ("Along X (anterior)", "Along Y (superior)", "Along Z (right)"),
+                        ("Along X", "Along Y", "Along Z")),
+                 False: (("About axis 3", "About axis 1", "About axis 2"), ("Axis 3", "Axis 1", "Axis 2"),
+                         ("Along axis 1", "Along axis 2", "Along axis 3"), ("Along 1", "Along 2", "Along 3"))}
 
+WU2002 = "Wu G et al. (2002) ISB recommendation, part I: ankle, hip and spine. J Biomech 35:543–548"
+GROOD = "Grood ES, Suntay WJ (1983) J Biomech Eng 105:136–144"
 
-KNEE = _register(Template(
-    key="knee_grood_suntay",
-    title="Knee (tibiofemoral): Grood & Suntay, ISB femur and tibia axes",
-    summary=("Femur and tibia axes named as ISB (X anterior, Y superior, Z right), joined by the Grood & "
-             "Suntay joint coordinate system: flexion about the femur's Z axis, internal rotation about "
-             "the tibia's Y axis, ad/abduction about the floating axis between them. Works with partial "
-             "bones from biplanar videoradiography: where the hip centre or ankle isn't in the model, use the "
-             "centre of a band painted around the end of the shaft. Each bone's axes can instead come from an "
-             "automatic method fitted to its surface (no landmarks)."),
-    references=("Grood ES, Suntay WJ (1983) J Biomech Eng 105:136–144",
-                "Wu G et al. (2002) ISB recommendation, part I: ankle, hip and spine. J Biomech 35:543–548"),
-    bones=(
-        BoneRole("femur", "Femur", "isb_femur", (
-            LandmarkDef("ME", "Medial epicondyle", "Most prominent point of the medial epicondyle.",
-                        ("point", "region")),
-            LandmarkDef("LE", "Lateral epicondyle", "Most prominent point of the lateral epicondyle.",
-                        ("point", "region")),
-            LandmarkDef("FS", "Superior point (hip centre or shaft centre)",
-                        "Hip joint centre: paint the femoral head and use a sphere fit. On a partial femur, "
-                        "paint a band around the most proximal part of the shaft and use its centre.",
-                        ("region", "sphere", "point")),
-        ), "Origin at the epicondyle midpoint; Y towards the superior point; Z right; X anterior.",
-            ("femur_cylinder", "femur_spheres")),
-        BoneRole("tibia", "Tibia", "knee_tibia", (
-            LandmarkDef("MC", "Medial condyle", "Most medial point of the medial tibial condyle (plateau rim).",
-                        ("point", "region")),
-            LandmarkDef("LC", "Lateral condyle", "Most lateral point of the lateral tibial condyle (plateau rim).",
-                        ("point", "region")),
-            LandmarkDef("TD", "Distal point (malleoli midpoint or shaft centre)",
-                        "Midpoint between the malleoli if the model includes them. On a partial tibia, paint a "
-                        "band around the most distal part of the shaft and use its centre.",
-                        ("region", "point")),
-        ), "Origin at the condyle midpoint; Y from the distal point to the origin; Z right; X anterior.",
-            ("tibia_ellipse", "tibia_centroids", "tibia_inertia")),
-    ),
-    joints=(JointDef("knee", "Knee", "femur", "tibia", "grood_suntay_knee"),),
-))
+SEGMENT_TYPES: dict[str, SegmentType] = {t.key: t for t in [
+    SegmentType("femur", "Femur", (
+        LandmarkDef("ME", "Medial epicondyle", "Most prominent point of the medial epicondyle.", ("point", "region")),
+        LandmarkDef("LE", "Lateral epicondyle", "Most prominent point of the lateral epicondyle.", ("point", "region")),
+        LandmarkDef("FS", "Superior point (hip centre or shaft centre)",
+                    "Hip joint centre: paint the femoral head and use a sphere fit. On a partial femur, paint a band "
+                    "around the most proximal part of the shaft and use its centre.", ("region", "sphere", "point")),
+    ), "isb_femur", ("femur_cylinder", "femur_spheres"), True,
+        "Origin at the epicondyle midpoint; Y towards the superior point; Z right; X anterior.", (WU2002,)),
+    SegmentType("tibia", "Tibia", (
+        LandmarkDef("MC", "Medial condyle", "Most medial point of the medial tibial condyle (plateau rim).",
+                    ("point", "region")),
+        LandmarkDef("LC", "Lateral condyle", "Most lateral point of the lateral tibial condyle (plateau rim).",
+                    ("point", "region")),
+        LandmarkDef("TD", "Distal point (malleoli midpoint or shaft centre)",
+                    "Midpoint between the malleoli if the model includes them. On a partial tibia, paint a band "
+                    "around the most distal part of the shaft and use its centre.", ("region", "point")),
+    ), "knee_tibia", ("tibia_ellipse", "tibia_centroids", "tibia_inertia"), True,
+        "Origin at the condyle midpoint; Y from the distal point to the origin; Z right; X anterior.", (WU2002,)),
+    SegmentType("generic", "Other bone", (), None, ("inertial",), False,
+                "Principal axes of inertia: axis 1 is the long axis. No anatomical names."),
+]}
 
-GENERIC = _register(Template(
-    key="generic_inertial",
-    title="Generic joint: two bones, automatic inertial axes",
-    summary=("No landmarks needed: each bone's axes are its principal axes of inertia (axis 1 is the long "
-             "axis). Angles are a Cardan X-Y-Z sequence of the distal bone relative to the proximal bone. "
-             "Useful for any pair of bones (e.g. carpal bones) and for checking a workflow; the angles have "
-             "no clinical names."),
-    references=("Principal inertial axes, as used for carpal bones: Coburn JC et al. (2007) J Biomech 40:203–209",),
-    bones=(BoneRole("proximal", "Proximal bone", "inertial"), BoneRole("distal", "Distal bone", "inertial")),
-    joints=(JointDef("joint", "Joint", "proximal", "distal", "cardan_xyz"),),
-    sided=False,
-))
+JOINT_TYPES: dict[str, JointType] = {t.key: t for t in [
+    JointType("knee_grood_suntay", "Knee (tibiofemoral): Grood & Suntay", ("femur",), ("tibia",), "grood_suntay_knee",
+              "Flexion about the femur's Z axis, internal rotation about the tibia's Y axis, ad/abduction about the "
+              "floating axis between them. Left knees are mirrored so positive values mean the same motion on both "
+              "sides. ISB doesn't define the knee; this is the convention most BVR knee studies use.",
+              (GROOD, WU2002), "Knee"),
+    JointType("jcs_zxy", "Joint coordinate system (ISB style, any two segments)", ("femur", "tibia"),
+              ("femur", "tibia"), "jcs_zxy",
+              "Rotation about the proximal segment's Z axis, then the floating axis, then the distal segment's Y axis. "
+              "No clinical names or side mirroring.", (GROOD,)),
+    JointType("cardan_xyz", "Cardan X-Y-Z (any two segments)", (), (), "cardan_xyz",
+              "Rotations of the distal axes relative to the proximal axes as an X-Y-Z Cardan sequence. Works for any "
+              "segments, including inertial axes; the angles have no clinical names."),
+]}
+
+PRESETS = {
+    "knee": {"title": "Knee: femur + tibia + Grood & Suntay knee",
+             "segments": [("femur", "Femur"), ("tibia", "Tibia")],
+             "joints": [("knee_grood_suntay", "Femur", "Tibia", "Knee")]},
+}
 
 
 # ---------------------------------------------------------------- rotations
@@ -332,211 +360,411 @@ def decompose(R: np.ndarray, sequence: str) -> np.ndarray:
     return np.array([a, b, c])
 
 
-# ---------------------------------------------------------------- joint model
+# ---------------------------------------------------------------- model
 
-@dataclass
-class BoneEntry:
-    role: str
+def _rotation_mean(Rs) -> np.ndarray:
+    """Chordal mean of rotation matrices (projection of their average onto SO(3))."""
+    U, _, Vt = np.linalg.svd(np.mean(Rs, axis=0))
+    D = np.diag([1, 1, np.sign(np.linalg.det(U @ Vt))])
+    return U @ D @ Vt
+
+
+def _pose_mean(Ts) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3] = _rotation_mean([t[:3, :3] for t in Ts])
+    T[:3, 3] = np.mean([t[:3, 3] for t in Ts], axis=0)
+    return T
+
+
+@dataclass(eq=False)
+class Segment:
+    name: str
+    type: str                             # key in SEGMENT_TYPES
+    side: str = "right"                   # "right", "left" (anatomical segments) or "none"
     surface: object = None                # a core.models.BoneModel (surface file + model space settings)
-    landmarks: dict = field(default_factory=dict)    # key -> {"method": str, "points": [[x,y,z], ...]}
-    preview_tracking: str | None = None   # optional .tra to preview the joint at a frame
     axes_source: str = "landmarks"        # "landmarks", or an automatic method key (core.auto_axes)
-    auto_options: dict = field(default_factory=dict)  # e.g. {"flip_ap": True, "flip_long": False}
+    landmarks: dict = field(default_factory=dict)    # key -> {"method": str, "points": [[x,y,z], ...]}
+    auto_options: dict = field(default_factory=dict)  # e.g. {"flip_ap": True}
+    preview_tracking: str | None = None   # optional .tra used to preview the segment and its joints
 
     # runtime
     acs: np.ndarray | None = None
     error: str = ""
     auto: object = None                   # core.auto_axes.AutoResult when axes_source is automatic
 
+    @property
+    def stype(self) -> SegmentType:
+        return SEGMENT_TYPES[self.type]
+
+    @property
+    def mesh(self):
+        return getattr(self.surface, "mesh", None) if self.surface is not None else None
+
+
+@dataclass(eq=False)
+class Reference:
+    """A reference pose of a joint's two bones: their relative pose G0 = inv(T_prox) @ T_dist.
+
+    G0 relates the two surfaces' model spaces, so it stays valid if either segment's axes are
+    redefined later. mode: "subtract" (values at the reference are subtracted) or "realign" (the
+    distal axes are rotated to line up with the proximal axes at the reference, then translations
+    are subtracted). source records where it came from, for the record.
+    """
+
+    G0: np.ndarray
+    mode: str = "subtract"
+    source: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {"G0": self.G0.tolist(), "mode": self.mode, "source": self.source}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Reference":
+        return cls(np.array(d["G0"], float), d.get("mode", "subtract"), d.get("source", {}))
+
+
+REFERENCE_MODES = {
+    "subtract": "Subtract the reference values (angles and translations are 0 there)",
+    "realign": "Realign the distal axes to the proximal axes at the reference",
+}
+
+
+@dataclass(eq=False)
+class Joint:
+    name: str
+    type: str                             # key in JOINT_TYPES
+    proximal: str                         # segment names
+    distal: str
+    reference: Reference | None = None
+
+    @property
+    def jtype(self) -> JointType:
+        return JOINT_TYPES[self.type]
+
+    @property
+    def convention(self) -> dict:
+        return JOINT_CONVENTIONS[self.jtype.convention]
+
 
 @dataclass
-class JointModel:
-    template_key: str
-    side: str = "right"
-    name: str = "Joint model"
-    bones: dict = field(default_factory=dict)        # role -> BoneEntry
+class KinematicModel:
+    name: str = "Model"
+    segments: list = field(default_factory=list)     # [Segment]
+    joints: list = field(default_factory=list)       # [Joint]
     path: Path | None = None
     _auto_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
-    @property
-    def template(self) -> Template:
-        return TEMPLATES[self.template_key]
-
+    # ---- building
     @classmethod
-    def new(cls, template_key: str, side: str = "right") -> "JointModel":
-        t = TEMPLATES[template_key]
-        m = cls(template_key=template_key, side=side if t.sided else "right", name=t.title.split(":")[0])
-        for role in t.bones:
-            m.bones[role.key] = BoneEntry(role=role.key)
+    def preset(cls, key: str, side: str = "right") -> "KinematicModel":
+        p = PRESETS[key]
+        m = cls(name=p["title"].split(":")[0])
+        for t, n in p["segments"]:
+            m.add_segment(t, n, side)
+        for t, a, b, n in p["joints"]:
+            m.add_joint(t, a, b, n)
         return m
 
+    def segment(self, name: str) -> Segment:
+        for s in self.segments:
+            if s.name == name:
+                return s
+        raise JointModelError(f"No segment named {name!r}.")
+
+    def joint(self, name: str) -> Joint:
+        for j in self.joints:
+            if j.name == name:
+                return j
+        raise JointModelError(f"No joint named {name!r}.")
+
+    def _unique(self, base: str, taken) -> str:
+        name, k = base, 2
+        while name in taken:
+            name, k = f"{base} {k}", k + 1
+        return name
+
+    def add_segment(self, type_key: str, name: str | None = None, side: str = "right") -> Segment:
+        t = SEGMENT_TYPES[type_key]
+        seg = Segment(name=self._unique(name or t.title, {s.name for s in self.segments}), type=type_key,
+                      side=side if t.anatomical else "none")
+        seg.axes_source = t.auto_methods[0] if t.auto_methods else "landmarks"
+        self.segments.append(seg)
+        return seg
+
+    def remove_segment(self, name: str) -> None:
+        self.segments = [s for s in self.segments if s.name != name]
+        self.joints = [j for j in self.joints if name not in (j.proximal, j.distal)]
+
+    def rename_segment(self, old: str, new: str) -> str:
+        new = new.strip()
+        if not new or new == old:
+            return old
+        new = self._unique(new, {s.name for s in self.segments if s.name != old})
+        self.segment(old).name = new
+        for j in self.joints:
+            j.proximal = new if j.proximal == old else j.proximal
+            j.distal = new if j.distal == old else j.distal
+        return new
+
+    def candidates(self, joint_type: str, end: str) -> list[Segment]:
+        """Segments that can be the proximal or distal end of a joint type."""
+        jt = JOINT_TYPES[joint_type]
+        allowed = jt.proximal_types if end == "proximal" else jt.distal_types
+        return [s for s in self.segments if not allowed or s.type in allowed]
+
+    def add_joint(self, type_key: str, proximal: str, distal: str, name: str | None = None) -> Joint:
+        jt = JOINT_TYPES[type_key]
+        p, d = self.segment(proximal), self.segment(distal)
+        if p is d:
+            raise JointModelError("A joint needs two different segments.")
+        if jt.proximal_types and p.type not in jt.proximal_types:
+            raise JointModelError(f"{jt.title} needs a {' or '.join(jt.proximal_types)} as the proximal segment.")
+        if jt.distal_types and d.type not in jt.distal_types:
+            raise JointModelError(f"{jt.title} needs a {' or '.join(jt.distal_types)} as the distal segment.")
+        j = Joint(self._unique(name or jt.default_name, {x.name for x in self.joints}), type_key, p.name, d.name)
+        self.joints.append(j)
+        return j
+
+    def remove_joint(self, name: str) -> None:
+        self.joints = [j for j in self.joints if j.name != name]
+
+    def rename_joint(self, old: str, new: str) -> str:
+        new = new.strip()
+        if not new or new == old:
+            return old
+        new = self._unique(new, {j.name for j in self.joints if j.name != old})
+        self.joint(old).name = new
+        return new
+
+    def joint_side(self, j: Joint) -> str:
+        """Side used for a joint's sign convention: the distal segment's side (right if it has none)."""
+        side = self.segment(j.distal).side
+        return side if side in ("right", "left") else "right"
+
     # ---- landmarks
-    def landmark(self, role: str, key: str) -> np.ndarray | None:
-        lm = self.bones[role].landmarks.get(key)
+    def landmark(self, seg: str, key: str) -> np.ndarray | None:
+        lm = self.segment(seg).landmarks.get(key)
         if not lm:
             return None
         return landmark_value(lm["method"], lm.get("points"))
 
-    def uses_landmarks(self, role: str) -> bool:
-        return self.bones[role].axes_source == "landmarks"
+    def uses_landmarks(self, seg: str) -> bool:
+        return self.segment(seg).axes_source == "landmarks"
 
-    def set_axes_source(self, role: str, source: str) -> None:
-        if source != "landmarks" and source not in self.template.role(role).auto_methods:
-            raise JointModelError(f"{source!r} isn't an automatic method for this bone.")
-        self.bones[role].axes_source = source
-
-    def missing(self, role: str) -> list[str]:
-        if not self.uses_landmarks(role):
+    def missing(self, seg: str) -> list[str]:
+        if not self.uses_landmarks(seg):
             return []
-        r = self.template.role(role)
-        return [d.name for d in r.landmarks if self.landmark(role, d.key) is None]
+        return [d.name for d in self.segment(seg).stype.landmarks if self.landmark(seg, d.key) is None]
 
-    # ---- coordinate systems
-    def compute(self) -> None:
-        """(Re)compute every bone's ACS from its landmarks or automatic method; failures go in BoneEntry.error."""
-        for role in self.template.bones:
-            e = self.bones[role.key]
-            e.acs, e.error, e.auto = None, "", None
-            if e.surface is None or getattr(e.surface, "mesh", None) is None:
-                e.error = "No surface loaded."
-                continue
-            if e.axes_source != "landmarks":
-                self._compute_auto(role, e)
-                continue
-            miss = self.missing(role.key)
-            if miss:
-                e.error = "Missing: " + ", ".join(miss)
-                continue
-            L = {d.key: self.landmark(role.key, d.key) for d in role.landmarks}
-            try:
-                e.acs = RECIPES[role.recipe](L, self.side, e.surface.mesh)
-            except JointModelError as err:
-                e.error = str(err)
-        return None
+    # ---- axes
+    def axes_sources(self, seg: str) -> list[tuple[str, str]]:
+        """(key, title) of every way this segment's axes can be made: automatic methods, then landmarks."""
+        from .auto_axes import AUTO_METHODS
 
-    def _auto_result(self, role_key: str, source: str, options: dict):
-        """AutoResult (or the JointModelError it raised) for a bone and automatic method, cached."""
+        t = self.segment(seg).stype
+        out = [(k, "Automatic: " + AUTO_METHODS[k].title) for k in t.auto_methods]
+        return out + ([("landmarks", "Landmarks (placed by hand)")] if t.landmarks else [])
+
+    def set_axes_source(self, seg: str, source: str) -> None:
+        if source not in dict(self.axes_sources(seg)):
+            raise JointModelError(f"{source!r} isn't a way to make axes for this segment.")
+        self.segment(seg).axes_source = source
+
+    def _auto_result(self, s: Segment, source: str, options: dict):
         from . import auto_axes
 
-        e = self.bones[role_key]
-        key = (role_key, source, tuple(sorted(options.items())), id(e.surface.mesh))
+        key = (s.type, source, tuple(sorted(options.items())), id(s.mesh))
         if key not in self._auto_cache:
             try:
-                self._auto_cache[key] = auto_axes.run(source, e.surface.mesh, self.side, options)
+                self._auto_cache[key] = auto_axes.run(source, s.mesh, s.side, options)
             except JointModelError as err:
                 self._auto_cache[key] = err
             except Exception as err:  # noqa: BLE001 - geometry can fail in many ways; report it
                 self._auto_cache[key] = JointModelError(f"The automatic method failed: {err}")
         return self._auto_cache[key]
 
-    def _compute_auto(self, role, e) -> None:
-        res = self._auto_result(role.key, e.axes_source, e.auto_options)
-        if isinstance(res, Exception):
-            e.error = str(res)
-        else:
-            e.auto, e.acs = res, res.acs.copy()
-
-    def axes_sources(self, role_key: str) -> list[tuple[str, str]]:
-        """(key, title) of every way this bone's axes can be made: landmarks, then automatic methods."""
-        from .auto_axes import AUTO_METHODS
-
-        r = self.template.role(role_key)
-        out = [("landmarks", "Landmarks (placed by hand)")] if r.landmarks else []
-        return out + [(k, "Automatic: " + AUTO_METHODS[k].title) for k in r.auto_methods]
-
-    def axes_for(self, role_key: str, source: str):
-        """This bone's ACS from a given source, without changing the model. Returns (acs or None, error)."""
-        e = self.bones[role_key]
-        if e.surface is None or getattr(e.surface, "mesh", None) is None:
+    def axes_for(self, seg: str, source: str):
+        """A segment's ACS from a given source, without changing the model. Returns (acs or None, error)."""
+        s = self.segment(seg)
+        if s.mesh is None:
             return None, "No surface loaded."
         if source == "landmarks":
-            r = self.template.role(role_key)
-            L = {d.key: self.landmark(role_key, d.key) for d in r.landmarks}
-            miss = [d.name for d in r.landmarks if L[d.key] is None]
+            t = s.stype
+            L = {d.key: self.landmark(seg, d.key) for d in t.landmarks}
+            miss = [d.name for d in t.landmarks if L[d.key] is None]
             if miss:
                 return None, "Missing: " + ", ".join(miss)
             try:
-                return RECIPES[r.recipe](L, self.side, e.surface.mesh), ""
+                return RECIPES[t.recipe](L, s.side if s.side in ("right", "left") else "right", s.mesh), ""
             except JointModelError as err:
                 return None, str(err)
-        opts = e.auto_options if source == e.axes_source else {}
-        res = self._auto_result(role_key, source, opts)
+        res = self._auto_result(s, source, s.auto_options if source == s.axes_source else {})
         return (None, str(res)) if isinstance(res, Exception) else (res.acs.copy(), "")
 
-    def compare_methods(self, joint_key: str, prox_pose: np.ndarray, dist_pose: np.ndarray) -> list[dict]:
-        """Joint angles at one pose for every combination of the two bones' axis sources."""
-        j = next(j for j in self.template.joints if j.key == joint_key)
+    def compute(self) -> None:
+        """(Re)compute every segment's ACS; failures go in Segment.error."""
+        for s in self.segments:
+            s.acs, s.error, s.auto = None, "", None
+            if s.mesh is None:
+                s.error = "No surface loaded."
+                continue
+            if s.axes_source != "landmarks":
+                res = self._auto_result(s, s.axes_source, s.auto_options)
+                if isinstance(res, Exception):
+                    s.error = str(res)
+                else:
+                    s.auto, s.acs = res, res.acs.copy()
+                continue
+            s.acs, s.error = self.axes_for(s.name, "landmarks")
+
+    def checks(self) -> list[str]:
+        """Plain-language warnings about axes, landmarks and joints that look wrong."""
+        out = []
+        for s in self.segments:
+            if s.auto is not None:
+                out += [f"{s.name}: {n}" for n in s.auto.notes]
+            if s.type in ("femur", "tibia") and self.uses_landmarks(s.name):
+                a, b, far = ("ME", "LE", "FS") if s.type == "femur" else ("MC", "LC", "TD")
+                pa, pb, pf = self.landmark(s.name, a), self.landmark(s.name, b), self.landmark(s.name, far)
+                if pa is not None and pb is not None:
+                    w = np.linalg.norm(pb - pa)
+                    if not 35 <= w <= 130:
+                        out.append(f"{s.name}: medial and lateral points are {w:.0f} mm apart (expected about "
+                                   "35–130 mm). Check they're on opposite sides.")
+                    if pf is not None:
+                        long = pf - (pa + pb) / 2
+                        if np.linalg.norm(long) < 30:
+                            out.append(f"{s.name}: the long-axis point is only {np.linalg.norm(long):.0f} mm from "
+                                       "the joint end. Put it further along the shaft.")
+                        elif abs(np.dot(_unit(long, "axis"), _unit(pb - pa, "axis"))) > 0.5:
+                            out.append(f"{s.name}: the long axis is far from perpendicular to the medial–lateral "
+                                       "line.")
+        for j in self.joints:
+            p, d = self.segment(j.proximal), self.segment(j.distal)
+            if j.jtype.convention == "grood_suntay_knee" and p.side != d.side:
+                out.append(f"{j.name}: {p.name} is {p.side} but {d.name} is {d.side}.")
+        return out
+
+    # ---- kinematics
+    def _joint_acs(self, j: Joint, normalise: bool):
+        A, B = self.segment(j.proximal).acs, self.segment(j.distal).acs
+        if A is None or B is None:
+            raise JointModelError(f"{j.name}: both segments need complete axes first.")
+        B = B.copy()
+        if normalise and j.reference is not None and j.reference.mode == "realign":
+            Q0 = np.linalg.inv(A) @ j.reference.G0 @ B          # distal ACS in proximal ACS at the reference
+            B[:3, :3] = B[:3, :3] @ Q0[:3, :3].T
+        return A, B
+
+    def reference_values(self, joint: str, normalise_mode: str | None = None) -> dict:
+        """Joint angles/translations at the reference pose (before normalising)."""
+        j = self.joint(joint)
+        if j.reference is None:
+            raise JointModelError(f"{j.name} has no reference pose.")
+        A, B = self._joint_acs(j, normalise=(normalise_mode or j.reference.mode) == "realign")
+        return _kinematics(j, self.joint_side(j), A, B, np.eye(4)[None], j.reference.G0[None])
+
+    def joint_kinematics(self, joint: str, prox_poses: np.ndarray, dist_poses: np.ndarray,
+                         normalise: bool = True) -> dict:
+        """Joint angles (degrees) and translations (mm) per frame; NaN where either bone is untracked.
+
+        prox_poses, dist_poses: (n, 4, 4) tracking poses of the two bones. With normalise and a
+        reference pose, the values are relative to the reference (see Reference).
+        """
+        j = self.joint(joint)
+        A, B = self._joint_acs(j, normalise)
+        k = _kinematics(j, self.joint_side(j), A, B, prox_poses, dist_poses)
+        if normalise and j.reference is not None:
+            r = _kinematics(j, self.joint_side(j), A, B, np.eye(4)[None], j.reference.G0[None])
+            if j.reference.mode == "subtract":
+                k["angles"] = k["angles"] - r["angles"][0]
+            k["translations"] = k["translations"] - r["translations"][0]
+            k["normalised"] = j.reference.mode
+        return k
+
+    def segment_kinematics(self, seg: str, poses: np.ndarray, reference="first") -> dict:
+        """A segment's own motion: rotation about its own axes and displacement of its origin.
+
+        reference: "first" (first tracked frame), a frame index, or "lab" (the tracking's world axes).
+        Rotations are the segment's orientation relative to the reference orientation, as an intrinsic
+        Z-X-Y sequence about the segment's axes; translations are the origin's displacement, along the
+        reference axes (or the lab axes).
+        """
+        s = self.segment(seg)
+        if s.acs is None:
+            raise JointModelError(f"{seg}: no axes yet.")
+        n = len(poses)
+        W = np.einsum("nij,jk->nik", np.nan_to_num(poses, nan=0.0), s.acs)
+        ok = ~np.isnan(poses).any(axis=(1, 2))
+        if isinstance(reference, str) and reference == "lab":
+            R0, o0 = np.eye(3), np.zeros(3)
+        else:
+            r = int(np.argmax(ok)) if reference == "first" else int(reference)
+            if not 0 <= r < n or not ok[r]:
+                raise JointModelError("The reference frame isn't tracked.")
+            R0, o0 = W[r, :3, :3], W[r, :3, 3]
+        ang = np.full((n, 3), np.nan)
+        tr = np.full((n, 3), np.nan)
+        for f in np.flatnonzero(ok):
+            ang[f] = np.degrees(decompose(R0.T @ W[f, :3, :3], SEGMENT_SEQUENCE))
+            tr[f] = R0.T @ (W[f, :3, 3] - o0)
+        names, short, tn, ts = SEGMENT_NAMES[s.stype.anatomical and s.axes_source != "inertial"]
+        return {"angles": ang, "translations": tr, "names": names, "short": short, "t_names": tn, "t_short": ts,
+                "title": "Segment rotation about its own axes (Z-X-Y)"}
+
+    def compare_methods(self, joint: str, prox_pose: np.ndarray, dist_pose: np.ndarray) -> list[dict]:
+        """Joint angles at one pose for every combination of the two segments' axis sources (no reference)."""
+        j = self.joint(joint)
         rows = []
         for ps, pt in self.axes_sources(j.proximal):
             A, _ = self.axes_for(j.proximal, ps)
             for ds, dt in self.axes_sources(j.distal):
                 B, _ = self.axes_for(j.distal, ds)
                 row = {"proximal": ps, "distal": ds, "proximal_title": pt, "distal_title": dt,
-                       "current": ps == self.bones[j.proximal].axes_source and ds == self.bones[j.distal].axes_source}
+                       "current": ps == self.segment(j.proximal).axes_source
+                       and ds == self.segment(j.distal).axes_source}
                 if A is None or B is None:
                     row["angles"] = row["translations"] = None
                 else:
-                    k = _kinematics(j, self.side, A, B, prox_pose[None], dist_pose[None])
+                    k = _kinematics(j, self.joint_side(j), A, B, prox_pose[None], dist_pose[None])
                     row["angles"], row["translations"] = k["angles"][0], k["translations"][0]
                 rows.append(row)
         return rows
 
-    def checks(self) -> list[str]:
-        """Plain-language warnings about landmarks that look wrong."""
-        out = []
-        t = self.template
-        for r in t.bones:
-            e = self.bones[r.key]
-            if e.auto is not None:
-                out += [f"{r.title}: {n}" for n in e.auto.notes]
-        if t.key == KNEE.key:
-            for role, a, b, far, lo, hi in [("femur", "ME", "LE", "FS", 35, 130), ("tibia", "MC", "LC", "TD", 35, 130)]:
-                if not self.uses_landmarks(role):
-                    continue
-                pa, pb, pf = self.landmark(role, a), self.landmark(role, b), self.landmark(role, far)
-                if pa is not None and pb is not None:
-                    w = np.linalg.norm(pb - pa)
-                    if not lo <= w <= hi:
-                        out.append(f"{role.title()}: medial and lateral points are {w:.0f} mm apart (expected "
-                                   f"about {lo}–{hi} mm). Check they're on opposite sides.")
-                    if pf is not None:
-                        mid = (pa + pb) / 2
-                        long = pf - mid
-                        if np.linalg.norm(long) < 30:
-                            out.append(f"{role.title()}: the long-axis point is only {np.linalg.norm(long):.0f} mm "
-                                       "from the joint end. Put it further along the shaft.")
-                        else:
-                            cosang = abs(np.dot(_unit(long, 'axis'), _unit(pb - pa, 'axis')))
-                            if cosang > 0.5:
-                                out.append(f"{role.title()}: the long axis is {np.degrees(np.arccos(cosang)):.0f}° "
-                                           "from the medial–lateral line (expected near 90°).")
-        return out
+    # ---- reference poses
+    def set_reference_from_tracking(self, joint: str, prox_poses, dist_poses, frames=None, mode: str = "subtract",
+                                    source: dict | None = None) -> int:
+        """Reference = the average relative pose over the given frames (default: every frame both are tracked).
 
-    # ---- kinematics
-    def joint_kinematics(self, joint_key: str, prox_poses: np.ndarray, dist_poses: np.ndarray) -> dict:
-        """Joint angles (degrees) and translations (mm) for each frame.
-
-        prox_poses, dist_poses: (n, 4, 4) tracking poses of the two bones (NaN where untracked).
-        Returns {"angles": (n,3), "translations": (n,3), "names": ..., "short": ...}; NaN where either
-        bone is untracked.
+        Returns the number of frames used.
         """
-        j = next(j for j in self.template.joints if j.key == joint_key)
-        A = self.bones[j.proximal].acs
-        B = self.bones[j.distal].acs
-        if A is None or B is None:
-            raise JointModelError("Both bones need complete axes first.")
-        return _kinematics(j, self.side, A, B, prox_poses, dist_poses)
+        P, D = np.asarray(prox_poses, float), np.asarray(dist_poses, float)
+        n = min(len(P), len(D))
+        idx = range(n) if frames is None else [f for f in frames if 0 <= f < n]
+        G = [np.linalg.inv(P[f]) @ D[f] for f in idx if not (np.isnan(P[f]).any() or np.isnan(D[f]).any())]
+        if not G:
+            raise JointModelError("No frame has both bones tracked.")
+        self.joint(joint).reference = Reference(_pose_mean(G), mode, dict(source or {}, frames_used=len(G)))
+        return len(G)
+
+    def set_reference_from_poses(self, joint: str, prox_pose, dist_pose, mode: str = "subtract",
+                                 source: dict | None = None) -> None:
+        """Reference = one pose of each bone, e.g. where they were in the scan (from their .tfm files)."""
+        G0 = np.linalg.inv(np.asarray(prox_pose, float)) @ np.asarray(dist_pose, float)
+        self.joint(joint).reference = Reference(G0, mode, dict(source or {}))
 
     # ---- files
     def to_dict(self) -> dict:
         return {
             "type": "bvr-joint-model", "version": MODEL_VERSION, "name": self.name,
-            "template": self.template_key, "side": self.side,
-            "bones": {role: {"surface": e.surface.to_dict() if e.surface is not None else None,
-                             "landmarks": e.landmarks, "preview_tracking": e.preview_tracking,
-                             "axes_source": e.axes_source, "auto_options": e.auto_options,
-                             "acs": e.acs.tolist() if e.acs is not None else None}
-                      for role, e in self.bones.items()},
+            "segments": [{"name": s.name, "type": s.type, "side": s.side,
+                          "surface": s.surface.to_dict() if s.surface is not None else None,
+                          "axes_source": s.axes_source, "auto_options": s.auto_options, "landmarks": s.landmarks,
+                          "preview_tracking": s.preview_tracking,
+                          "acs": s.acs.tolist() if s.acs is not None else None} for s in self.segments],
+            "joints": [{"name": j.name, "type": j.type, "proximal": j.proximal, "distal": j.distal,
+                        "reference": j.reference.to_dict() if j.reference is not None else None}
+                       for j in self.joints],
         }
 
     def save(self, path: str | Path) -> None:
@@ -544,44 +772,76 @@ class JointModel:
         self.path = Path(path)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "JointModel":
+    def from_dict(cls, d: dict) -> "KinematicModel":
         from .models import BoneModel
 
         if d.get("type") != "bvr-joint-model":
             raise JointModelError("This isn't a joint model file.")
-        if d.get("template") not in TEMPLATES:
-            raise JointModelError(f"Unknown template {d.get('template')!r}.")
-        m = cls.new(d["template"], d.get("side", "right"))
-        m.name = d.get("name", m.name)
-        for role, b in d.get("bones", {}).items():
-            if role not in m.bones:
-                continue
-            e = m.bones[role]
-            e.surface = BoneModel.from_dict(b["surface"]) if b.get("surface") else None
-            e.landmarks = b.get("landmarks", {}) or {}
-            e.preview_tracking = b.get("preview_tracking")
-            src = b.get("axes_source", "landmarks")
-            e.axes_source = src if src == "landmarks" or src in m.template.role(role).auto_methods else "landmarks"
-            e.auto_options = dict(b.get("auto_options") or {})
-            if b.get("acs") is not None:
-                e.acs = np.array(b["acs"], float)
+        if d.get("version", 1) < 2:
+            d = _upgrade_v1(d)
+        m = cls(name=d.get("name", "Model"))
+        for sd in d.get("segments", []):
+            if sd.get("type") not in SEGMENT_TYPES:
+                raise JointModelError(f"Unknown segment type {sd.get('type')!r}.")
+            s = Segment(name=sd["name"], type=sd["type"], side=sd.get("side", "right"),
+                        surface=BoneModel.from_dict(sd["surface"]) if sd.get("surface") else None,
+                        landmarks=sd.get("landmarks") or {}, auto_options=dict(sd.get("auto_options") or {}),
+                        preview_tracking=sd.get("preview_tracking"))
+            src = sd.get("axes_source", "landmarks")
+            m.segments.append(s)
+            s.axes_source = src if src in dict(m.axes_sources(s.name)) else m.axes_sources(s.name)[0][0]
+            if sd.get("acs") is not None:
+                s.acs = np.array(sd["acs"], float)
+        for jd in d.get("joints", []):
+            if jd.get("type") not in JOINT_TYPES:
+                raise JointModelError(f"Unknown joint type {jd.get('type')!r}.")
+            j = Joint(jd["name"], jd["type"], jd["proximal"], jd["distal"])
+            if jd.get("reference"):
+                j.reference = Reference.from_dict(jd["reference"])
+            m.joints.append(j)
         return m
 
     @classmethod
-    def load(cls, path: str | Path, build_surfaces: bool = True) -> "JointModel":
+    def load(cls, path: str | Path, build_surfaces: bool = True) -> "KinematicModel":
         m = cls.from_dict(json.loads(Path(path).read_text()))
         m.path = Path(path)
         if build_surfaces:
-            for e in m.bones.values():
-                if e.surface is not None:
-                    e.surface.build()
+            for s in m.segments:
+                if s.surface is not None:
+                    s.surface.build()
             m.compute()
         return m
 
 
-def _kinematics(j: JointDef, side: str, A: np.ndarray, B: np.ndarray, prox_poses, dist_poses) -> dict:
+def _upgrade_v1(d: dict) -> dict:
+    """Version-1 files (one template, bones by role) -> segments and joints."""
+    side = d.get("side", "right")
+    if d.get("template") == "knee_grood_suntay":
+        roles = {"femur": ("Femur", "femur"), "tibia": ("Tibia", "tibia")}
+        joints = [{"name": "Knee", "type": "knee_grood_suntay", "proximal": "Femur", "distal": "Tibia"}]
+    elif d.get("template") == "generic_inertial":
+        roles = {"proximal": ("Proximal bone", "generic"), "distal": ("Distal bone", "generic")}
+        joints = [{"name": "Joint", "type": "cardan_xyz", "proximal": "Proximal bone", "distal": "Distal bone"}]
+        side = "none"
+    else:
+        raise JointModelError(f"Unknown template {d.get('template')!r}.")
+    segs = []
+    for role, (name, typ) in roles.items():
+        b = d.get("bones", {}).get(role, {})
+        src = b.get("axes_source", "landmarks" if typ != "generic" else "inertial")
+        segs.append({"name": name, "type": typ, "side": side, "surface": b.get("surface"), "axes_source": src,
+                     "auto_options": b.get("auto_options"), "landmarks": b.get("landmarks"),
+                     "preview_tracking": b.get("preview_tracking"), "acs": b.get("acs")})
+    return {"type": "bvr-joint-model", "version": 2, "name": d.get("name", "Model"), "segments": segs,
+            "joints": joints}
+
+
+JointModel = KinematicModel      # older name
+
+
+def _kinematics(j: "Joint", side: str, A: np.ndarray, B: np.ndarray, prox_poses, dist_poses) -> dict:
     """Angles and translations of joint j for proximal/distal ACSs A, B over (n, 4, 4) poses."""
-    conv = JOINT_CONVENTIONS[j.convention]
+    conv = j.convention
     n = min(len(prox_poses), len(dist_poses))
     ang = np.full((n, 3), np.nan)
     tr = np.full((n, 3), np.nan)
