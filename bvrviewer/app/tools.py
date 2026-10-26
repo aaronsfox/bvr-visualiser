@@ -34,6 +34,17 @@ TOOLS: list[ToolType] = [
         available=True,
     ),
     ToolType(
+        key="model_builder",
+        title="Model Builder",
+        tab_title="Model",
+        blurb="Define joints on your bone models from ISB or published templates, and save the model.",
+        details=("Pick landmarks, or paint a surface region and use its centre",
+                 "Templates (ISB, published foot models) or your own joints",
+                 "Saved models feed joint angles into the other tools"),
+        color="#B78AF0",
+        available=False,
+    ),
+    ToolType(
         key="reliability",
         title="Reliability Analysis",
         tab_title="Reliability",

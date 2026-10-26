@@ -43,6 +43,12 @@ class ToolIcon(QWidget):
             dashed = QPen(c, 2.2, Qt.DashLine, Qt.RoundCap, Qt.RoundJoin)
             p.setPen(dashed)
             p.drawPolyline([QPointF(9, 33), QPointF(16, 24), QPointF(23, 28), QPointF(35, 16)])
+        elif self.key == "model_builder":       # two segments joined at a joint, with an axis
+            p.drawLine(QPointF(10, 34), QPointF(20, 22))
+            p.drawLine(QPointF(24, 22), QPointF(34, 10))
+            p.drawEllipse(QPointF(22, 22), 3.2, 3.2)
+            p.drawLine(QPointF(10, 34), QPointF(10, 27))
+            p.drawLine(QPointF(10, 34), QPointF(17, 34))
         elif self.key == "validity":            # a target: agreement with a criterion
             p.drawEllipse(QPointF(22, 22), 12, 12)
             p.drawEllipse(QPointF(22, 22), 6, 6)
@@ -140,11 +146,12 @@ class StartPage(QWidget):
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(18)
         self.cards: dict[str, ToolCard] = {}
+        cols = 2 if len(TOOLS) == 4 else 3          # 2 × 2 fits smaller laptop screens
         for i, t in enumerate(TOOLS):
             card = ToolCard(t)
             card.clicked.connect(self.openTool.emit)
             self.cards[t.key] = card
-            grid.addWidget(card, i // 3, i % 3)
+            grid.addWidget(card, i // cols, i % cols)
         v.addLayout(grid)
         v.addSpacing(16)
         r = QHBoxLayout()
