@@ -6,6 +6,8 @@ or an item offers its actions; selecting an item fills the properties sheet belo
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -24,6 +26,7 @@ OBJ_ROLE = Qt.UserRole + 1
 # Item kinds
 MODELS, MODEL, TRACKING, CAMERAS, CAMERA, SCENE = "models", "model", "tracking", "cameras", "camera", "scene"
 JOINTS, JOINT = "joints", "joint"
+AXES = "axes"
 
 
 def _dot_icon(color: str, size: int = 14, ring: bool = False) -> QIcon:
@@ -48,7 +51,8 @@ class Navigator(QTreeWidget):
 
     itemSelected = Signal(str, object)              # kind, object (None for levels)
     menuRequested = Signal(str, object, QPoint)     # kind, object, global position
-    visibilityToggled = Signal(object, bool)        # model or camera
+    visibilityToggled = Signal(object, bool)        # model, camera or joint
+    axesToggled = Signal(object, bool)              # model whose coordinate-system axes are shown/hidden
     renamed = Signal(object, str)                   # model or camera, new name
     activated = Signal(str, object)                 # double-click on a camera: view through it
 
@@ -70,8 +74,7 @@ class Navigator(QTreeWidget):
         self.roots: dict[str, QTreeWidgetItem] = {}
         bold = QFont()
         bold.setBold(True)
-        for kind, text in [(MODELS, "Models"), (CAMERAS, "X-ray cameras"), (JOINTS, "Segments & joints"),
-                           (SCENE, "Scene")]:
+        for kind, text in [(MODELS, "Models"), (CAMERAS, "X-ray cameras"), (JOINTS, "Joints"), (SCENE, "Scene")]:
             it = QTreeWidgetItem([text])
             it.setData(0, KIND_ROLE, kind)
             it.setFont(0, bold)
@@ -81,7 +84,7 @@ class Navigator(QTreeWidget):
             self.roots[kind] = it
         self.roots[MODELS].setToolTip(0, "Right-click to add a model")
         self.roots[CAMERAS].setToolTip(0, "Optional. Right-click to add an X-ray camera")
-        self.roots[JOINTS].setToolTip(0, "Optional. Right-click to load a model from the Model Builder")
+        self.roots[JOINTS].setToolTip(0, "Optional. Right-click to add joints from a Model Builder file")
         self.roots[SCENE].setToolTip(0, "Axes, grid, background, motion trail, untracked frames")
 
     # ---- building
@@ -108,6 +111,11 @@ class Navigator(QTreeWidget):
             child.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             it.addChild(child)
             self.refresh_item(child)
+            axes = QTreeWidgetItem([""])
+            self._set(axes, AXES, m)
+            axes.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+            it.addChild(axes)
+            self.refresh_item(axes)
             it.setExpanded(first_build or id(m) in expanded or m.tracking is None)
         if not n_cams:
             self._placeholder(self.roots[CAMERAS], "Optional: right-click to add")
@@ -118,9 +126,9 @@ class Navigator(QTreeWidget):
             self.roots[CAMERAS].addChild(it)
             self.refresh_item(it)
         n_j = len(state.joints)
-        self.roots[JOINTS].setText(0, f"Segments & joints ({n_j})" if n_j else "Segments & joints")
+        self.roots[JOINTS].setText(0, f"Joints ({n_j})" if n_j else "Joints")
         if not n_j:
-            self._placeholder(self.roots[JOINTS], "Optional: right-click to load a model")
+            self._placeholder(self.roots[JOINTS], "Optional: right-click to add a joint")
         for jl in state.joints:
             it = QTreeWidgetItem([jl.label])
             self._set(it, JOINT, jl)
@@ -195,6 +203,22 @@ class Navigator(QTreeWidget):
                 it.setText(0, "No tracking (right-click to attach)")
                 it.setForeground(0, QBrush(QColor("#F2C48D")))
                 it.setToolTip(0, "This model stays in its model pose until a .tra file is attached.")
+        elif kind == AXES:
+            m = obj
+            if m.has_axes:
+                ok = m.acs is not None
+                it.setText(0, f"Axes: {m.axes_segment} · {Path(m.axes_path).name}" + ("" if ok else " (not found)"))
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(0, Qt.Checked if m.axes_visible else Qt.Unchecked)
+                it.setForeground(0, QBrush(QColor("#5CC8A8" if ok else "#F2C48D")))
+                it.setToolTip(0, f"Coordinate system from {m.axes_path}\nTick to show the axes. Select for this "
+                                 "bone's motion about its own axes.")
+            else:
+                it.setText(0, "No coordinate system (right-click to add)")
+                it.setData(0, Qt.CheckStateRole, None)
+                it.setForeground(0, QBrush(QColor("#7A8291")))
+                it.setToolTip(0, "Optional: axes from a Model Builder file give this bone's motion about its own "
+                                 "axes, and are used by joints.")
         elif kind == CAMERA:
             cam: XrayCamera = obj
             it.setText(0, cam.name)
@@ -240,6 +264,12 @@ class Navigator(QTreeWidget):
         if self._building:
             return
         kind, obj = self._kind(it), self._obj(it)
+        if kind == AXES:
+            if obj.has_axes and it.data(0, Qt.CheckStateRole) is not None:
+                on = it.checkState(0) == Qt.Checked
+                if on != obj.axes_visible:
+                    self.axesToggled.emit(obj, on)
+            return
         if kind not in (MODEL, CAMERA, JOINT):
             return
         on = it.checkState(0) == Qt.Checked

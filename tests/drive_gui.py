@@ -287,12 +287,14 @@ tab.refresh_all()
 expected = [
     ("models", None, ["Add model…", "Show all", "Hide all"]),
     ("model", tab.state.models[0], ["Replace tracking…", "Tracking format…", "Detach tracking",
-                                     "Hold this bone still", "Hide", "Rename", "Use file name as name",
+                                     "Add coordinate system…", "Hold this bone still", "Hide", "Rename", "Use file name as name",
                                      "Replace model file…", "Voxel size / surface…", "Remove model"]),
     ("tracking", tab.state.models[2], ["Attach tracking…"]),
     ("cameras", None, ["Add X-ray camera…", "Import cameras from .cfg…"]),
     ("camera", tab.state.cameras[0], ["View through this camera", "Hide", "Rename",
                                        "Change calibration or images…", "Remove camera"]),
+    ("axes", tab.state.models[0], ["Add coordinate system…"]),
+    ("joints", None, ["Add joint…", "Hide curves"]),
     ("scene", None, ["Fit bones in view", "Free 3D view"]),
 ]
 for kind, obj, names in expected:

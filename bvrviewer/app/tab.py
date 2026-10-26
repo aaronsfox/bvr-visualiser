@@ -23,7 +23,7 @@ from ..core.transforms import TransformFileError
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
 from .joint_panel import JointCurves, SegmentMapDialog, guess_segment_map, write_csv, zeroed
 from .model_builder import add_triad
-from .navigator import CAMERA, CAMERAS, JOINT, JOINTS, MODEL, MODELS, SCENE, TRACKING, Navigator, PropertySheet
+from .navigator import AXES, CAMERA, CAMERAS, JOINT, JOINTS, MODEL, MODELS, SCENE, TRACKING, Navigator, PropertySheet
 from .panels import Timeline, h2, label
 from .scene import SceneController
 
@@ -132,7 +132,7 @@ class VisualiserTab(QWidget):
         self.selected: BoneModel | None = None          # model used for trail / coverage
         self.sel_kind: str = MODELS                     # what the navigator has selected
         self.sel_obj = None
-        self.curve_joint: KinItem | None = None         # segment or joint whose curves are shown
+        self.curve_joint = None                         # model (its coordinate system) or joint whose curves show
         self.show_curves = True
         self._kin: dict = {}                            # id(item) -> kinematics (before zeroing at a frame)
         self._joint_actors: dict = {}                   # id(item) -> [(actor list, model, acs)]
@@ -235,6 +235,7 @@ class VisualiserTab(QWidget):
         self.nav.itemSelected.connect(self._nav_selected)
         self.nav.menuRequested.connect(self._show_menu)
         self.nav.visibilityToggled.connect(self._toggle_visible)
+        self.nav.axesToggled.connect(self._toggle_axes)
         self.nav.renamed.connect(self._rename)
         self.nav.activated.connect(lambda _k, cam: self.set_xray_view(self.state.cameras.index(cam)))
         for key, fn in [(Qt.Key_Space, lambda: self.timeline.play.toggle()),
@@ -297,7 +298,7 @@ class VisualiserTab(QWidget):
         self.hint.setVisible(has)
         self.timeline.set_count(self.scene.n_frames)
         # (identity checks: models and cameras are dataclasses, so `in` would compare their fields)
-        if self.sel_kind in (MODEL, TRACKING) and not any(m is self.sel_obj for m in self.state.models):
+        if self.sel_kind in (MODEL, TRACKING, AXES) and not any(m is self.sel_obj for m in self.state.models):
             self.sel_kind, self.sel_obj = MODELS, None
         if self.sel_kind == CAMERA and not any(c is self.sel_obj for c in self.state.cameras):
             self.sel_kind, self.sel_obj = CAMERAS, None
@@ -343,8 +344,9 @@ class VisualiserTab(QWidget):
         self.sel_kind, self.sel_obj = kind, obj
         if kind in (MODEL, TRACKING) and obj is not self.selected:
             self.select(obj, from_nav=True)
-        if kind == JOINT and obj is not self.curve_joint:
-            self.curve_joint = obj
+        if kind == JOINT or (kind == AXES and obj is not None and obj.has_axes):
+            if obj is not self.curve_joint:
+                self.curve_joint = obj
             self._update_curves()
         self.show_properties()
 
@@ -421,6 +423,10 @@ class VisualiserTab(QWidget):
                 add("Tracking format…", lambda: self.edit_format(m))
                 add("Detach tracking", lambda: self.detach_tracking(m))
             if kind == MODEL:
+                add("Replace coordinate system…" if m.has_axes else "Add coordinate system…",
+                    lambda: self.add_axes(m))
+                if m.has_axes:
+                    add("Remove coordinate system", lambda: self.remove_axes(m))
                 menu.addSeparator()
                 add("Hold this bone still", lambda: self.hold_still(m, self.state.settings.hold_still != m.name),
                     enabled=m.tracking is not None, checked=self.state.settings.hold_still == m.name)
@@ -437,6 +443,17 @@ class VisualiserTab(QWidget):
                     add("Apply .tfm transform…", lambda: self.load_tfm(m))
                 menu.addSeparator()
                 add("Remove model", lambda: self.remove_model(m))
+        elif kind == AXES:
+            m: BoneModel = obj
+            add("Replace coordinate system…" if m.has_axes else "Add coordinate system…", lambda: self.add_axes(m))
+            if m.has_axes:
+                add("Show curves for this bone", lambda: self._set_curve_joint(m))
+                add("Hide axes" if m.axes_visible else "Show axes", lambda: self._toggle_axes(m, not m.axes_visible))
+                add("Zero at the current frame", lambda: self._set_reference(m, self.scene.frame))
+                add("Clear zero", lambda: self._set_reference(m, None), enabled=m.axes_zero is not None)
+                add("Export values (CSV)…", lambda: self.export_joint_csv(m))
+                menu.addSeparator()
+                add("Remove coordinate system", lambda: self.remove_axes(m))
         elif kind == CAMERAS:
             add("Add X-ray camera…", self.add_camera)
             add("Import cameras from .cfg…", self.import_cfg)
@@ -450,16 +467,15 @@ class VisualiserTab(QWidget):
             menu.addSeparator()
             add("Remove camera", lambda: self.remove_camera(i))
         elif kind == JOINTS:
-            add("Load model…", self.load_joint_model, enabled=bool(self.state.models))
+            add("Add joint…", self.load_joint_model, enabled=len(self.state.models) >= 2)
             add("Hide curves" if self.show_curves else "Show curves", self._toggle_curves,
                 enabled=bool(self.state.joints))
         elif kind == JOINT:
             jl: KinItem = obj
-            add("Show curves for this", lambda: self._set_curve_joint(jl))
+            add("Show curves for this joint", lambda: self._set_curve_joint(jl))
             add("Hide axes" if jl.visible else "Show axes", lambda: self._toggle_visible(jl, not jl.visible))
-            if jl.kind == "joint":
-                add("Relative to the model's reference pose", lambda: self._set_use_reference(jl, not jl.use_reference),
-                    enabled=self._has_reference(jl), checked=jl.use_reference and self._has_reference(jl))
+            add("Relative to the reference pose", lambda: self._set_use_reference(jl, not jl.use_reference),
+                enabled=self._has_reference(jl), checked=jl.use_reference and self._has_reference(jl))
             add("Zero at the current frame", lambda: self._set_reference(jl, self.scene.frame))
             add("Clear zero", lambda: self._set_reference(jl, None), enabled=jl.zero_frame is not None)
             add("Export values (CSV)…", lambda: self.export_joint_csv(jl))
@@ -488,6 +504,8 @@ class VisualiserTab(QWidget):
         p = self.props
         if kind == MODEL and obj is not None:
             self._props_model(obj)
+        elif kind == AXES and obj is not None:
+            self._props_axes(obj)
         elif kind == TRACKING and obj is not None:
             self._props_tracking(obj)
         elif kind == CAMERA and obj is not None:
@@ -772,6 +790,7 @@ class VisualiserTab(QWidget):
     def _rebuild(self, old: BoneModel, new: BoneModel) -> None:
         def work():
             new.build()
+            new.axes_model = old.axes_model if new.has_axes else None
             if new.tracking_path:
                 new.tracking = old.tracking if old.tracking_path == new.tracking_path and \
                     old.tracking_overrides == new.tracking_overrides and old.tracking_volume == new.tracking_volume \
@@ -1060,7 +1079,23 @@ class VisualiserTab(QWidget):
                     self.scene.add_camera(cam)
                 except Exception as e:  # noqa: BLE001
                     problems.append(f"{cam.name}: {e}")
+            for m in self.state.models:                  # coordinate systems on the models
+                if m.has_axes:
+                    try:
+                        m.axes_model = self._kin_model(m.axes_path)
+                        m.axes_model.segment(m.axes_segment)
+                    except Exception as e:  # noqa: BLE001
+                        problems.append(f"{m.name} coordinate system: {e}")
             for jl in st.joints:
+                if jl.kind == "segment":                # older sessions listed segments separately
+                    m = self._model_named(jl.model_map.get(jl.name))
+                    if m is not None and not m.has_axes:
+                        try:
+                            self.set_axes(m, jl.model_path, jl.name, warn=False)
+                            m.axes_visible = jl.visible
+                        except Exception as e:  # noqa: BLE001
+                            problems.append(f"{m.name} coordinate system: {e}")
+                    continue
                 try:
                     jl.model = self._kin_model(jl.model_path)
                     for n in jl.segment_names():          # checks the segment / joint still exists
@@ -1079,11 +1114,8 @@ class VisualiserTab(QWidget):
         else:
             add_cams()
 
-    # ---------------------------------------------------------------- segments & joints (from a model)
-    def load_joint_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Load model", "", "Model (*.bvrmodel.json *.json)")
-        if path:
-            self.load_joint_model_file(path)
+    # ---------------------------------------------------------------- coordinate systems and joints
+    MODEL_FILE_FILTER = "Model Builder file (*.bvrmodel.json *.json)"
 
     def _kin_model(self, path):
         from ..core.joints import KinematicModel
@@ -1093,54 +1125,138 @@ class VisualiserTab(QWidget):
             self._kin_models[key] = KinematicModel.load(path, build_surfaces=False)
         return self._kin_models[key]
 
+    def add_axes(self, m: BoneModel) -> None:
+        """Right-click a model → Add coordinate system: a segment from a Model Builder file."""
+        start = str(m.axes_path.parent) if m.axes_path else str(m.path.parent)
+        path, _ = QFileDialog.getOpenFileName(self, f"Coordinate system for {m.name}", start, self.MODEL_FILE_FILTER)
+        if path:
+            try:
+                self.set_axes(m, path)
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                self._error("Couldn't add the coordinate system", str(e))
+
+    def set_axes(self, m: BoneModel, path, segment: str | None = None, warn: bool = True) -> bool:
+        """Give a model the axes of a segment in a model file. Asks which segment when it isn't clear."""
+        from ..core.joints import JointModelError
+
+        self._kin_models.pop(str(Path(path).resolve()), None)       # re-read: the file may have been re-saved
+        km = self._kin_model(path)
+        segs = [sg for sg in km.segments if sg.acs is not None]
+        if not segs:
+            raise JointModelError("No segment in this file has axes yet. Define them in the Model Builder and "
+                                  "save again.")
+        if segment is None:
+            guess = guess_segment_map(km, [m]).items()
+            segment = next((sname for sname, mname in guess if mname == m.name), None)
+            if segment is None and len(segs) == 1:
+                segment = segs[0].name
+            if segment is None:
+                names = [sg.name for sg in segs]
+                choice, ok = QInputDialog.getItem(self, "Which segment?", f"{Path(path).name} has several "
+                                                  f"segments. Which one is {m.name}?", names, 0, False)
+                if not ok:
+                    return False
+                segment = choice
+        km.segment(segment)                                            # raises if missing
+        m.axes_path, m.axes_segment, m.axes_model = Path(path), segment, km
+        m.axes_reference, m.axes_zero = "first", None
+        if warn:
+            sg = km.segment(segment)
+            if sg.surface is not None and Path(sg.surface.path).name != Path(m.path).name:
+                self._error("Check the bone", f"{segment} was defined on {Path(sg.surface.path).name}, but this model "
+                            f"is {Path(m.path).name}. The axes only fit if both use the same surface (same model "
+                            "space).")
+        self.curve_joint = m
+        self.sel_kind, self.sel_obj = AXES, m
+        self.refresh_all()
+        return True
+
+    def remove_axes(self, m: BoneModel) -> None:
+        m.axes_path = m.axes_segment = m.axes_model = None
+        if self.curve_joint is m:
+            self.curve_joint = None
+        self.refresh_all()
+
+    def _toggle_axes(self, m: BoneModel, on: bool) -> None:
+        m.axes_visible = bool(on)
+        self.nav.refresh_obj(AXES, m)
+        self._draw_joint_axes()
+        if self.sel_obj is m:
+            self.show_properties()
+
+    def load_joint_model(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Add joints from a Model Builder file", "", self.MODEL_FILE_FILTER)
+        if path:
+            self.load_joint_model_file(path)
+
     def load_joint_model_file(self, path, segment_map: dict | None = None, ask: bool = True) -> list[KinItem]:
-        """Add a saved model's segments and joints; its segments are matched to this tab's models."""
+        """Add a model file's joints. Their segments are matched to this tab's models (first to models whose
+        coordinate system is that segment, then by surface file); models without a coordinate system get the
+        segment's."""
         try:
+            self._kin_models.pop(str(Path(path).resolve()), None)
             km = self._kin_model(path)
         except Exception as e:  # noqa: BLE001
-            self._error("Couldn't open the model", str(e))
+            self._error("Couldn't open the model file", str(e))
             return []
-        if not any(s.acs is not None for s in km.segments):
-            self._error("Model incomplete", "None of its segments has axes yet. Define them in the Model Builder "
-                                            "and save again.")
+        joints = [j for j in km.joints
+                  if km.segment(j.proximal).acs is not None and km.segment(j.distal).acs is not None]
+        if not joints:
+            self._error("No joints", "This file has no joints with both segments' axes defined. Add joints in the "
+                                     "Model Builder (step 2) and save again.")
             return []
-        smap = segment_map or guess_segment_map(km, self.state.models)
-        complete = len(smap) == sum(s.acs is not None for s in km.segments)
-        if segment_map is None and ask and (not complete or len(self.state.models) > len(smap)):
-            dlg = SegmentMapDialog(self, km, self.state.models, smap, Path(path))
-            if dlg.exec() != QDialog.Accepted:
-                return []
-            smap = dlg.values()
+        if segment_map is None:
+            smap = {}
+            for m in self.state.models:                      # models already using this file's segments
+                if m.has_axes and m.axes_path and Path(m.axes_path).resolve() == Path(path).resolve():
+                    smap[m.axes_segment] = m.name
+            for sname, mname in guess_segment_map(km, [m for m in self.state.models
+                                                       if m.name not in smap.values()]).items():
+                smap.setdefault(sname, mname)
+            needed = {n for j in joints for n in (j.proximal, j.distal)}
+            if ask and not needed <= set(smap):
+                dlg = SegmentMapDialog(self, km, self.state.models, smap, Path(path))
+                if dlg.exec() != QDialog.Accepted:
+                    return []
+                smap = dlg.values()
+        else:
+            smap = segment_map
         added = []
-        for seg in km.segments:
-            if seg.name in smap and seg.acs is not None:
-                added.append(KinItem(Path(path), "segment", seg.name, {seg.name: smap[seg.name]}, label=seg.name,
-                                     model=km))
-        for j in km.joints:
+        for j in joints:
             if j.proximal in smap and j.distal in smap:
                 added.append(KinItem(Path(path), "joint", j.name, {n: smap[n] for n in (j.proximal, j.distal)},
                                      label=j.name, model=km))
         if not added:
-            self._error("Nothing to show", "None of the model's segments was matched to a model in this tab.")
+            self._error("Nothing to add", "The joints' segments weren't matched to models in this tab.")
             return []
+        for jl in added:                                     # give bones without axes the joint's segments
+            for sname, mname in jl.model_map.items():
+                m = self._model_named(mname)
+                if m is not None and not m.has_axes:
+                    m.axes_path, m.axes_segment, m.axes_model = Path(path), sname, km
         self.state.joints.extend(added)
-        first = next((a for a in added if a.kind == "joint"), added[0])
-        self.curve_joint = first
-        self.sel_kind, self.sel_obj = JOINT, first
+        self.curve_joint = added[0]
+        self.sel_kind, self.sel_obj = JOINT, added[0]
         self.refresh_all()
         for jl in added:
-            self._check_surfaces(jl)
+            self._check_joint_axes(jl)
         return added
 
-    def _check_surfaces(self, jl: KinItem) -> None:
-        """Warn when a segment is matched to a model built from a different surface file."""
-        if jl.kind != "segment":
-            return
-        m = self._model_named(jl.model_map.get(jl.name))
-        s = jl.model.segment(jl.name).surface
-        if m is not None and s is not None and Path(m.path).name != Path(s.path).name:
-            self._error("Check the bones", f"{jl.name}: the model used {Path(s.path).name}, this tab uses "
-                        f"{Path(m.path).name}. The axes only fit if both use the same surface (same model space).")
+    def _check_joint_axes(self, jl: KinItem) -> None:
+        """Warn when a joint's bone shows a different coordinate system from the one the joint uses."""
+        odd = []
+        for sname, mname in jl.model_map.items():
+            m = self._model_named(mname)
+            if m is None:
+                continue
+            seg = jl.model.segment(sname)
+            if m.has_axes and (Path(m.axes_path).resolve() != Path(jl.model_path).resolve() or m.axes_segment != sname):
+                odd.append(f"{m.name} shows {m.axes_segment} from {Path(m.axes_path).name}; the joint uses {sname} "
+                           f"from {jl.model_path.name}.")
+            if seg.surface is not None and Path(seg.surface.path).name != Path(m.path).name:
+                odd.append(f"{sname} was defined on {Path(seg.surface.path).name}, but {m.name} is {Path(m.path).name}.")
+        if odd:
+            self._error("Check the joint's bones", "\n".join(odd) + "\n\nThe joint always uses its own file's axes.")
 
     def _model_named(self, name):
         return next((m for m in self.state.models if m.name == name), None)
@@ -1154,89 +1270,104 @@ class VisualiserTab(QWidget):
         return P[:n]
 
     @staticmethod
-    def _has_reference(jl: KinItem) -> bool:
-        return jl.kind == "joint" and jl.model is not None and jl.model.joint(jl.name).reference is not None
+    def _has_reference(jl) -> bool:
+        return isinstance(jl, KinItem) and jl.model is not None and jl.model.joint(jl.name).reference is not None
 
-    def joint_values(self, jl: KinItem, zero: bool = True) -> dict | None:
-        """Values of a segment or joint over the trial (None if its bones aren't in the tab)."""
-        k = self._kin.get(id(jl))
+    def _kin_key(self, obj):
+        return ("axes", id(obj)) if isinstance(obj, BoneModel) else ("joint", id(obj))
+
+    def joint_values(self, obj, zero: bool = True) -> dict | None:
+        """Values over the trial of a model's coordinate system (segment motion) or of a joint."""
+        k = self._kin.get(self._kin_key(obj))
         if k is None:
             return None
-        return zeroed(k, jl.zero_frame) if zero else k
+        z = obj.axes_zero if isinstance(obj, BoneModel) else obj.zero_frame
+        return zeroed(k, z) if zero else k
 
     def refresh_joints(self) -> None:
         from ..core.joints import JointModelError
 
         self._kin.clear()
         n = max(self.scene.n_frames, 1)
+        for m in self.state.models:
+            if m.has_axes and m.acs is not None:
+                try:
+                    self._kin[self._kin_key(m)] = m.axes_model.segment_kinematics(
+                        m.axes_segment, self._poses(m, n), m.axes_reference)
+                except JointModelError:
+                    pass
         for jl in self.state.joints:
             models = [self._model_named(x) for x in jl.tab_models()]
-            if any(m is None for m in models):
+            if any(mm is None for mm in models):
                 continue
             try:
-                if jl.kind == "segment":
-                    self._kin[id(jl)] = jl.model.segment_kinematics(jl.name, self._poses(models[0], n),
-                                                                    jl.seg_reference)
-                else:
-                    self._kin[id(jl)] = jl.model.joint_kinematics(jl.name, self._poses(models[0], n),
-                                                                  self._poses(models[1], n),
-                                                                  normalise=jl.use_reference)
+                self._kin[self._kin_key(jl)] = jl.model.joint_kinematics(
+                    jl.name, self._poses(models[0], n), self._poses(models[1], n), normalise=jl.use_reference)
             except JointModelError:
                 continue
-        if self.curve_joint is not None and not any(j is self.curve_joint for j in self.state.joints):
+        live = [*self.state.joints, *[m for m in self.state.models if m.has_axes]]
+        if self.curve_joint is not None and not any(o is self.curve_joint for o in live):
             self.curve_joint = None
-        if self.curve_joint is None and self.state.joints:
-            self.curve_joint = self.state.joints[0]
+        if self.curve_joint is None and live:
+            self.curve_joint = live[0]
         self._update_curves()
         self._draw_joint_axes()
 
     def _update_curves(self) -> None:
-        jl = self.curve_joint
-        k = self.joint_values(jl) if jl is not None else None
+        obj = self.curve_joint
+        k = self.joint_values(obj) if obj is not None else None
         self.curves.setVisible(self.show_curves and k is not None)
         if k is not None:
-            self.curves.set_data(k, f"{jl.label} · {self.curves_title(jl)}")
+            name = obj.name if isinstance(obj, BoneModel) else obj.label
+            self.curves.set_data(k, f"{name} · {self.curves_title(obj)}")
             self.curves.set_frame(self.scene.frame)
         else:
             self.curves.set_data(None)
 
-    def curves_title(self, jl: KinItem) -> str:
+    def curves_title(self, obj) -> str:
         notes = []
-        if jl.kind == "segment":
-            ref = jl.seg_reference
-            notes.append(f"{jl.model_map.get(jl.name)} about its own axes, relative to " +
+        if isinstance(obj, BoneModel):
+            ref = obj.axes_reference
+            notes.append("about its own axes, relative to " +
                          ("the lab axes" if ref == "lab" else "its first tracked frame" if ref == "first"
                           else f"frame {int(ref) + 1}"))
+            z = obj.axes_zero
         else:
-            a, b = jl.tab_models()
+            a, b = obj.tab_models()
             notes.append(f"{b} relative to {a}")
-            if jl.use_reference and self._has_reference(jl):
+            if obj.use_reference and self._has_reference(obj):
                 notes.append("relative to the reference pose")
-        if jl.zero_frame is not None:
-            notes.append(f"zeroed at frame {jl.zero_frame + 1}")
+            z = obj.zero_frame
+        if z is not None:
+            notes.append(f"zeroed at frame {z + 1}")
         return " · ".join(notes)
 
     def _draw_joint_axes(self) -> None:
+        """Axes on bones: each model's own coordinate system, plus any a ticked joint uses that differ."""
         for entries in self._joint_actors.values():
             for actors, _m, _acs in entries:
                 for a in actors:
                     self.plotter.remove_actor(a, render=False)
         self._joint_actors.clear()
         drawn = set()
+
+        def draw(key, m, km, seg, acs):
+            if m is None or acs is None or (id(m), id(km), seg) in drawn:
+                return None
+            drawn.add((id(m), id(km), seg))
+            size = float(np.linalg.norm(np.ptp(np.asarray(m.mesh.points), axis=0))) if m.mesh is not None else 100
+            self._joint_actors.setdefault(key, []).append((add_triad(self.plotter, acs, max(size * 0.3, 15)), m, acs))
+
+        for m in self.state.models:
+            if m.has_axes and m.axes_visible:
+                draw(self._kin_key(m), m, m.axes_model, m.axes_segment, m.acs)
         for jl in self.state.joints:
-            if not jl.visible:
-                continue
-            entries = []
-            for seg, tab_name in zip(jl.segment_names(), jl.tab_models()):
-                m = self._model_named(tab_name)
-                acs = jl.model.segment(seg).acs
-                if m is None or acs is None or (id(m), id(jl.model), seg) in drawn:
-                    continue
-                drawn.add((id(m), id(jl.model), seg))
-                size = float(np.linalg.norm(np.ptp(np.asarray(m.mesh.points), axis=0))) if m.mesh is not None else 100
-                actors = add_triad(self.plotter, acs, max(size * 0.3, 15))
-                entries.append((actors, m, acs))
-            self._joint_actors[id(jl)] = entries
+            if jl.visible:
+                for seg, tab_name in zip(jl.segment_names(), jl.tab_models()):
+                    m = self._model_named(tab_name)
+                    if m is not None and m.has_axes and not m.axes_visible:
+                        continue                         # the user hid this bone's axes
+                    draw(self._kin_key(jl), m, jl.model, seg, jl.model.segment(seg).acs)
         self._pose_joint_axes()
 
     def _pose_joint_axes(self) -> None:
@@ -1251,21 +1382,24 @@ class VisualiserTab(QWidget):
                         a.user_matrix = pose
         self.plotter.render()
 
-    def _set_curve_joint(self, jl: KinItem) -> None:
-        self.curve_joint = jl
+    def _set_curve_joint(self, obj) -> None:
+        self.curve_joint = obj
         self.show_curves = True
         self._update_curves()
 
     def _toggle_curves(self) -> None:
         self.show_curves = not self.show_curves
         self._update_curves()
-        if self.sel_kind in (JOINT, JOINTS):
+        if self.sel_kind in (JOINT, JOINTS, AXES):
             self.show_properties()
 
-    def _set_reference(self, jl: KinItem, frame: int | None) -> None:
-        jl.zero_frame = frame
+    def _set_reference(self, obj, frame: int | None) -> None:
+        if isinstance(obj, BoneModel):
+            obj.axes_zero = frame
+        else:
+            obj.zero_frame = frame
         self._update_curves()
-        if self.sel_obj is jl:
+        if self.sel_obj is obj:
             self.show_properties()
 
     def _set_use_reference(self, jl: KinItem, on: bool) -> None:
@@ -1274,10 +1408,10 @@ class VisualiserTab(QWidget):
         if self.sel_obj is jl:
             self.show_properties()
 
-    def _set_seg_reference(self, jl: KinItem, ref) -> None:
-        jl.seg_reference = ref
+    def _set_seg_reference(self, m: BoneModel, ref) -> None:
+        m.axes_reference = ref
         self.refresh_joints()
-        if self.sel_obj is jl:
+        if self.sel_obj is m:
             self.show_properties()
 
     def remap_joint(self, jl: KinItem) -> None:
@@ -1289,7 +1423,7 @@ class VisualiserTab(QWidget):
             if all(n in vals for n in jl.segment_names()):
                 jl.model_map = {n: vals[n] for n in jl.segment_names()}
                 self.refresh_all()
-                self._check_surfaces(jl)
+                self._check_joint_axes(jl)
 
     def remove_joint(self, jl: KinItem) -> None:
         self.state.joints = [j for j in self.state.joints if j is not jl]
@@ -1297,93 +1431,119 @@ class VisualiserTab(QWidget):
             self.sel_kind, self.sel_obj = JOINTS, None
         self.refresh_all()
 
-    def export_joint_csv(self, jl: KinItem, path: str | None = None) -> None:
-        k = self.joint_values(jl)
+    def export_joint_csv(self, obj, path: str | None = None) -> None:
+        k = self.joint_values(obj)
         if k is None:
             self._error("Nothing to export", "Its bones aren't all in this tab.")
             return
         if path is None:
-            path, _ = QFileDialog.getSaveFileName(self, "Export values", f"{self.state.name}_{jl.label}.csv",
+            name = obj.name if isinstance(obj, BoneModel) else obj.label
+            path, _ = QFileDialog.getSaveFileName(self, "Export values", f"{self.state.name}_{name}.csv",
                                                   "CSV (*.csv)")
             if not path:
                 return
         write_csv(path, k, self.state.settings.fps)
 
+    def _frame_values(self, p, k) -> None:
+        p.section(f"Frame {self.scene.frame + 1}")
+        if k is None:
+            p.note("Its bones need to be in this tab, with axes.", "Warn")
+            return
+        f = min(self.scene.frame, len(k["angles"]) - 1)
+        if np.isnan(k["angles"][f]).any():
+            p.value("Values", "untracked")
+            return
+        for n, v in zip(k["short"], k["angles"][f]):
+            p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f}°")
+        for n, v in zip(k["t_short"], k["translations"][f]):
+            p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f} mm")
+
+    def _props_axes(self, m: BoneModel) -> None:
+        p = self.props
+        p.clear(f"{m.name}: coordinate system")
+        if not m.has_axes:
+            p.note("No coordinate system yet. Add one from a file saved in the Model Builder: pick the file, then the "
+                   "segment that is this bone. Its axes then show on the bone, its motion about its own axes is "
+                   "plotted, and joints can use it.")
+            p.buttons([("Add coordinate system…", lambda: self.add_axes(m))])
+            return
+        seg = m.axes_model.segment(m.axes_segment) if m.acs is not None else None
+        p.value("File", Path(m.axes_path).name, tip=str(m.axes_path))
+        p.value("Segment", m.axes_segment if seg is None else
+                f"{seg.name} ({seg.stype.title.lower()}" + (f", {seg.side})" if seg.side != "none" else ")"))
+        if seg is None:
+            p.note("This segment isn't in the file any more, or has no axes.", "Warn")
+        else:
+            p.value("Axes from", "Landmarks" if seg.axes_source == "landmarks" else
+                    AUTO_METHODS[seg.axes_source].title)
+            if seg.surface is not None:
+                same = Path(seg.surface.path).name == Path(m.path).name
+                p.value("Defined on", Path(seg.surface.path).name, kind="Value" if same else "Warn",
+                        tip=None if same else "Not this model's file: the axes only fit the same surface.")
+        p.buttons([("Replace…", lambda: self.add_axes(m)), ("Remove", lambda: self.remove_axes(m))])
+        p.section("Display")
+        p.check("Axes", m.axes_visible, lambda on: self._toggle_axes(m, on), "Show the axes on the bone")
+        p.check("Curves", self.show_curves and self.curve_joint is m,
+                lambda on: self._set_curve_joint(m) if on else (self.show_curves and self._toggle_curves()),
+                "Show this bone's motion")
+        p.section("Motion relative to")
+        cur = m.axes_reference if m.axes_reference in ("first", "lab") else "frame"
+        items = [("first", "Its first tracked frame"),
+                 ("frame", f"Frame {int(m.axes_reference) + 1}" if cur == "frame" else "The current frame"),
+                 ("lab", "The lab (tracking) axes")]
+        p.combo("Reference", items, cur, lambda v: self._set_seg_reference(m, self.scene.frame if v == "frame" else v))
+        p.note("Rotations are about the bone's own axes (Z, then X, then Y); translations are the origin's movement "
+               "along the reference axes.")
+        p.section("Zero at a frame")
+        p.value("Zero", f"frame {m.axes_zero + 1}" if m.axes_zero is not None else "none")
+        p.buttons([("Zero at this frame", lambda: self._set_reference(m, self.scene.frame)),
+                   ("Clear", lambda: self._set_reference(m, None))])
+        self._frame_values(p, self.joint_values(m))
+        p.buttons([("Export CSV…", lambda: self.export_joint_csv(m))])
+
     def _props_joints(self) -> None:
         p = self.props
-        p.clear("Segments & joints")
-        p.note("Load a model built in the Model Builder (Start page) and match its segments to this tab's models. "
-               "Each segment gives its bone's motion about its own axes; each joint gives the angles between two "
-               "segments, optionally relative to the model's reference pose. All follow the tracking.")
+        p.clear("Joints")
+        p.note("Joints come from a file saved in the Model Builder. Each pairs two bones with a joint definition, "
+               "optionally relative to the file's reference pose. Bones without a coordinate system get the joint's "
+               "segments.")
         if self.state.joints:
             p.check("Curves", self.show_curves, lambda on: self.show_curves != on and self._toggle_curves(),
                     "Show curves under the view")
-        p.buttons([("Load model…", self.load_joint_model)])
+        p.buttons([("Add joint…", self.load_joint_model)])
 
     def _props_joint(self, jl: KinItem) -> None:
         p = self.props
         km = jl.model
+        j = km.joint(jl.name)
         p.clear(jl.label)
-        p.value("Model", jl.model_path.name, tip=str(jl.model_path))
-        if jl.kind == "segment":
-            seg = km.segment(jl.name)
-            p.value("Segment", f"{seg.name} ({seg.stype.title.lower()}" + (f", {seg.side})" if seg.side != "none"
-                                                                           else ")"))
-            p.value("Axes", "Landmarks" if seg.axes_source == "landmarks" else
-                    AUTO_METHODS[seg.axes_source].title)
-        else:
-            j = km.joint(jl.name)
-            p.value("Definition", j.jtype.title)
+        p.value("File", jl.model_path.name, tip=str(jl.model_path))
+        p.value("Definition", j.jtype.title)
         p.section("Bones")
         for seg, name in zip(jl.segment_names(), jl.tab_models()):
             ok = self._model_named(name) is not None
             p.value(seg, name if ok else f"{name or 'not set'} (missing)", kind="Value" if ok else "Warn")
         p.buttons([("Change bones…", lambda: self.remap_joint(jl))])
         p.section("Display")
-        p.check("Axes", jl.visible, lambda on: self._toggle_visible(jl, on), "Show the axes on the bone(s)")
+        p.check("Axes", jl.visible, lambda on: self._toggle_visible(jl, on), "Show the joint's axes on its bones")
         p.check("Curves", self.show_curves and self.curve_joint is jl,
                 lambda on: self._set_curve_joint(jl) if on else (self.show_curves and self._toggle_curves()),
                 "Show these curves")
-        if jl.kind == "segment":
-            p.section("Motion relative to")
-            cur = jl.seg_reference if jl.seg_reference in ("first", "lab") else "frame"
-            items = [("first", "Its first tracked frame"), ("frame", f"Frame {int(jl.seg_reference) + 1}" if
-                                                             cur == "frame" else "The current frame"),
-                     ("lab", "The lab (tracking) axes")]
-            p.combo("Reference", items, cur, lambda v: self._set_seg_reference(
-                jl, self.scene.frame if v == "frame" else v))
-            p.note("Rotations are about the segment's own axes (Z, then X, then Y); translations are the "
-                   "origin's movement along the reference axes.")
+        p.section("Reference pose")
+        if j.reference is None:
+            p.note("The file has no reference pose for this joint, so zero is anatomical (the segments' axes lined "
+                   "up). Add one in the Model Builder, or zero at a frame below.")
         else:
-            j = km.joint(jl.name)
-            p.section("Reference pose")
-            if j.reference is None:
-                p.note("The model has no reference pose for this joint, so zero is anatomical (the segments' axes "
-                       "lined up). Add one in the Model Builder, or zero at a frame below.")
-            else:
-                src = j.reference.source.get("kind")
-                what = {"trial": "a neutral trial", "scan": "the scan pose", "scan_space": "the scan pose"}.get(src,
-                                                                                                                "set")
-                p.check("Use it", jl.use_reference, lambda on: self._set_use_reference(jl, on),
-                        f"Relative to the model's reference pose ({what})")
+            what = {"trial": "a neutral trial", "scan": "the scan pose", "scan_space": "the scan pose"}.get(
+                j.reference.source.get("kind"), "set")
+            p.check("Use it", jl.use_reference, lambda on: self._set_use_reference(jl, on),
+                    f"Relative to the reference pose ({what})")
         p.section("Zero at a frame")
         p.value("Zero", f"frame {jl.zero_frame + 1}" if jl.zero_frame is not None else "none",
                 tip="Values at this frame of the trial are subtracted.")
         p.buttons([("Zero at this frame", lambda: self._set_reference(jl, self.scene.frame)),
                    ("Clear", lambda: self._set_reference(jl, None))])
-        k = self.joint_values(jl)
-        p.section(f"Frame {self.scene.frame + 1}")
-        if k is None:
-            p.note("Its bones need to be in this tab.", "Warn")
-        else:
-            f = min(self.scene.frame, len(k["angles"]) - 1)
-            if np.isnan(k["angles"][f]).any():
-                p.value("Values", "untracked")
-            else:
-                for n, v in zip(k["short"], k["angles"][f]):
-                    p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f}°")
-                for n, v in zip(k["t_short"], k["translations"][f]):
-                    p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f} mm")
+        self._frame_values(p, self.joint_values(jl))
         p.buttons([("Export CSV…", lambda: self.export_joint_csv(jl)), ("Remove", lambda: self.remove_joint(jl))])
 
     def screenshot(self) -> None:

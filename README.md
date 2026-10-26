@@ -59,25 +59,27 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 | Select… | Properties | Right-click |
 |---|---|---|
 | **Models** | count, frames | Add model, Show all, Hide all |
-| a **model** | name, colour, opacity, visible, display; hold this bone still; model file details | attach/replace/detach tracking, tracking format, hold still, show/hide, rename, replace file, .tfm or voxel size, remove |
+| a **model** | name, colour, opacity, visible, display; hold this bone still; model file details | attach/replace/detach tracking, tracking format, add/remove coordinate system, hold still, show/hide, rename, replace file, .tfm or voxel size, remove |
 | its **tracking** | file, frames, untracked frames, detected format | attach/replace, format, detach |
 | **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
 | a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); which image is frame 1; files | view through it, show/hide, rename, change files, remove |
-| **Segments & joints** | show curves | Load model, show/hide curves |
-| a **segment** or **joint** | model, which tab models are its bones, axes and curves on/off, motion reference (segments) or reference pose (joints), zero at a frame, values at this frame | show curves, show/hide axes, reference pose, zero, export CSV, rename, change bones, remove |
+| its **coordinate system** | file and segment, axes and curves on/off, motion relative to, zero at a frame, values at this frame | add/replace, show curves, show/hide axes, zero, export CSV, remove |
+| **Joints** | show curves | Add joint, show/hide curves |
+| a **joint** | file, which tab models are its bones, axes and curves on/off, use the reference pose, zero at a frame, values at this frame | show curves, show/hide axes, reference pose, zero, export CSV, rename, change bones, remove |
 | **Scene** | axes, grid, background, motion trail, untracked frames | fit bones in view |
 
 - **Hold this bone still** (model properties or right-click): view the other bones' motion relative to it.
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4).
 - **Save tab as session** (Ctrl+S) saves file paths and every setting to a `.json`. **Open saved session** restores it.
 
-### Segment and joint kinematics (optional)
+### Coordinate systems and joints (optional)
 
-Build a model in the **Model Builder** (next section) and save it. Then, in a Visualiser tab with those bones and their tracking, right-click **Segments & joints → Load model…**. The model's segments are matched to the tab's models by surface file (then by name); you'll be asked if that's ambiguous, and can change it later (**Change bones…**). The model's segments and joints are then listed:
-- a **segment** gives its bone's motion about its own axes (rotation as a Z-X-Y sequence, and the origin's movement), relative to its first tracked frame, a chosen frame, or the lab (tracking) axes;
-- a **joint** gives its angles and translations, anatomical or relative to the model's **reference pose** if it has one (**Use it** in Properties).
+Both come from a file saved in the **Model Builder** (next section): one `.bvrmodel.json` holds every segment's axes and every joint.
 
-Axes are drawn on the bones (tick box), and the selected item's curves are plotted under the 3D view with a cursor at the current frame (click a plot to jump there). **Zero at this frame** also subtracts the values at a frame of this trial. **Export CSV** writes every frame. These are saved with the session.
+- **Coordinate system on a model:** right-click the model → **Add coordinate system…**, pick the file, and the segment that is this bone is chosen for you (by surface file) or asked for. It's listed under the model, next to its tracking. Its axes are drawn on the bone (tick box), and selecting it plots the bone's motion about its own axes (rotation as a Z-X-Y sequence, and the origin's movement), relative to its first tracked frame, a chosen frame, or the lab (tracking) axes.
+- **Joints:** right-click **Joints → Add joint…** and pick the file. Its joints are matched to the tab's models (models already using that file's segments first, then by surface file; you're asked if that's ambiguous, and can change it later with **Change bones…**). Models with no coordinate system get the joint's segments. A joint gives its angles and translations, anatomical or relative to the file's **reference pose** if it has one (**Use it** in Properties).
+
+The selected coordinate system's or joint's curves are plotted under the 3D view with a cursor at the current frame (click a plot to jump there). **Zero at this frame** also subtracts the values at a frame of this trial. **Export CSV** writes every frame. All of this is saved with the session.
 
 The axes only fit a model built from the **same surface file in the same model space** as the segment, so use the same STL/TIF (and the same voxel size or .tfm) in both tabs.
 
@@ -104,7 +106,7 @@ A model is built in three steps; the navigator is laid out the same way (**1 Seg
 - **Axes from**: an automatic method fitted to the surface (the default; see below), or **landmarks** placed by hand: select a landmark under the segment, then **right-click the surface** (point), or right-click and drag to paint a region (its centre, or a sphere fitted to it). Left-drag still rotates.
 - Femur and tibia axes use ISB names: X anterior, Y superior, Z right (Wu et al. 2002). "Other bone" uses its principal axes of inertia (axis 1 = long axis), with no anatomical names.
 
-A segment's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, segments already give each bone's motion about its own axes in the Visualiser.
+A segment's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, segments already give each bone's motion about its own axes in the Visualiser (right-click a model → **Add coordinate system…**).
 
 **2. Joints (optional).** Right-click **Joints → Add joint…**, choose a definition and its proximal and distal segments:
 - **Knee (tibiofemoral): Grood & Suntay**, femur → tibia. ISB doesn't define the knee; this is the convention most BVR knee studies use. Left knees are mirrored, so positive values mean the same motion on both sides: flexion, adduction (varus), internal rotation; lateral, anterior and proximal translation of the tibia.
@@ -120,7 +122,7 @@ With no reference pose, a joint's zero is **anatomical**: all angles are 0 when 
 
 The reference is stored as the two bones' relative pose, so it stays valid if a segment's axes are changed later. The view shows the joint in its reference pose, and Properties lists the anatomical values that are being removed.
 
-**Preview and checks.** Attach a tracking file to a segment (right-click → **Preview tracking**) to see joints in a tracked pose with their values, anatomical and relative to the reference. **Compare methods** lists the joint's anatomical angles for every combination of the segments' axis methods. **Save model…** writes a `.bvrmodel.json`: segments (surface, axes method, landmarks, axes), joints and reference poses. Open it again here to edit it, or load it into a Visualiser tab. Version-1 files (one template) are converted on opening.
+**Preview and checks.** Attach a tracking file to a segment (right-click → **Preview tracking**) to see joints in a tracked pose with their values, anatomical and relative to the reference. **Compare methods** lists the joint's anatomical angles for every combination of the segments' axis methods. **Save model…** writes a `.bvrmodel.json`: segments (surface, axes method, landmarks, axes), joints and reference poses. Open it again here to edit it. In a Visualiser tab, give models their coordinate systems from it (right-click a model) and add its joints (right-click Joints). Version-1 files (one template) are converted on opening.
 
 ### Automatic axes (no landmarks)
 

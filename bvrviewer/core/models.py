@@ -164,12 +164,33 @@ class BoneModel:
     tracking_path: Path | None = None
     tracking_volume: int = 0
     tracking_overrides: dict = field(default_factory=dict)
+    # coordinate system: a segment of a model file from the Model Builder (.bvrmodel.json)
+    axes_path: Path | None = None
+    axes_segment: str | None = None
+    axes_visible: bool = True
+    axes_reference: object = "first"          # segment motion relative to: "first", "lab" or a frame index
+    axes_zero: int | None = None              # also subtract the values at this frame
 
     # runtime only
     mesh: object = field(default=None, repr=False)
     image_data: object = field(default=None, repr=False)
     tracking: object = field(default=None, repr=False)
+    axes_model: object = field(default=None, repr=False)     # the loaded KinematicModel
     surface_note: str = ""
+
+    @property
+    def has_axes(self) -> bool:
+        return self.axes_path is not None and self.axes_segment is not None
+
+    @property
+    def acs(self):
+        """This bone's coordinate system (4x4, in its model space), or None."""
+        if self.axes_model is None or self.axes_segment is None:
+            return None
+        try:
+            return self.axes_model.segment(self.axes_segment).acs
+        except Exception:  # noqa: BLE001 - segment removed from the file since
+            return None
 
     @property
     def is_volume(self) -> bool:
@@ -207,6 +228,8 @@ class BoneModel:
             "threshold": self.threshold,
             "tracking_path": str(self.tracking_path) if self.tracking_path else None,
             "tracking_volume": self.tracking_volume, "tracking_overrides": self.tracking_overrides,
+            **({"axes": {"path": str(self.axes_path), "segment": self.axes_segment, "visible": self.axes_visible,
+                         "reference": self.axes_reference, "zero": self.axes_zero}} if self.has_axes else {}),
         }
 
     @classmethod
@@ -220,4 +243,9 @@ class BoneModel:
             threshold=d.get("threshold"),
             tracking_path=Path(d["tracking_path"]) if d.get("tracking_path") else None,
             tracking_volume=d.get("tracking_volume", 0), tracking_overrides=d.get("tracking_overrides", {}),
+            axes_path=Path(d["axes"]["path"]) if d.get("axes") else None,
+            axes_segment=d["axes"]["segment"] if d.get("axes") else None,
+            axes_visible=d.get("axes", {}).get("visible", True),
+            axes_reference=d.get("axes", {}).get("reference", "first"),
+            axes_zero=d.get("axes", {}).get("zero"),
         )

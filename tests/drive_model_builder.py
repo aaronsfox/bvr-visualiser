@@ -230,11 +230,22 @@ while vt._threads and time.time() < end:
     pump(0.1)
 pump(0.5)
 assert len(vt.state.models) == 2
-assert [a.text() for a in vt.build_menu("joints", None).actions()][0] == "Load model…"
+assert [a.text() for a in vt.build_menu("joints", None).actions()][0] == "Add joint…"
+femur_m, tibia_m = vt.state.models
+assert "Add coordinate system…" in [a.text() for a in vt.build_menu("model", femur_m).actions()]
+assert "Add coordinate system…" in [a.text() for a in vt.build_menu("axes", femur_m).actions()]
+# step A: a coordinate system on one model (the segment is found from the surface file)
+assert vt.set_axes(femur_m, path)
+assert femur_m.axes_segment == "Femur" and femur_m.acs is not None and not tibia_m.has_axes
+assert vt.nav.item_for("axes", femur_m).text(0).startswith("Axes: Femur")
+assert vt.nav.item_for("axes", tibia_m).text(0).startswith("No coordinate system")
+fem_k = vt.joint_values(femur_m)
+np.testing.assert_allclose(fem_k["angles"][~np.isnan(fem_k["angles"][:, 0])], 0, atol=1e-6)   # the femur is still
+shot("vis_00_axes_on_model")
+# step B: the joint; the tibia gets its coordinate system from the joint's file
 items = vt.load_joint_model_file(path)
-by = {(i.kind, i.name): i for i in items}
-assert set(by) == {("segment", "Femur"), ("segment", "Tibia"), ("joint", "Knee")}, set(by)
-knee_item = by[("joint", "Knee")]
+assert [i.name for i in items] == ["Knee"] and tibia_m.axes_segment == "Tibia"
+knee_item = items[0]
 assert knee_item.model_map == {"Femur": "Femur", "Tibia": "Tibia"}
 k = vt.joint_values(knee_item)
 print("visualiser flexion (relative to the scan pose)", np.round(k["angles"][[0, 20, 39, 59], 0], 1), flush=True)
@@ -254,16 +265,17 @@ shot("vis_01_joint_curves")
 vt.sel_kind, vt.sel_obj = "joint", knee_item
 vt.refresh_all()
 shot("vis_02_joint_props")
-# segment motion: the femur is still; the tibia turns by the flexion angle about its own axes
-fem_k = vt.joint_values(by[("segment", "Femur")])
-np.testing.assert_allclose(fem_k["angles"][ok], 0, atol=1e-6)
-tib_k = vt.joint_values(by[("segment", "Tibia")])
+# the tibia turns by the flexion angle about its own axes
+tib_k = vt.joint_values(tibia_m)
 turn = np.degrees(np.arccos(np.clip((np.trace(J.compose("ZXY", np.radians(tib_k["angles"][39]))) - 1) / 2, -1, 1)))
 assert abs(turn - 60) < 1e-4, turn
-vt._set_curve_joint(by[("segment", "Tibia")])
-vt.sel_kind, vt.sel_obj = "joint", by[("segment", "Tibia")]
+vt._set_curve_joint(tibia_m)
+vt.sel_kind, vt.sel_obj = "axes", tibia_m
 vt.refresh_all()
 shot("vis_03_segment_curves")
+vt._toggle_axes(tibia_m, False)
+assert vt.nav.item_for("axes", tibia_m).checkState(0) == Qt.Unchecked
+vt._toggle_axes(tibia_m, True)
 vt._set_curve_joint(knee_item)
 vt._set_reference(knee_item, 0)
 assert abs(vt.joint_values(knee_item)["angles"][39, 0] - 60) < 1e-6
@@ -278,17 +290,19 @@ vt._rename(vt.state.models[1], "Left tibia")
 assert knee_item.model_map["Tibia"] == "Left tibia" and vt.joint_values(knee_item) is not None
 save_session(vt.state, OUT / "knee.bvrsession.json")
 st = load_session(OUT / "knee.bvrsession.json")
-assert {(i.kind, i.name) for i in st.joints} == set(by)
+assert [i.name for i in st.joints] == ["Knee"] and [m.axes_segment for m in st.models] == ["Femur", "Tibia"]
 vt2 = win.open_tool("visualiser")
 vt2.load_session_file(str(OUT / "knee.bvrsession.json"))
 end = time.time() + 120
 while vt2._threads and time.time() < end:
     pump(0.1)
 pump(0.5)
-k2 = {(i.kind, i.name): i for i in vt2.state.joints}
-assert len(k2) == 3 and vt2.joint_values(k2[("joint", "Knee")]) is not None
+assert len(vt2.state.joints) == 1 and vt2.joint_values(vt2.state.joints[0]) is not None
+assert all(m.acs is not None for m in vt2.state.models) and vt2.joint_values(vt2.state.models[1]) is not None
 for it in list(vt.state.joints):
     vt.remove_joint(it)
+for mm in vt.state.models:
+    vt.remove_axes(mm)
 assert not vt.curves.isVisible() and not vt._joint_actors
 print("VISUALISER OK", flush=True)
 win.close()

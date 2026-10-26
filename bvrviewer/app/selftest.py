@@ -53,9 +53,9 @@ def run(win, sample_dir: str, out: str) -> None:
         def finish():
             tab.plotter.screenshot(out)
             ok = len(tab.state.models) == 2 and all(m.tracking for m in tab.state.models)
-            items = {(i.kind, i.name): i for i in tab.state.joints}
-            k = tab.joint_values(items[("joint", "Wrist")]) if ("joint", "Wrist") in items else None
-            ok = ok and len(items) == 3 and tab.joint_values(items[("segment", "MC3")]) is not None
+            items = {i.name: i for i in tab.state.joints}
+            k = tab.joint_values(items["Wrist"]) if "Wrist" in items else None
+            ok = ok and all(m.has_axes for m in tab.state.models) and tab.joint_values(tab.state.models[1]) is not None
             ok = ok and k is not None and not tab.curves.isHidden()
             print("SELFTEST", "OK" if ok else "FAILED", out, flush=True)
             win.close()
