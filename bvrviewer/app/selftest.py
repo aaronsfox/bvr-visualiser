@@ -34,12 +34,25 @@ def run(win, sample_dir: str, out: str) -> None:
             tab.state.cameras.append(cam)
             tab.scene.add_camera(cam)
         tab.refresh_all()
+        # a joint (inertial axes, no landmarks) exercises the joint maths and the curve plots
+        import tempfile
+
+        from ..core import joints as J
+
+        jm = J.JointModel.new(J.GENERIC.key)
+        jm.bones["proximal"].surface, jm.bones["distal"].surface = tab.state.models[0], tab.state.models[1]
+        jm.compute()
+        jpath = Path(tempfile.gettempdir()) / "bvr_selftest.bvrmodel.json"
+        jm.save(jpath)
+        tab.load_joint_model_file(jpath, ask=False)
         tab.timeline.slider.setValue(40)
         tab.set_xray_view(0)
 
         def finish():
             tab.plotter.screenshot(out)
             ok = len(tab.state.models) == 2 and all(m.tracking for m in tab.state.models)
+            k = tab.joint_values(tab.state.joints[0]) if tab.state.joints else None
+            ok = ok and k is not None and not tab.curves.isHidden()
             print("SELFTEST", "OK" if ok else "FAILED", out, flush=True)
             win.close()
             sys.exit(0 if ok else 1)

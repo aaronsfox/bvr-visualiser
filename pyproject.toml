@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
+    "pyqtgraph>=0.13",
     "scikit-image>=0.21",
     "pyvista>=0.43",
     "pyvistaqt>=0.11",

@@ -34,7 +34,8 @@ The app opens on a **Start** page with one box per tool. Click a box to open tha
 
 | Tool | Status | What it's for |
 |---|---|---|
-| **Visualiser** | available | Watch tracked bone motion in 3D, with radiographs if you have them (below). |
+| **Visualiser** | available | Watch tracked bone motion in 3D, with radiographs if you have them, and joint angle curves from a joint model (below). |
+| **Model Builder** | available (knee first) | Define bone axes and joints on your surfaces from a template, and save a joint model for the other tools. |
 | **Reliability Analysis** | coming soon | Load models and repeated tracking of the same trial, by the same tester or different testers, and get accuracy and reliability metrics across them. |
 | **Validity Analysis** | coming soon | Load models, criterion tracking data and testers' tracking, and get accuracy against the criterion. |
 
@@ -62,11 +63,19 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 | its **tracking** | file, frames, untracked frames, detected format | attach/replace, format, detach |
 | **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
 | a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); which image is frame 1; files | view through it, show/hide, rename, change files, remove |
+| **Joints** | show joint curves | Load joint model, show/hide curves |
+| a **joint** | joint model, which tab models are its bones, axes and curves on/off, zero at a frame, values at this frame | show curves, show/hide axes, zero, export CSV, rename, change bones, remove |
 | **Scene** | axes, grid, background, motion trail, untracked frames | fit bones in view |
 
 - **Hold this bone still** (model properties or right-click): view the other bones' motion relative to it.
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4).
 - **Save tab as session** (Ctrl+S) saves file paths and every setting to a `.json`. **Open saved session** restores it.
+
+### Joint angles (optional)
+
+Build a joint model in the **Model Builder** (next section) and save it. Then, in a Visualiser tab with those bones and their tracking, right-click **Joints → Load joint model…**. The joint's bones are matched to the tab's models by surface file (then by name); you'll be asked if that's ambiguous, and can change it later (**Change bones…**). Each bone's axes are drawn on it, and the joint's angles and translations are plotted under the 3D view, with a cursor at the current frame (click a plot to jump there). **Zero at this frame** subtracts the values at a reference frame, e.g. a neutral pose. **Export CSV** writes every frame. Joints are saved with the session.
+
+The axes only fit a model built from the **same surface file in the same model space** as the joint model, so use the same STL/TIF (and the same voxel size or .tfm) in both tabs.
 
 ### Radiographs (optional)
 
@@ -81,6 +90,26 @@ The dialog previews your tracked bones on that image. If they sit on their shado
 With cameras added, the radiographs appear on detector planes behind the bones. The planes are see-through from behind, so they don't hide the bones. The **Through X-ray** buttons (or double-clicking a camera in the navigator) look from each X-ray source with the bones overlaid on the image.
 
 Radiographs are decoded in the background as soon as a camera is added, so playback may be slower for the first few seconds of a long trial. They're shown at up to 1024 pixels across, and hidden cameras aren't decoded at all.
+
+## The Model Builder
+
+The Model Builder applies a joint definition to your own bone surfaces. Its navigator lists the template's **Bones** (each with its landmarks) and **Joints**; **Properties** shows the selected item.
+
+1. **Choose a template** (select the model at the top). For now:
+   - **Knee: Grood & Suntay** — ISB doesn't define the knee, so this uses the Grood & Suntay (1983) joint coordinate system with ISB-style axes on each bone (X anterior, Y superior, Z right; Wu et al. 2002 for the femur). Set the **side**: left knees are mirrored so positive values mean the same motion on both sides (flexion, adduction/varus, internal rotation; lateral, anterior, proximal translations of the tibia).
+   - **Generic: inertial axes** — no landmarks: each bone's axes are its principal axes of inertia. Useful for small bones, or as a check.
+2. **Load each bone's surface:** right-click the bone → **Load surface…**. Use the same file (and model space) you track with.
+3. **Place each landmark:** select it in the navigator, then **right-click the surface**. Depending on the landmark's method (Properties):
+   - **Point** — right-click places it on the surface; right-click again to move it.
+   - **Centre of a painted region** — right-click and drag to paint; the landmark is the region's centre. Good for shaft centres on partial bones (a band around the top of the femur, the bottom of the tibia).
+   - **Sphere fit** — paint part of a round surface (e.g. the femoral head); the landmark is the fitted sphere's centre.
+   Left-drag still rotates. Done landmarks get a tick; the bone's axes appear as soon as it has all of them (red X, green Y, blue Z).
+4. **Check the joint:** select **Joints → Knee**. With a tracking file attached to each bone (right-click the bone → **Preview tracking**), both bones are shown in place with the joint's angles and translations at the first tracked frame. Sanity checks (e.g. the epicondyles being implausibly close) are listed there.
+5. **Save model…** writes a `.bvrmodel.json` (surfaces, landmark points, axes). Open it again here to edit it, or load it into a Visualiser tab.
+
+Partial bones: Autoscoper surfaces often stop part way up the femur and down the tibia. Where the template's definition needs the hip centre or the malleoli, paint a band around the shaft end instead — the shaft centre gives a long axis that follows the bone. Report that substitution with your results.
+
+**Planned:** more templates (ISB ankle/hip, multi-segment foot models), automatic axes from surface geometry (e.g. cylinder fits to the femoral condyles, as in the STAPLE/GIBOC and Kai et al. methods), and your own joint definitions.
 
 ## How the files are interpreted
 
@@ -101,7 +130,7 @@ BVR_SAMPLE_DATA=/path/to/sample_data pytest   # plus the real-data tests
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.
 
-`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
+`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_model_builder.py` builds a knee model on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
 
 ## Building the app
 

@@ -16,11 +16,13 @@ from pyvistaqt import QtInteractor
 
 from ..core.config import read_cfg
 from ..core.models import PALETTE, BoneModel, ModelError, is_volume_file
-from ..core.session import TabState, XrayCamera, load_session, save_session
+from ..core.session import JointLink, TabState, XrayCamera, load_session, save_session
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
-from .navigator import CAMERA, CAMERAS, MODEL, MODELS, SCENE, TRACKING, Navigator, PropertySheet
+from .joint_panel import JointCurves, RoleMapDialog, guess_role_map, write_csv, zeroed
+from .model_builder import add_triad
+from .navigator import CAMERA, CAMERAS, JOINT, JOINTS, MODEL, MODELS, SCENE, TRACKING, Navigator, PropertySheet
 from .panels import Timeline, h2, label
 from .scene import SceneController
 
@@ -129,6 +131,10 @@ class VisualiserTab(QWidget):
         self.selected: BoneModel | None = None          # model used for trail / coverage
         self.sel_kind: str = MODELS                     # what the navigator has selected
         self.sel_obj = None
+        self.curve_joint: JointLink | None = None       # joint whose curves are shown
+        self.show_curves = True
+        self._kin: dict = {}                            # id(link) -> joint_kinematics output (raw)
+        self._joint_actors: dict = {}                   # id(link) -> [(actor list, model, acs)]
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -205,6 +211,9 @@ class VisualiserTab(QWidget):
         hb.addWidget(self.frame_info, 1)
         hb.addWidget(label("Drag: rotate · Shift-drag: pan · Scroll: zoom · Right-click: select bone", wrap=False))
         cv.addWidget(self.hint)
+        self.curves = JointCurves()
+        self.curves.setVisible(False)
+        cv.addWidget(self.curves)
         self.timeline = Timeline(self.state.settings)
         cv.addWidget(self.timeline)
         split.addWidget(center)
@@ -220,6 +229,7 @@ class VisualiserTab(QWidget):
         self.timer.timeout.connect(self._tick)
         self.timeline.play.toggled.connect(self._play)
         self.timeline.frameChanged.connect(self._frame_changed)
+        self.curves.frameClicked.connect(lambda f: self.timeline.slider.setValue(f))
         self.nav.itemSelected.connect(self._nav_selected)
         self.nav.menuRequested.connect(self._show_menu)
         self.nav.visibilityToggled.connect(self._toggle_visible)
@@ -289,6 +299,9 @@ class VisualiserTab(QWidget):
             self.sel_kind, self.sel_obj = MODELS, None
         if self.sel_kind == CAMERA and not any(c is self.sel_obj for c in self.state.cameras):
             self.sel_kind, self.sel_obj = CAMERAS, None
+        if self.sel_kind == JOINT and not any(j is self.sel_obj for j in self.state.joints):
+            self.sel_kind, self.sel_obj = JOINTS, None
+        self.refresh_joints()
         self.nav.rebuild(self.state, self.sel_kind, self.sel_obj)
         self.show_properties()
         self._refresh_coverage()
@@ -328,6 +341,9 @@ class VisualiserTab(QWidget):
         self.sel_kind, self.sel_obj = kind, obj
         if kind in (MODEL, TRACKING) and obj is not self.selected:
             self.select(obj, from_nav=True)
+        if kind == JOINT and obj is not self.curve_joint:
+            self.curve_joint = obj
+            self._update_curves()
         self.show_properties()
 
     def _toggle_visible(self, obj, on: bool) -> None:
@@ -335,6 +351,9 @@ class VisualiserTab(QWidget):
         if isinstance(obj, BoneModel):
             self._appearance(obj)
             self.nav.refresh_obj(MODEL, obj)
+        elif isinstance(obj, JointLink):
+            self.nav.refresh_obj(JOINT, obj)
+            self._draw_joint_axes()
         else:
             self.nav.refresh_obj(CAMERA, obj)
             self.scene.update_frame(self.scene.frame)
@@ -349,7 +368,14 @@ class VisualiserTab(QWidget):
         if isinstance(obj, BoneModel):
             if self.state.settings.hold_still == old:
                 self.state.settings.hold_still = name
+            for jl in self.state.joints:              # joints refer to models by name
+                for r, n in list(jl.role_map.items()):
+                    if n == old:
+                        jl.role_map[r] = name
             self.nav.refresh_obj(MODEL, obj)
+        elif isinstance(obj, JointLink):
+            self.nav.refresh_obj(JOINT, obj)
+            self._update_curves()
         else:
             self.nav.refresh_obj(CAMERA, obj)
             self._refresh_xray_buttons()
@@ -416,6 +442,21 @@ class VisualiserTab(QWidget):
             add("Change calibration or images…", lambda: self.edit_camera(i))
             menu.addSeparator()
             add("Remove camera", lambda: self.remove_camera(i))
+        elif kind == JOINTS:
+            add("Load joint model…", self.load_joint_model, enabled=bool(self.state.models))
+            add("Hide joint curves" if self.show_curves else "Show joint curves", self._toggle_curves,
+                enabled=bool(self.state.joints))
+        elif kind == JOINT:
+            jl: JointLink = obj
+            add("Show curves for this joint", lambda: self._set_curve_joint(jl))
+            add("Hide axes" if jl.visible else "Show axes", lambda: self._toggle_visible(jl, not jl.visible))
+            add("Zero at the current frame", lambda: self._set_reference(jl, self.scene.frame))
+            add("Clear zero", lambda: self._set_reference(jl, None), enabled=jl.reference_frame is not None)
+            add("Export angles (CSV)…", lambda: self.export_joint_csv(jl))
+            menu.addSeparator()
+            add("Rename", lambda: self.nav.start_rename(JOINT, jl))
+            add("Change bones…", lambda: self.remap_joint(jl))
+            add("Remove joint", lambda: self.remove_joint(jl))
         elif kind == SCENE:
             add("Fit bones in view", self.scene.zoom_to_bones, enabled=bool(self.state.models))
             add("Free 3D view", lambda: self.set_view("3d"), enabled=bool(self.state.models))
@@ -445,6 +486,10 @@ class VisualiserTab(QWidget):
             self._props_cameras()
         elif kind == SCENE:
             self._props_scene()
+        elif kind == JOINT and obj is not None:
+            self._props_joint(obj)
+        elif kind == JOINTS:
+            self._props_joints()
         else:
             self._props_models()
         p.finish()
@@ -851,6 +896,10 @@ class VisualiserTab(QWidget):
     def _frame_changed(self, f: int) -> None:
         self.scene.update_frame(f)
         self._update_frame_info()
+        self._pose_joint_axes()
+        self.curves.set_frame(f)
+        if self.sel_kind == JOINT and not self.timer.isActive():
+            self.show_properties()
 
     # ---------------------------------------------------------------- views & settings
     def set_view(self, key: str) -> None:
@@ -1001,15 +1050,252 @@ class VisualiserTab(QWidget):
                     self.scene.add_camera(cam)
                 except Exception as e:  # noqa: BLE001
                     problems.append(f"{cam.name}: {e}")
+            for jl in st.joints:
+                try:
+                    jl.load()
+                    self.state.joints.append(jl)
+                except Exception as e:  # noqa: BLE001
+                    problems.append(f"{jl.name or jl.model_path.name}: {e}")
             self.refresh_all()
             self.scene.update_frame(0)
             if problems:
-                self._error("Some radiographs couldn't be loaded", "\n".join(problems))
+                self._error("Some radiographs or joints couldn't be loaded", "\n".join(problems))
 
         if st.models:
             self._build_models(st.models, then=add_cams)
         else:
             add_cams()
+
+    # ---------------------------------------------------------------- joints
+    def load_joint_model(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Load joint model", "", "Joint model (*.bvrmodel.json *.json)")
+        if path:
+            self.load_joint_model_file(path)
+
+    def load_joint_model_file(self, path, role_map: dict | None = None, ask: bool = True) -> list[JointLink]:
+        """Add every joint of a saved joint model; bones are matched to this tab's models."""
+        from ..core.joints import JointModel
+
+        try:
+            jm = JointModel.load(path, build_surfaces=False)
+        except Exception as e:  # noqa: BLE001
+            self._error("Couldn't open the joint model", str(e))
+            return []
+        missing = [jm.template.role(r).title for r, e in jm.bones.items() if e.acs is None]
+        if missing:
+            self._error("Joint model incomplete", f"No axes yet for: {', '.join(missing)}. Finish the landmarks in "
+                                                  "the Model Builder and save again.")
+            return []
+        guess = role_map or guess_role_map(jm, self.state.models)
+        added = []
+        for j in jm.template.joints:
+            jl = JointLink(model_path=Path(path), joint_key=j.key, joint_model=jm,
+                           role_map={r: guess[r] for r in (j.proximal, j.distal) if r in guess})
+            jl.name = j.title
+            complete = len(jl.role_map) == 2 and len(set(jl.role_map.values())) == 2
+            if not complete or (ask and role_map is None and len(self.state.models) > 2):
+                dlg = RoleMapDialog(self, jl, self.state.models)
+                if not ask or dlg.exec() != QDialog.Accepted:
+                    continue
+                jl.role_map = dlg.values()
+            self.state.joints.append(jl)
+            added.append(jl)
+        if added:
+            self.curve_joint = added[0]
+            self.sel_kind, self.sel_obj = JOINT, added[0]
+            self.refresh_all()
+            for jl in added:
+                self._check_surfaces(jl)
+        return added
+
+    def _check_surfaces(self, jl: JointLink) -> None:
+        """Warn when a joint's bone is matched to a model built from a different surface file."""
+        odd = []
+        for role, name in jl.role_map.items():
+            m = self._model_named(name)
+            s = jl.joint_model.bones[role].surface
+            if m is not None and s is not None and Path(m.path).name != Path(s.path).name:
+                odd.append(f"{jl.joint_model.template.role(role).title}: joint model used {Path(s.path).name}, "
+                           f"this tab uses {Path(m.path).name}")
+        if odd:
+            self._error("Check the bones", "The axes only fit if both use the same surface (same model space).\n\n"
+                        + "\n".join(odd))
+
+    def _model_named(self, name):
+        return next((m for m in self.state.models if m.name == name), None)
+
+    def _poses(self, m: BoneModel, n: int) -> np.ndarray:
+        if m.tracking is None:
+            return np.repeat(np.eye(4)[None], n, axis=0)
+        P = m.tracking.poses
+        if len(P) < n:
+            P = np.concatenate([P, np.full((n - len(P), 4, 4), np.nan)])
+        return P[:n]
+
+    def joint_values(self, jl: JointLink, zero: bool = True) -> dict | None:
+        """Angles/translations of a joint over the trial (None if its bones aren't in the tab)."""
+        k = self._kin.get(id(jl))
+        if k is None:
+            return None
+        return zeroed(k, jl.reference_frame) if zero else k
+
+    def refresh_joints(self) -> None:
+        self._kin.clear()
+        n = max(self.scene.n_frames, 1)
+        for jl in self.state.joints:
+            j = jl.joint()
+            mp, md = self._model_named(jl.role_map.get(j.proximal)), self._model_named(jl.role_map.get(j.distal))
+            if mp is None or md is None:
+                continue
+            self._kin[id(jl)] = jl.joint_model.joint_kinematics(j.key, self._poses(mp, n), self._poses(md, n))
+        if self.curve_joint is not None and not any(j is self.curve_joint for j in self.state.joints):
+            self.curve_joint = None
+        if self.curve_joint is None and self.state.joints:
+            self.curve_joint = self.state.joints[0]
+        self._update_curves()
+        self._draw_joint_axes()
+
+    def _update_curves(self) -> None:
+        jl = self.curve_joint
+        k = self.joint_values(jl) if jl is not None else None
+        self.curves.setVisible(self.show_curves and k is not None)
+        if k is not None:
+            zero = f" · zeroed at frame {jl.reference_frame + 1}" if jl.reference_frame is not None else ""
+            self.curves.set_data(k, f"{jl.name} · {self.curves_title(jl)}{zero}")
+            self.curves.set_frame(self.scene.frame)
+        else:
+            self.curves.set_data(None)
+
+    def curves_title(self, jl: JointLink) -> str:
+        j = jl.joint()
+        return f"{jl.role_map.get(j.distal, '?')} relative to {jl.role_map.get(j.proximal, '?')}"
+
+    def _draw_joint_axes(self) -> None:
+        for entries in self._joint_actors.values():
+            for actors, _m, _acs in entries:
+                for a in actors:
+                    self.plotter.remove_actor(a, render=False)
+        self._joint_actors.clear()
+        drawn = set()
+        for jl in self.state.joints:
+            if not jl.visible:
+                continue
+            entries = []
+            for role in (jl.joint().proximal, jl.joint().distal):
+                m = self._model_named(jl.role_map.get(role))
+                acs = jl.joint_model.bones[role].acs
+                if m is None or acs is None or (id(m), role) in drawn:
+                    continue
+                drawn.add((id(m), role))
+                size = float(np.linalg.norm(np.ptp(np.asarray(m.mesh.points), axis=0))) if m.mesh is not None else 100
+                actors = add_triad(self.plotter, acs, max(size * 0.3, 15))
+                entries.append((actors, m, acs))
+            self._joint_actors[id(jl)] = entries
+        self._pose_joint_axes()
+
+    def _pose_joint_axes(self) -> None:
+        f = self.scene.frame
+        for entries in self._joint_actors.values():
+            for actors, m, acs in entries:
+                pose = self.scene.model_pose(m, f)
+                for a in actors:
+                    a.SetVisibility(pose is not None and m.visible)
+                    if pose is not None:
+                        # the arrows are built at the ACS, so move them by the bone's pose
+                        a.user_matrix = pose
+        self.plotter.render()
+
+    def _set_curve_joint(self, jl: JointLink) -> None:
+        self.curve_joint = jl
+        self.show_curves = True
+        self._update_curves()
+
+    def _toggle_curves(self) -> None:
+        self.show_curves = not self.show_curves
+        self._update_curves()
+        if self.sel_kind in (JOINT, JOINTS):
+            self.show_properties()
+
+    def _set_reference(self, jl: JointLink, frame: int | None) -> None:
+        jl.reference_frame = frame
+        self._update_curves()
+        if self.sel_obj is jl:
+            self.show_properties()
+
+    def remap_joint(self, jl: JointLink) -> None:
+        dlg = RoleMapDialog(self, jl, self.state.models)
+        if dlg.exec() == QDialog.Accepted:
+            jl.role_map = dlg.values()
+            self.refresh_all()
+            self._check_surfaces(jl)
+
+    def remove_joint(self, jl: JointLink) -> None:
+        self.state.joints = [j for j in self.state.joints if j is not jl]
+        if self.sel_obj is jl:
+            self.sel_kind, self.sel_obj = JOINTS, None
+        self.refresh_all()
+
+    def export_joint_csv(self, jl: JointLink, path: str | None = None) -> None:
+        k = self.joint_values(jl)
+        if k is None:
+            self._error("Nothing to export", "This joint's bones aren't both in the tab.")
+            return
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(self, "Export joint angles", f"{self.state.name}_{jl.name}.csv",
+                                                  "CSV (*.csv)")
+            if not path:
+                return
+        write_csv(path, k, self.state.settings.fps)
+
+    def _props_joints(self) -> None:
+        p = self.props
+        p.clear("Joints")
+        p.note("Joint angles come from a joint model built in the Model Builder (Start page). Load one here and "
+               "match its bones to this tab's models; angles follow the tracking.")
+        if self.state.joints:
+            p.check("Curves", self.show_curves, lambda on: self.show_curves != on and self._toggle_curves(),
+                    "Show joint curves under the view")
+        p.buttons([("Load joint model…", self.load_joint_model)])
+
+    def _props_joint(self, jl: JointLink) -> None:
+        p = self.props
+        j = jl.joint()
+        jm = jl.joint_model
+        p.clear(jl.name)
+        p.value("Joint model", jl.model_path.name, tip=str(jl.model_path))
+        p.value("Template", jm.template.title)
+        p.value("Side", jm.side.title() if jm.template.sided else "—")
+        p.section("Bones")
+        for role in (j.proximal, j.distal):
+            name = jl.role_map.get(role)
+            ok = self._model_named(name) is not None
+            p.value(jm.template.role(role).title, name if ok else f"{name or 'not set'} (missing)",
+                    kind="Value" if ok else "Warn")
+        p.buttons([("Change bones…", lambda: self.remap_joint(jl))])
+        p.section("Display")
+        p.check("Axes", jl.visible, lambda on: self._toggle_visible(jl, on), "Show both bones' axes")
+        p.check("Curves", self.show_curves and self.curve_joint is jl,
+                lambda on: self._set_curve_joint(jl) if on else (self.show_curves and self._toggle_curves()),
+                "Show this joint's curves")
+        p.section("Zero")
+        p.value("Reference", f"frame {jl.reference_frame + 1}" if jl.reference_frame is not None else "none",
+                tip="Values at the reference frame are subtracted (e.g. a neutral frame).")
+        p.buttons([("Zero at this frame", lambda: self._set_reference(jl, self.scene.frame)),
+                   ("Clear", lambda: self._set_reference(jl, None))])
+        k = self.joint_values(jl)
+        p.section(f"Frame {self.scene.frame + 1}")
+        if k is None:
+            p.note("Both bones need to be in this tab.", "Warn")
+        else:
+            f = min(self.scene.frame, len(k["angles"]) - 1)
+            if np.isnan(k["angles"][f]).any():
+                p.value("Values", "untracked")
+            else:
+                for n, v in zip(k["short"], k["angles"][f]):
+                    p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f}°")
+                for n, v in zip(k["t_short"], k["translations"][f]):
+                    p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f} mm")
+        p.buttons([("Export CSV…", lambda: self.export_joint_csv(jl)), ("Remove", lambda: self.remove_joint(jl))])
 
     def screenshot(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Save screenshot", f"{self.state.name}_frame{self.scene.frame + 1}.png",

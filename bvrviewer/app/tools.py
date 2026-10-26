@@ -42,7 +42,7 @@ TOOLS: list[ToolType] = [
                  "Templates (ISB, published foot models) or your own joints",
                  "Saved models feed joint angles into the other tools"),
         color="#B78AF0",
-        available=False,
+        available=True,
     ),
     ToolType(
         key="reliability",

@@ -18,12 +18,13 @@ hidden = (
     + ["vtkmodules.qt.QVTKRenderWindowInteractor", "vtkmodules.util.numpy_support"]
     + collect_submodules("imagecodecs")
     + collect_submodules("pyvistaqt")
+    + collect_submodules("pyqtgraph", filter=lambda n: not any(x in n for x in (".examples", ".opengl", ".jupyter")))
     + ["scipy.spatial.transform._rotation_groups", "skimage.measure", "skimage.filters"]
 )
 datas = collect_data_files("pyvista") + collect_data_files("imageio_ffmpeg")
 
 # Large Qt and Python parts the app never uses.
-EXCLUDE = ["tkinter", "matplotlib.tests", "PyQt5", "PyQt6", "PySide2", "IPython", "jupyter", "cv2",
+EXCLUDE = ["pyqtgraph.examples", "pyqtgraph.opengl", "pyqtgraph.jupyter", "tkinter", "matplotlib.tests", "PyQt5", "PyQt6", "PySide2", "IPython", "jupyter", "cv2",
            "vtkmodules.web", "vtkmodules.test", "trame", "notebook", "pandas", "sympy", "numba", "dask",
            "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
            "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtQuick", "PySide6.QtQml",

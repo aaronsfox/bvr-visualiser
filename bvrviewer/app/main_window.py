@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from .model_builder import ModelBuilderTab
 from .start_page import StartPage
 from .tab import VisualiserTab
 from .tools import tool
@@ -28,7 +29,7 @@ def _tab_icon(color: str) -> QIcon:
 
 class MainWindow(QMainWindow):
     # Tool key -> tab widget class. Tools without an entry show as "Coming soon" on the Start page.
-    TAB_CLASSES = {"visualiser": VisualiserTab}
+    TAB_CLASSES = {"visualiser": VisualiserTab, "model_builder": ModelBuilderTab}
 
     def __init__(self):
         super().__init__()

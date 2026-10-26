@@ -80,17 +80,59 @@ class SceneSettings:
     fps: float = 30.0
 
 
+@dataclass(eq=False)
+class JointLink:
+    """A joint from a saved joint model (.bvrmodel.json), shown in a Visualiser tab.
+
+    role_map maps the joint model's bone roles to the names of this tab's models.
+    """
+
+    model_path: Path
+    joint_key: str
+    role_map: dict = field(default_factory=dict)     # role -> tab model name
+    name: str = ""
+    visible: bool = True                              # draw the bones' axes in the 3D view
+    reference_frame: int | None = None                # zero the curves at this frame (0-based)
+
+    # runtime
+    joint_model: object = None                        # core.joints.JointModel (surfaces not rebuilt)
+
+    def to_dict(self) -> dict:
+        return {"model_path": str(self.model_path), "joint_key": self.joint_key, "role_map": dict(self.role_map),
+                "name": self.name, "visible": self.visible, "reference_frame": self.reference_frame}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "JointLink":
+        return cls(model_path=Path(d["model_path"]), joint_key=d["joint_key"], role_map=d.get("role_map", {}),
+                   name=d.get("name", ""), visible=d.get("visible", True),
+                   reference_frame=d.get("reference_frame"))
+
+    def load(self) -> None:
+        from .joints import JointModel
+
+        self.joint_model = JointModel.load(self.model_path, build_surfaces=False)
+        if self.joint_key not in {j.key for j in self.joint_model.template.joints}:
+            raise ValueError(f"{self.model_path.name} has no joint {self.joint_key!r}.")
+        if not self.name:
+            self.name = self.joint().title
+
+    def joint(self):
+        return next(j for j in self.joint_model.template.joints if j.key == self.joint_key)
+
+
 @dataclass
 class TabState:
     name: str = "Untitled tab"
     models: list[BoneModel] = field(default_factory=list)
     cameras: list[XrayCamera] = field(default_factory=list)
     settings: SceneSettings = field(default_factory=SceneSettings)
+    joints: list[JointLink] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {"version": SESSION_VERSION, "tool": "visualiser", "name": self.name,
                 "models": [m.to_dict() for m in self.models],
                 "cameras": [c.to_dict() for c in self.cameras],
+                "joints": [j.to_dict() for j in self.joints],
                 "settings": self.settings.__dict__.copy()}
 
     @classmethod
@@ -101,7 +143,8 @@ class TabState:
                 setattr(s, k, v)
         return cls(name=d.get("name", "Untitled tab"),
                    models=[BoneModel.from_dict(m) for m in d.get("models", [])],
-                   cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])], settings=s)
+                   cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])], settings=s,
+                   joints=[JointLink.from_dict(j) for j in d.get("joints", [])])
 
 
 def save_session(state: TabState, path: str | Path) -> None:
