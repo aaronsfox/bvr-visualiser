@@ -30,34 +30,43 @@ The reliable route is Python 3.12 from https://www.python.org/downloads/windows/
 
 ## Using it
 
+The window is laid out like OpenSim. On the left, the **Navigator** lists what's in the tab under **Models**, **X-ray cameras** and **Scene**. Below it, **Properties** shows the settings of whatever is selected there. The 3D view and timeline are on the right. **Right-click** any level or item in the navigator for its actions.
+
 1. **New tab** (top right, or Ctrl+T). Each tab starts empty. Double-click a tab to rename it.
-2. **Add model** (STL, OBJ, PLY, VTK or TIF). You can select several at once. The file name becomes the bone's name; click the name to change it.
-   - **TIF partial volumes** ask for the voxel size, which TIFs don't store. Type it in, or read it from the trial's `.cfg`. The surface is built from the edge of the masked volume, which reproduces SlicerAutoscoperM's `AUT_*.stl` meshes. TIF models can also be shown as a volume rendering (Display as: Volume or Both).
-   - **STL surfaces** are assumed to be in Autoscoper space, like SlicerAutoscoperM's `AUT_*.stl`. If a surface is in CT space instead (e.g. SlicerAutoscoperM's `Models/rad.stl`), use **Apply .tfm…** with its `*-DICOM2AUT.tfm`.
-3. **Attach .tra** to each model. The format is detected: matrix or x y z yaw pitch roll, row or column order, comma or space, and several bones in one file (you'll be asked which). Untracked frames (`NaN`) show in orange on the timeline. If something looks wrong, use **Format…** to change the units (mm/cm, degrees/radians) or the order.
-4. **Look around:** drag to rotate, Shift-drag to pan, scroll to zoom, right-click a bone to select it. Use the Free 3D / XY / YZ / XZ buttons, and **Flip** to look from the other side.
-5. **Play** with Space, step with ← →. Speed and Loop are on the timeline.
+2. **Add a model:** right-click **Models → Add model…** (or File → Add model). STL, OBJ, PLY, VTK or TIF; you can select several at once. Each model is listed by name, which starts as its file name.
+   - **TIF partial volumes** ask for the voxel size, which TIFs don't store. Type it in, or read it from the trial's `.cfg`. The surface is built from the edge of the masked volume, which reproduces SlicerAutoscoperM's `AUT_*.stl` meshes. TIF models can also be shown as a volume rendering (Display as: Volume).
+   - **STL surfaces** are assumed to be in Autoscoper space, like SlicerAutoscoperM's `AUT_*.stl`. If a surface is in CT space instead (e.g. SlicerAutoscoperM's `Models/rad.stl`), right-click it and choose **Apply .tfm transform…** with its `*-DICOM2AUT.tfm`.
+3. **Attach tracking:** right-click the model → **Attach tracking…**. The tracking file then shows under the model. The format is detected: matrix or x y z yaw pitch roll, row or column order, comma or space, and several bones in one file (you'll be asked which). Untracked frames (`NaN`) show in orange on the timeline. If something looks wrong, right-click → **Tracking format…** to change the units (mm/cm, degrees/radians) or the order.
+4. **Change how it looks:** select the model and use **Properties**: name, colour, opacity, visible, and surface or volume display. The tick box beside each model in the navigator shows or hides it, and F2 (or clicking a selected name) renames it.
+5. **Look around:** drag to rotate, Shift-drag to pan, scroll to zoom, right-click a bone in the 3D view to select it. Use the Free 3D / XY / YZ / XZ buttons, and **Flip** to look from the other side.
+6. **Play** with Space, step with ← →. Speed and Loop are on the timeline.
 
-**Other options**
+**What's where**
 
-Scene and radiograph options are in the tabbed panel along the bottom of the window. Click a tab to open it; click the open tab again (or **Hide**) to fold the panel away.
+| Select… | Properties | Right-click |
+|---|---|---|
+| **Models** | count, frames | Add model, Show all, Hide all |
+| a **model** | name, colour, opacity, visible, display; hold this bone still; model file details | attach/replace/detach tracking, tracking format, hold still, show/hide, rename, replace file, .tfm or voxel size, remove |
+| its **tracking** | file, frames, untracked frames, detected format | attach/replace, format, detach |
+| **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
+| a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); which image is frame 1; files | view through it, show/hide, rename, change files, remove |
+| **Scene** | axes, grid, background, motion trail, untracked frames | fit bones in view |
 
-- **Hold this bone still** (on the selected model): view the other bones' motion relative to it.
-- **Scene tab:** axes and grid; background (dark, light grey, or white for figures); a motion trail of ghost copies of the selected bone at earlier frames; and what to do on untracked frames (hide the bone, show its last tracked pose, or interpolate across the gap).
+- **Hold this bone still** (model properties or right-click): view the other bones' motion relative to it.
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4).
 - **Save tab as session** (Ctrl+S) saves file paths and every setting to a `.json`. **Open saved session** restores it.
 
 ### Radiographs (optional)
 
-In the **Radiographs** tab of the bottom panel (or the Radiographs menu), choose **Add X-ray camera** and pick:
+Right-click **X-ray cameras → Add X-ray camera…** (or use the Radiographs menu) and pick:
 
 1. the calibration file (MayaCam 2.0 text, as in SlicerAutoscoperM's sample data);
 2. the radiographs: a folder, selected files, or one multi-page TIFF. Images are ordered by the last number in each file name, so any naming works;
-3. which image is tracking frame 1.
+3. which image is tracking frame 1 (also changeable later in the camera's properties).
 
-The dialog previews your tracked bones on that image. If they sit on their shadows, everything is matched up. Or use **Import from .cfg…** to add every camera listed in an Autoscoper trial file at once.
+The dialog previews your tracked bones on that image. If they sit on their shadows, everything is matched up. Or use **Import cameras from .cfg…** to add every camera listed in an Autoscoper trial file at once.
 
-With cameras added, the radiographs appear on detector planes behind the bones. The planes are see-through from behind, so they don't hide the bones. The **Through X-ray** buttons look from each X-ray source with the bones overlaid on the image.
+With cameras added, the radiographs appear on detector planes behind the bones. The planes are see-through from behind, so they don't hide the bones. The **Through X-ray** buttons (or double-clicking a camera in the navigator) look from each X-ray source with the bones overlaid on the image.
 
 Radiographs are decoded in the background as soon as a camera is added, so playback may be slower for the first few seconds of a long trial. They're shown at up to 1024 pixels across, and hidden cameras aren't decoded at all.
 

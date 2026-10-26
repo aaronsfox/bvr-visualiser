@@ -225,11 +225,12 @@ class SceneController:
             e = self._cam_actors.get(id(cam))
             if not e:
                 continue
-            plane_on = cam.visible and ((through and idx == active) or (not through and st.xray_in_scene))
+            # Looking through a camera always shows its own image; otherwise each camera's own choices apply.
+            plane_on = (through and idx == active) or (not through and cam.visible and cam.show_plane)
             e["plane"].SetVisibility(plane_on)
             e["plane"].prop.opacity = 1.0 if through else st.xray_opacity
-            e["source"].SetVisibility(cam.visible and st.xray_sources and not through)
-            e["beams"].SetVisibility(cam.visible and st.xray_beams and not through)
+            e["source"].SetVisibility(cam.visible and cam.show_source and not through)
+            e["beams"].SetVisibility(cam.visible and cam.show_beams and not through)
             for k in ("plane", "source", "beams"):
                 e[k].user_matrix = hold
 

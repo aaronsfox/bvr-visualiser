@@ -19,6 +19,9 @@ class XrayCamera:
     first_image: int = 0             # index of the image shown at tracking frame 1
     visible: bool = True
     name: str = "X-ray"
+    show_plane: bool = True          # radiograph on its detector plane in the 3D scene
+    show_source: bool = True         # X-ray source marker
+    show_beams: bool = False         # lines from the source to the image corners
 
     # runtime only
     calibration: object = field(default=None, repr=False)
@@ -43,13 +46,16 @@ class XrayCamera:
 
     def to_dict(self) -> dict:
         return {"name": self.name, "calibration_path": str(self.calibration_path), "source_kind": self.source_kind,
-                "source": [str(p) for p in self.source], "first_image": self.first_image, "visible": self.visible}
+                "source": [str(p) for p in self.source], "first_image": self.first_image, "visible": self.visible,
+                "show_plane": self.show_plane, "show_source": self.show_source, "show_beams": self.show_beams}
 
     @classmethod
     def from_dict(cls, d: dict) -> "XrayCamera":
         return cls(calibration_path=Path(d["calibration_path"]), source_kind=d["source_kind"],
                    source=[Path(p) for p in d["source"]], first_image=d.get("first_image", 0),
-                   visible=d.get("visible", True), name=d.get("name", "X-ray"))
+                   visible=d.get("visible", True), name=d.get("name", "X-ray"),
+                   show_plane=d.get("show_plane", True), show_source=d.get("show_source", True),
+                   show_beams=d.get("show_beams", False))
 
 
 @dataclass
@@ -62,9 +68,6 @@ class SceneSettings:
     trail_count: int = 3
     untracked: str = "hide"           # "hide", "hold", "interpolate"
     hold_still: str | None = None     # name of the bone kept still
-    xray_in_scene: bool = True
-    xray_sources: bool = True
-    xray_beams: bool = False
     xray_opacity: float = 0.9
     xray_distance: float = 120.0      # mm beyond the bones
     xray_bone_opacity: float = 0.5

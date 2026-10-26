@@ -62,9 +62,9 @@ def _indicator_qss() -> str:
     """Checkbox, radio, spin-box and tab-close styling that stays visible on the dark background."""
     d = _icon_dir()
     return f"""
-QCheckBox::indicator {{ width: 15px; height: 15px; border: 1px solid #6B7280; border-radius: 4px; background: #121419; }}
-QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url({d}/check.svg); }}
+QCheckBox::indicator, QTreeView::indicator {{ width: 15px; height: 15px; border: 1px solid #6B7280; border-radius: 4px; background: #121419; }}
+QCheckBox::indicator:hover, QTreeView::indicator:hover {{ border-color: {ACCENT}; }}
+QCheckBox::indicator:checked, QTreeView::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url({d}/check.svg); }}
 QCheckBox::indicator:disabled {{ border-color: #3A3F4B; background: #1C1F26; }}
 QRadioButton::indicator {{ width: 15px; height: 15px; border: 1px solid #6B7280; border-radius: 8px; background: #121419; }}
 QRadioButton::indicator:hover {{ border-color: {ACCENT}; }}
@@ -129,11 +129,17 @@ QTabBar {{ background: #0E1014; qproperty-drawBase: 0; }}
 QTabBar::tab {{ background: transparent; color: #A3AAB8; padding: 9px 14px; border: 1px solid transparent; border-top-left-radius: 8px; border-top-right-radius: 8px; }}
 QTabBar::tab:selected {{ background: #171A20; color: #E6E8EC; border-color: #262A33; border-bottom-color: #171A20; }}
 QTabBar::tab:hover:!selected {{ color: #E6E8EC; }}
-QWidget#OptionsBar {{ background: #0E1014; border-top: 1px solid #262A33; }}
-QWidget#OptionsBar QTabBar {{ background: #0E1014; }}
-QWidget#OptionsBar QTabBar::tab {{ border-radius: 0; padding: 7px 14px; border: 0; border-top: 2px solid transparent; color: #A3AAB8; }}
-QWidget#OptionsBar QTabBar::tab:selected {{ background: #171A20; color: #E6E8EC; border-top: 2px solid {ACCENT}; }}
-QWidget#OptionsBody {{ background: #171A20; }}
+QSplitter::handle {{ background: #262A33; }}
+QWidget#PropsHead {{ background: #171A20; border-bottom: 1px solid #262A33; }}
+QTreeWidget#Navigator {{ background: #171A20; border: 0; padding: 4px 6px; outline: 0;
+    selection-background-color: #2A3A52; selection-color: #FFFFFF; }}
+QTreeWidget#Navigator::item {{ padding: 4px 2px; border-radius: 5px; }}
+QTreeWidget#Navigator::item:selected {{ background: #2A3A52; color: #FFFFFF; }}
+QTreeWidget#Navigator::item:hover:!selected {{ background: #1F232B; }}
+QTreeWidget#Navigator QLineEdit {{ padding: 1px 4px; }}
+QLabel#PropLabel {{ color: #A3AAB8; font-size: 12px; padding-top: 4px; }}
+QLabel#Value {{ color: #E6E8EC; font-size: 12px; padding-top: 4px; }}
+QLabel#Warn {{ padding-top: 4px; }}
 QScrollArea {{ border: 0; background: transparent; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; }}
 QScrollBar::handle:vertical {{ background: #343946; border-radius: 5px; min-height: 30px; }}

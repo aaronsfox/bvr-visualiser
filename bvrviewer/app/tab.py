@@ -1,4 +1,4 @@
-"""One tab: its models, tracking, radiographs, 3D view and timeline."""
+"""One tab: navigator + properties on the left, the 3D view and timeline on the right."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QProgressDialog,
-    QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
+    QProgressDialog, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 from pyvistaqt import QtInteractor
 
@@ -20,7 +20,8 @@ from ..core.session import TabState, XrayCamera, load_session, save_session
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
-from .panels import ModelRow, ModelsPanel, OptionsPanel, Timeline, label
+from .navigator import CAMERA, CAMERAS, MODEL, MODELS, SCENE, TRACKING, Navigator, PropertySheet
+from .panels import Timeline, h2, label
 from .scene import SceneController
 
 MODEL_FILTER = "Bone models (*.stl *.STL *.tif *.tiff *.TIF *.obj *.ply *.vtk *.vtp);;All files (*)"
@@ -71,13 +72,14 @@ class EmptyState(QFrame):
         title.setObjectName("Big")
         title.setWordWrap(True)
         v.addWidget(title)
-        v.addWidget(label("Each model gets its own tracking file from Autoscoper. Add as many models as you need, "
-                          "then press play."))
+        v.addWidget(label("Everything in the tab is listed in the navigator on the left. Right-click an item "
+                          "there for its actions, and select it to edit its properties below."))
         for n, head, body in [
-            (1, "Add a model", "An STL surface or a TIF partial volume. Its file name becomes the bone's name, "
-                               "which you can change."),
-            (2, "Set how it looks", "Colour, opacity, and surface or volume display."),
-            (3, "Attach its tracking file", "The .tra exported for that bone. The format is detected automatically."),
+            (1, "Add a model", "Right-click Models (or use the button below). STL surfaces or TIF partial volumes; "
+                               "the file name becomes the bone's name, which you can change."),
+            (2, "Attach its tracking file", "Right-click the model and choose Attach tracking. The .tra format "
+                                            "is detected automatically."),
+            (3, "Set how it looks", "Select the model to change its colour, opacity and display in Properties."),
         ]:
             r = QHBoxLayout()
             num = QLabel(str(n))
@@ -108,6 +110,10 @@ class EmptyState(QFrame):
         outer.addWidget(box)
 
 
+def _fmt_pct(x: float) -> str:
+    return f"{x * 100:.0f}%"
+
+
 class TrialTab(QWidget):
     titleChanged = Signal(str)
 
@@ -117,17 +123,42 @@ class TrialTab(QWidget):
         self.cfg = None                     # last .cfg used, for voxel sizes
         self._threads: list = []
         self._busy: QProgressDialog | None = None
-        self.selected: BoneModel | None = None
+        self.selected: BoneModel | None = None          # model used for trail / coverage
+        self.sel_kind: str = MODELS                     # what the navigator has selected
+        self.sel_obj = None
 
-        root = QVBoxLayout(self)
+        root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         split = QSplitter(Qt.Horizontal)
         split.setHandleWidth(1)
-        self.models_panel = ModelsPanel()
-        self.models_panel.setMinimumWidth(370)
-        split.addWidget(self.models_panel)
 
+        # ---- left: navigator over properties
+        left = QSplitter(Qt.Vertical)
+        left.setHandleWidth(1)
+        nav_box = QWidget()
+        nav_box.setObjectName("Panel")
+        nb = QVBoxLayout(nav_box)
+        nb.setContentsMargins(0, 0, 0, 0)
+        nb.setSpacing(0)
+        head = QWidget()
+        head.setObjectName("PropsHead")
+        head.setAttribute(Qt.WA_StyledBackground, True)
+        hh = QHBoxLayout(head)
+        hh.setContentsMargins(14, 10, 10, 8)
+        hh.addWidget(h2("Navigator"), 1)
+        hh.addWidget(label("right-click for actions", wrap=False))
+        nb.addWidget(head)
+        self.nav = Navigator()
+        nb.addWidget(self.nav, 1)
+        left.addWidget(nav_box)
+        self.props = PropertySheet()
+        left.addWidget(self.props)
+        left.setSizes([330, 520])
+        left.setMinimumWidth(340)
+        split.addWidget(left)
+
+        # ---- right: view buttons, 3D view, info strip, timeline
         center = QWidget()
         cv = QVBoxLayout(center)
         cv.setContentsMargins(0, 0, 0, 0)
@@ -169,21 +200,15 @@ class TrialTab(QWidget):
         hb.setContentsMargins(10, 4, 10, 4)
         self.frame_info = label("", "Mono", wrap=False)
         hb.addWidget(self.frame_info, 1)
-        tip = label("Drag: rotate · Shift-drag: pan · Scroll: zoom · Right-click: select bone", wrap=False)
-        hb.addWidget(tip)
+        hb.addWidget(label("Drag: rotate · Shift-drag: pan · Scroll: zoom · Right-click: select bone", wrap=False))
         cv.addWidget(self.hint)
+        self.timeline = Timeline(self.state.settings)
+        cv.addWidget(self.timeline)
         split.addWidget(center)
-
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setSizes([380, 1120])
-        root.addWidget(split, 1)
-        self.timeline = Timeline(self.state.settings)
-        root.addWidget(self.timeline)
-        # Options live in a foldable, tabbed panel along the bottom (Scene, Radiographs).
-        self._root = root
-        self.settings_panel = self._make_settings_panel()
-        root.addWidget(self.settings_panel)
+        root.addWidget(split)
 
         self.scene = SceneController(self.plotter, self.state)
         self.plotter.enable_mesh_picking(self._picked, use_actor=True, show=False, show_message=False)
@@ -192,19 +217,11 @@ class TrialTab(QWidget):
         self.timer.timeout.connect(self._tick)
         self.timeline.play.toggled.connect(self._play)
         self.timeline.frameChanged.connect(self._frame_changed)
-        self.models_panel.addModel.connect(self.add_models)
-        c = self.models_panel.card
-        c.replaceModel.connect(self.replace_model)
-        c.loadTfm.connect(self.load_tfm)
-        c.clearTfm.connect(self.clear_tfm)
-        c.editVoxel.connect(self.edit_voxel)
-        c.attachTracking.connect(self.attach_tracking)
-        c.detachTracking.connect(self.detach_tracking)
-        c.editFormat.connect(self.edit_format)
-        c.displayChanged.connect(self._appearance)
-        c.holdStill.connect(self.hold_still)
-        c.remove.connect(self.remove_model)
-        c.resetName.connect(self._reset_name)
+        self.nav.itemSelected.connect(self._nav_selected)
+        self.nav.menuRequested.connect(self._show_menu)
+        self.nav.visibilityToggled.connect(self._toggle_visible)
+        self.nav.renamed.connect(self._rename)
+        self.nav.activated.connect(lambda _k, cam: self.set_xray_view(self.state.cameras.index(cam)))
         for key, fn in [(Qt.Key_Space, lambda: self.timeline.play.toggle()),
                         (Qt.Key_Right, lambda: self.timeline.step(1)), (Qt.Key_Left, lambda: self.timeline.step(-1))]:
             sc = QShortcut(QKeySequence(key), self)
@@ -212,27 +229,6 @@ class TrialTab(QWidget):
             sc.activated.connect(fn)
         self._negative = False
         self.refresh_all()
-
-    def _make_settings_panel(self, collapsed: bool = False, page: int = 0) -> OptionsPanel:
-        p = OptionsPanel(self.state.settings, collapsed=collapsed, page=page)
-        p.changed.connect(self._settings_changed)
-        p.addCamera.connect(self.add_camera)
-        p.importCfg.connect(self.import_cfg)
-        p.editCamera.connect(self.edit_camera)
-        p.removeCamera.connect(self.remove_camera)
-        return p
-
-    def _rebuild_settings_panel(self) -> None:
-        """Recreate the settings panel so it shows settings loaded from a session."""
-        old = self.settings_panel
-        self.settings_panel = self._make_settings_panel(old.collapsed, old.stack.currentIndex())
-        self._root.replaceWidget(old, self.settings_panel)
-        old.setParent(None)
-        old.deleteLater()
-        self.timeline.loop.setChecked(self.state.settings.loop)
-        i = self.timeline.speed.findData(self.state.settings.speed)
-        if i >= 0:
-            self.timeline.speed.setCurrentIndex(i)
 
     # ---------------------------------------------------------------- helpers
     def _run(self, text: str, fn, on_done) -> None:
@@ -279,18 +275,21 @@ class TrialTab(QWidget):
 
     # ---------------------------------------------------------------- refresh
     def refresh_all(self) -> None:
+        """Bring the navigator, properties, timeline and view buttons in line with the state."""
         has = bool(self.state.models)
         self.stack.setCurrentIndex(1 if has else 0)
         self.view_bar.setVisible(has)
         self.hint.setVisible(has)
         self.timeline.set_count(self.scene.n_frames)
-        self.models_panel.set_selected(self.selected)
-        self.models_panel.card.show_model(self.selected, self.state.settings.hold_still)
-        for r in self.models_panel.rows:
-            r.refresh()
+        # (identity checks: models and cameras are dataclasses, so `in` would compare their fields)
+        if self.sel_kind in (MODEL, TRACKING) and not any(m is self.sel_obj for m in self.state.models):
+            self.sel_kind, self.sel_obj = MODELS, None
+        if self.sel_kind == CAMERA and not any(c is self.sel_obj for c in self.state.cameras):
+            self.sel_kind, self.sel_obj = CAMERAS, None
+        self.nav.rebuild(self.state, self.sel_kind, self.sel_obj)
+        self.show_properties()
         self._refresh_coverage()
         self._refresh_xray_buttons()
-        self.settings_panel.set_cameras(self.state.cameras)
         self._update_frame_info()
 
     def _refresh_coverage(self) -> None:
@@ -320,6 +319,300 @@ class TrialTab(QWidget):
             if i is not None and cam.visible:
                 txt += f"   ·   {cam.name}: {cam.images.label(i)}"
         self.frame_info.setText(txt)
+
+    # ---------------------------------------------------------------- navigator
+    def _nav_selected(self, kind: str, obj) -> None:
+        self.sel_kind, self.sel_obj = kind, obj
+        if kind in (MODEL, TRACKING) and obj is not self.selected:
+            self.select(obj, from_nav=True)
+        self.show_properties()
+
+    def _toggle_visible(self, obj, on: bool) -> None:
+        obj.visible = on
+        if isinstance(obj, BoneModel):
+            self._appearance(obj)
+            self.nav.refresh_obj(MODEL, obj)
+        else:
+            self.nav.refresh_obj(CAMERA, obj)
+            self.scene.update_frame(self.scene.frame)
+            self._update_frame_info()
+        if obj is self.sel_obj:
+            self.show_properties()
+
+    def _rename(self, obj, name: str) -> None:
+        if name == obj.name:
+            return
+        old, obj.name = obj.name, name
+        if isinstance(obj, BoneModel):
+            if self.state.settings.hold_still == old:
+                self.state.settings.hold_still = name
+            self.nav.refresh_obj(MODEL, obj)
+        else:
+            self.nav.refresh_obj(CAMERA, obj)
+            self._refresh_xray_buttons()
+        self._update_frame_info()
+        if obj is self.sel_obj:
+            self.props.title.setText(name)
+
+    def _show_menu(self, kind: str, obj, pos) -> None:
+        menu = self.build_menu(kind, obj)
+        if not menu.isEmpty():
+            menu.exec(pos)
+
+    def build_menu(self, kind: str, obj) -> QMenu:
+        """The right-click menu for a navigator level or item."""
+        menu = QMenu(self)
+
+        def add(text, fn, enabled=True, checked=None):
+            a = QAction(text, menu)
+            a.triggered.connect(lambda _=False: fn())
+            a.setEnabled(enabled)
+            if checked is not None:
+                a.setCheckable(True)
+                a.setChecked(checked)
+            menu.addAction(a)
+            return a
+
+        if kind == MODELS:
+            add("Add model…", self.add_models)
+            menu.addSeparator()
+            add("Show all", lambda: self._show_all(True), enabled=bool(self.state.models))
+            add("Hide all", lambda: self._show_all(False), enabled=bool(self.state.models))
+        elif kind in (MODEL, TRACKING):
+            m: BoneModel = obj
+            add("Replace tracking…" if m.tracking else "Attach tracking…", lambda: self.attach_tracking(m))
+            if m.tracking:
+                add("Tracking format…", lambda: self.edit_format(m))
+                add("Detach tracking", lambda: self.detach_tracking(m))
+            if kind == MODEL:
+                menu.addSeparator()
+                add("Hold this bone still", lambda: self.hold_still(m, self.state.settings.hold_still != m.name),
+                    enabled=m.tracking is not None, checked=self.state.settings.hold_still == m.name)
+                add("Hide" if m.visible else "Show", lambda: self._toggle_visible(m, not m.visible))
+                add("Rename", lambda: self.nav.start_rename(MODEL, m))
+                add("Use file name as name", lambda: self._rename(m, m.path.stem))
+                menu.addSeparator()
+                add("Replace model file…", lambda: self.replace_model(m))
+                if m.is_volume:
+                    add("Voxel size / surface…", lambda: self.edit_voxel(m))
+                elif m.tfm_path:
+                    add("Remove .tfm transform", lambda: self.clear_tfm(m))
+                else:
+                    add("Apply .tfm transform…", lambda: self.load_tfm(m))
+                menu.addSeparator()
+                add("Remove model", lambda: self.remove_model(m))
+        elif kind == CAMERAS:
+            add("Add X-ray camera…", self.add_camera)
+            add("Import cameras from .cfg…", self.import_cfg)
+        elif kind == CAMERA:
+            cam: XrayCamera = obj
+            i = self.state.cameras.index(cam)
+            add("View through this camera", lambda: self.set_xray_view(i))
+            add("Hide" if cam.visible else "Show", lambda: self._toggle_visible(cam, not cam.visible))
+            add("Rename", lambda: self.nav.start_rename(CAMERA, cam))
+            add("Change calibration or images…", lambda: self.edit_camera(i))
+            menu.addSeparator()
+            add("Remove camera", lambda: self.remove_camera(i))
+        elif kind == SCENE:
+            add("Fit bones in view", self.scene.zoom_to_bones, enabled=bool(self.state.models))
+            add("Free 3D view", lambda: self.set_view("3d"), enabled=bool(self.state.models))
+        return menu
+
+    def _show_all(self, on: bool) -> None:
+        for m in self.state.models:
+            m.visible = on
+            self.scene.refresh_model_style(m)
+            self.nav.refresh_obj(MODEL, m)
+        self.scene.update_frame(self.scene.frame)
+        if self.sel_kind == MODEL:
+            self.show_properties()
+
+    # ---------------------------------------------------------------- properties
+    def show_properties(self) -> None:
+        """Fill the properties sheet for whatever is selected in the navigator."""
+        kind, obj = self.sel_kind, self.sel_obj
+        p = self.props
+        if kind == MODEL and obj is not None:
+            self._props_model(obj)
+        elif kind == TRACKING and obj is not None:
+            self._props_tracking(obj)
+        elif kind == CAMERA and obj is not None:
+            self._props_camera(obj)
+        elif kind == CAMERAS:
+            self._props_cameras()
+        elif kind == SCENE:
+            self._props_scene()
+        else:
+            self._props_models()
+        p.finish()
+
+    def _props_models(self) -> None:
+        p = self.props
+        p.clear("Models")
+        n = len(self.state.models)
+        tracked = sum(1 for m in self.state.models if m.tracking)
+        p.value("Models", str(n))
+        p.value("With tracking", f"{tracked} of {n}" if n else "–")
+        if n:
+            p.value("Frames", str(self.scene.n_frames))
+        p.note("Select a model in the navigator to edit it. Right-click a model for its actions.")
+        p.buttons([("Add model…", self.add_models)] +
+                  ([("Show all", lambda: self._show_all(True)), ("Hide all", lambda: self._show_all(False))]
+                   if n else []))
+
+    def _props_model(self, m: BoneModel) -> None:
+        p = self.props
+        p.clear(m.name)
+        p.section("Appearance")
+        p.line("Name", m.name, lambda v: self._rename(m, v))
+        p.color("Colour", m.color, lambda c: self._set_model(m, "color", c))
+        p.slider("Opacity", m.opacity, 0, 100, 100, _fmt_pct, lambda v: self._set_model(m, "opacity", v, nav=False))
+        p.check("Visible", m.visible, lambda on: self._toggle_visible(m, on))
+        p.combo("Display as", [("surface", "Surface"), ("volume", "Volume", m.image_data is not None),
+                               ("both", "Surface and volume", m.image_data is not None)],
+                m.display, lambda v: self._set_model(m, "display", v),
+                tip=None if m.image_data is not None else "Volume display needs a TIF model.")
+        p.section("Motion")
+        if m.tracking:
+            p.value("Tracking", f"{m.tracking.path.name} · {m.tracking.n_frames} frames", tip=str(m.tracking.path))
+        else:
+            p.value("Tracking", "None. Shown in its model pose.", kind="Warn")
+        p.check("Hold still", self.state.settings.hold_still == m.name, lambda on: self.hold_still(m, on),
+                caption="Others move relative to it", enabled=m.tracking is not None)
+        p.buttons([("Replace tracking…" if m.tracking else "Attach tracking…", lambda: self.attach_tracking(m))])
+        p.section("Model file")
+        p.value("File", m.path.name, tip=str(m.path))
+        if m.is_volume:
+            vs = " × ".join(f"{x:g}" for x in m.voxel_size) if m.voxel_size else "?"
+            p.value("Voxel size", f"{vs} mm")
+            p.value("Surface", m.surface_note)
+            p.buttons([("Replace…", lambda: self.replace_model(m)), ("Voxel size / surface…", lambda: self.edit_voxel(m))])
+        else:
+            p.value("Space", f"Moved into Autoscoper space with {Path(m.tfm_path).name} (inverted)" if m.tfm_path
+                    else "Assumed to be in Autoscoper space")
+            p.buttons([("Replace…", lambda: self.replace_model(m)),
+                       ("Remove .tfm", lambda: self.clear_tfm(m)) if m.tfm_path else
+                       ("Apply .tfm…", lambda: self.load_tfm(m))])
+        p.buttons([("Remove model", lambda: self.remove_model(m))], danger="Remove model")
+
+    def _props_tracking(self, m: BoneModel) -> None:
+        p = self.props
+        t = m.tracking
+        p.clear(f"Tracking · {m.name}")
+        if t is None:
+            p.note("No tracking file attached, so this model stays in its model pose.", "Warn")
+            p.buttons([("Attach tracking…", lambda: self.attach_tracking(m))])
+            return
+        p.section("Tracking file")
+        p.value("File", t.path.name, tip=str(t.path))
+        p.value("Frames", str(t.n_frames))
+        gaps = t.gaps()
+        if gaps:
+            shown = ", ".join(f"{a + 1}–{b + 1}" if b > a else f"{a + 1}" for a, b in gaps[:6])
+            p.value("Untracked", f"{t.n_untracked} frames ({shown}{' …' if len(gaps) > 6 else ''})", kind="Warn")
+        else:
+            p.value("Untracked", "None")
+        p.section("Format")
+        p.value("Detected", t.fmt.describe())
+        if t.fmt.n_volumes > 1:
+            p.value("Bone in file", f"Volume {t.volume_index + 1} of {t.fmt.n_volumes}")
+        for w in t.warnings:
+            p.note(w, "Warn")
+        p.buttons([("Format…", lambda: self.edit_format(m)), ("Replace…", lambda: self.attach_tracking(m)),
+                   ("Detach", lambda: self.detach_tracking(m))])
+
+    def _props_camera(self, cam: XrayCamera) -> None:
+        p = self.props
+        i = self.state.cameras.index(cam)
+        p.clear(cam.name)
+        p.section("Camera")
+        p.line("Name", cam.name, lambda v: self._rename(cam, v))
+        p.check("Visible", cam.visible, lambda on: self._toggle_visible(cam, on))
+        p.section("Show in the 3D scene")
+        p.check("Radiograph", cam.show_plane, lambda on: self._set_camera(cam, "show_plane", on),
+                caption="On detector plane")
+        p.check("X-ray source", cam.show_source, lambda on: self._set_camera(cam, "show_source", on),
+                caption="Show marker")
+        p.check("Beam outline", cam.show_beams, lambda on: self._set_camera(cam, "show_beams", on),
+                caption="Lines to image corners")
+        p.buttons([("View through this camera", lambda: self.set_xray_view(i))])
+        p.section("Images")
+        n = len(cam.images)
+        p.value("Images", f"{n} · {cam.images.describe()}", tip=str(cam.images.source))
+        p.value("Folder", cam.images.source.name, tip=str(cam.images.source))
+        p.combo("Frame 1 image", [(k, cam.images.label(k)) for k in range(n)], cam.first_image,
+                lambda k: self._set_first_image(cam, k),
+                tip="Which radiograph matches the first tracked frame.")
+        shown = n - cam.first_image
+        if self.state.models and shown != self.scene.n_frames:
+            p.note(f"{shown} images from here for {self.scene.n_frames} tracked frames.", "Warn")
+        p.section("Calibration")
+        p.value("File", cam.calibration_path.name, tip=str(cam.calibration_path))
+        p.value("Details", cam.calibration.summary())
+        p.buttons([("Change files…", lambda: self.edit_camera(i))])
+        p.buttons([("Remove camera", lambda: self.remove_camera(i))], danger="Remove camera")
+
+    def _props_cameras(self) -> None:
+        p = self.props
+        s = self.state.settings
+        p.clear("X-ray cameras")
+        if not self.state.cameras:
+            p.note("Optional: not needed to view motion. Add each X-ray camera's calibration and images to show "
+                   "the radiographs behind the bones, or to look through a camera at its radiograph.")
+            p.buttons([("Add X-ray camera…", self.add_camera), ("Import from .cfg…", self.import_cfg)])
+            return
+        p.note("These settings apply to every camera. Select a camera for its own options.")
+        p.section("Radiographs in the 3D scene")
+        p.slider("Image opacity", s.xray_opacity, 0, 100, 100, _fmt_pct, lambda v: self._set("xray_opacity", v))
+        p.slider("Distance behind", s.xray_distance, 0, 800, 1, lambda x: f"{x:.0f} mm",
+                 lambda v: self._set("xray_distance", v), on_release=True)
+        p.section("Through-X-ray views")
+        p.slider("Bone opacity", s.xray_bone_opacity, 0, 100, 100, _fmt_pct, lambda v: self._set("xray_bone_opacity", v))
+        p.check("Wireframe bones", s.xray_outline, lambda on: self._set("xray_outline", on), caption="Draw as wireframe")
+        p.section("Image")
+        p.slider("Brightness", s.brightness, -100, 100, 100, lambda x: f"{x:+.2f}", lambda v: self._set("brightness", v))
+        p.slider("Contrast", s.contrast, 20, 300, 100, lambda x: f"{x:.1f}×", lambda v: self._set("contrast", v))
+        p.check("Invert", s.invert, lambda on: self._set("invert", on))
+        p.buttons([("Add X-ray camera…", self.add_camera), ("Import from .cfg…", self.import_cfg)])
+
+    def _props_scene(self) -> None:
+        p = self.props
+        s = self.state.settings
+        p.clear("Scene")
+        p.section("Display")
+        p.check("Axes", s.show_axes, lambda on: self._set("show_axes", on), caption="Global axes at origin")
+        p.check("Grid", s.show_grid, lambda on: self._set("show_grid", on), caption="Grid with mm scale")
+        p.combo("Background", [("dark", "Dark"), ("light", "Light grey"), ("white", "White (for figures)")],
+                s.background, lambda v: self._set("background", v))
+        p.section("Motion trail")
+        p.check("Show trail", s.trail, lambda on: self._set("trail", on), caption="Selected bone")
+        p.spin("Every", s.trail_step, 1, 100, lambda v: self._set("trail_step", v), suffix=" frames")
+        p.spin("Copies", s.trail_count, 1, 8, lambda v: self._set("trail_count", v))
+        p.section("Untracked frames")
+        p.combo("Show as", [("hide", "Hide the bone"), ("hold", "Show last tracked pose"),
+                                              ("interpolate", "Interpolate across gaps")],
+                s.untracked, lambda v: self._set("untracked", v))
+
+    # ---- property setters
+    def _set(self, key: str, value) -> None:
+        setattr(self.state.settings, key, value)
+        self._settings_changed(key)
+
+    def _set_model(self, m: BoneModel, key: str, value, nav: bool = True) -> None:
+        setattr(m, key, value)
+        self._appearance(m)
+        if nav:
+            self.nav.refresh_obj(MODEL, m)
+
+    def _set_camera(self, cam: XrayCamera, key: str, value) -> None:
+        setattr(cam, key, value)
+        self.scene.update_frame(self.scene.frame)
+
+    def _set_first_image(self, cam: XrayCamera, k: int) -> None:
+        cam.first_image = int(k)
+        cam.images.prefetch(range(cam.first_image, len(cam.images)))
+        self.scene.update_frame(self.scene.frame)
+        self._update_frame_info()
 
     # ---------------------------------------------------------------- models
     def add_models(self) -> None:
@@ -372,14 +665,9 @@ class TrialTab(QWidget):
         for m in built:
             self.state.models.append(m)
             self.scene.add_model(m)
-            row = ModelRow(m)
-            row.selected.connect(self.select)
-            row.changed.connect(self._appearance)
-            row.renamed.connect(self._renamed)
-            row.attachTracking.connect(self.attach_tracking)
-            self.models_panel.add_row(row)
         if built:
             self.select(built[-1], refresh=False)
+            self.sel_kind, self.sel_obj = MODEL, built[-1]
         if errors:
             self._error("Some models couldn't be loaded", "\n\n".join(errors))
         self.refresh_all()
@@ -389,15 +677,16 @@ class TrialTab(QWidget):
         if then:
             then()
 
-    def select(self, m: BoneModel | None, refresh: bool = True) -> None:
+    def select(self, m: BoneModel | None, refresh: bool = True, from_nav: bool = False) -> None:
+        """Make m the selected bone (trail, timeline coverage) and show it in the navigator."""
         self.selected = m
         self.scene.selected = m
         self.scene.rebuild_trail()
         if refresh:
-            self.models_panel.set_selected(m)
-            self.models_panel.card.show_model(m, self.state.settings.hold_still)
             self._refresh_coverage()
             self.scene.update_frame(self.scene.frame)
+            if not from_nav and m is not None:
+                self.nav.select(MODEL, m)
 
     def _picked(self, actor) -> None:
         for m in self.state.models:
@@ -409,23 +698,6 @@ class TrialTab(QWidget):
     def _appearance(self, m: BoneModel) -> None:
         self.scene.refresh_model_style(m)
         self.scene.update_frame(self.scene.frame)
-        if m is self.selected:
-            self.models_panel.card.show_model(m, self.state.settings.hold_still)
-
-    def _renamed(self, old: str, new: str) -> None:
-        if self.state.settings.hold_still == old:
-            self.state.settings.hold_still = new
-            self._update_frame_info()
-
-    def _reset_name(self, m: BoneModel) -> None:
-        old = m.name
-        m.name = m.path.stem
-        if self.state.settings.hold_still == old:
-            self.state.settings.hold_still = m.name
-        row = self.models_panel.row_for(m)
-        if row:
-            row.name.setText(m.name)
-        self.models_panel.card.show_model(m, self.state.settings.hold_still)
 
     def replace_model(self, m: BoneModel) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Replace model", str(m.path.parent), MODEL_FILTER)
@@ -456,9 +728,8 @@ class TrialTab(QWidget):
             self.state.models[i] = res
             self.scene.remove_model(old)
             self.scene.add_model(res)
-            row = self.models_panel.row_for(old)
-            row.model = res
             self.select(res, refresh=False)
+            self.sel_kind, self.sel_obj = MODEL, res
             self.refresh_all()
             self.scene.apply_settings()
 
@@ -485,10 +756,11 @@ class TrialTab(QWidget):
             return
         self.scene.remove_model(m)
         self.state.models.remove(m)
-        self.models_panel.remove_row(m)
         if self.state.settings.hold_still == m.name:
             self.state.settings.hold_still = None
-        self.select(self.state.models[-1] if self.state.models else None, refresh=False)
+        nxt = self.state.models[-1] if self.state.models else None
+        self.select(nxt, refresh=False)
+        self.sel_kind, self.sel_obj = (MODEL, nxt) if nxt else (MODELS, None)
         self.refresh_all()
         self.scene.frame = min(self.scene.frame, self.scene.n_frames - 1)
         self.scene.apply_settings()
@@ -498,6 +770,8 @@ class TrialTab(QWidget):
         self.scene.apply_settings()          # grid follows the new frame of reference
         self._update_frame_info()
         self.scene.zoom_to_bones()
+        if self.sel_obj is m:
+            self.show_properties()
 
     # ---------------------------------------------------------------- tracking
     def attach_tracking(self, m: BoneModel) -> None:
@@ -524,12 +798,14 @@ class TrialTab(QWidget):
         self._tracking_changed(m)
         if t.warnings:
             self._error("Check the tracking format", "\n".join(t.warnings) +
-                        "\n\nUse “Format…” on the selected model to correct it.")
+                        "\n\nRight-click the model and choose Tracking format… to correct it.")
 
     def _tracking_changed(self, m: BoneModel) -> None:
         if self.state.cameras:
             self.scene.reposition_cameras()
         self.select(m, refresh=False)
+        if self.sel_obj is not m:
+            self.sel_kind, self.sel_obj = MODEL, m
         self.refresh_all()
         self.scene.frame = min(self.scene.frame, self.scene.n_frames - 1)
         self.scene.apply_settings()          # grid and axes now cover where the bones move
@@ -605,41 +881,57 @@ class TrialTab(QWidget):
             self.scene.update_frame(self.scene.frame)
         self._update_frame_info()
 
+    def _sync_timeline_settings(self) -> None:
+        self.timeline.loop.setChecked(self.state.settings.loop)
+        i = self.timeline.speed.findData(self.state.settings.speed)
+        if i >= 0:
+            self.timeline.speed.setCurrentIndex(i)
+
     # ---------------------------------------------------------------- radiographs
     def add_camera(self) -> None:
         dlg = AddCameraDialog(self, self.scene.n_frames, self._preview_bones(), index=len(self.state.cameras) + 1)
         if dlg.exec() == QDialog.Accepted and dlg.result_camera:
             self.state.cameras.append(dlg.result_camera)
             self.scene.add_camera(dlg.result_camera)
+            self.sel_kind, self.sel_obj = CAMERA, dlg.result_camera
             self.refresh_all()
-            self.settings_panel.show_page(1)
             self.scene.update_frame(self.scene.frame)
 
     def edit_camera(self, i: int) -> None:
         old = self.state.cameras[i]
         dlg = AddCameraDialog(self, self.scene.n_frames, self._preview_bones(), existing=old)
         if dlg.exec() == QDialog.Accepted and dlg.result_camera:
-            if dlg.result_camera.images is not old.images:
+            new = dlg.result_camera
+            new.visible, new.show_plane, new.show_source, new.show_beams = \
+                old.visible, old.show_plane, old.show_source, old.show_beams
+            if new.images is not old.images:
                 self.scene.forget_camera(old)
             else:
                 self.scene.remove_camera(old)
-            self.state.cameras[i] = dlg.result_camera
-            self.scene.add_camera(dlg.result_camera)
+            self.state.cameras[i] = new
+            self.scene.add_camera(new)
+            self.sel_kind, self.sel_obj = CAMERA, new
             self.refresh_all()
             self.scene.update_frame(self.scene.frame)
 
     def remove_camera(self, i: int) -> None:
-        cam = self.state.cameras.pop(i)
+        cam = self.state.cameras[i]
+        if QMessageBox.question(self, "Remove camera", f"Remove {cam.name} from this tab?") != QMessageBox.Yes:
+            return
+        self.state.cameras.pop(i)
         self.scene.forget_camera(cam)
         if self.scene.view_mode.startswith("xray"):
             self.set_view("3d")
+        self.sel_kind, self.sel_obj = CAMERAS, None
         self.refresh_all()
         self.scene.update_frame(self.scene.frame)
 
     def import_cfg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Autoscoper trial configuration", "", "Config (*.cfg)")
-        if not path:
-            return
+        if path:
+            self.import_cfg_file(path)
+
+    def import_cfg_file(self, path: str, quiet: bool = False) -> None:
         cfg = read_cfg(path)
         self.cfg = cfg
         if not cfg.calibrations:
@@ -657,19 +949,19 @@ class TrialTab(QWidget):
         for cam in cams:
             self.state.cameras.append(cam)
             self.scene.add_camera(cam)
+        if cams:
+            self.sel_kind, self.sel_obj = CAMERAS, None
         self.refresh_all()
         self.scene.update_frame(self.scene.frame)
-        if cams:
-            self.settings_panel.show_page(1)
         msg = f"Added {len(cams)} camera(s) from {Path(path).name}."
         counts = {len(c.images) for c in cams}
         if cams and self.state.models and any(n != self.scene.n_frames for n in counts):
             msg += f"\n\nImage counts ({', '.join(map(str, sorted(counts)))}) differ from the {self.scene.n_frames} " \
-                   "tracked frames. Use Edit on a camera to choose which image is frame 1."
+                   "tracked frames. Select a camera to choose which image is frame 1."
         msg += "\n\nIts voxel sizes will be offered when you add TIF volumes."
         if problems:
             self._error("Some cameras couldn't be added", msg + "\n\n" + "\n\n".join(problems))
-        else:
+        elif not quiet:
             QMessageBox.information(self, "Cameras imported", msg)
 
     # ---------------------------------------------------------------- sessions & export
@@ -694,7 +986,7 @@ class TrialTab(QWidget):
         self.titleChanged.emit(st.name)
         for k, v in st.settings.__dict__.items():
             setattr(self.state.settings, k, v)
-        self._rebuild_settings_panel()
+        self._sync_timeline_settings()
         cams = st.cameras
 
         def add_cams():

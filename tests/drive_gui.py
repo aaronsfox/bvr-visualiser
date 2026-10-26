@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 os.environ.setdefault("QT_API", "pyside6")
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import pyvista as pv  # noqa: E402
@@ -72,10 +73,16 @@ tab.timeline.slider.setValue(30)
 shot("02_wrist_models", tab)
 
 # Rename, recolour, select, trail
-row = tab.models_panel.row_for(tab.state.models[0])
-row.name.setText("Radius")
-row._on_name()
+# rename through the navigator, as an inline edit would
+it = tab.nav.item_for("model", tab.state.models[0])
+it.setText(0, "Radius")
+assert tab.state.models[0].name == "Radius", tab.state.models[0].name
+# untick in the navigator hides the bone, ticking shows it again
+it.setCheckState(0, Qt.Unchecked)
+assert not tab.state.models[0].visible
+it.setCheckState(0, Qt.Checked)
 tab.select(tab.state.models[1])
+assert tab.sel_obj is tab.state.models[1] and tab.sel_kind == "model"
 tab.state.settings.trail = True
 tab.state.settings.trail_step = 6
 tab._settings_changed("trail")
@@ -91,8 +98,8 @@ for k, (cal, folder) in enumerate(zip(cfg.calibrations, cfg.camera_dirs), start=
     tab.state.cameras.append(cam)
     tab.scene.add_camera(cam)
 tab.refresh_all()
-tab.state.settings.xray_beams = True
-tab._settings_changed("xray_beams")
+for c in tab.state.cameras:
+    tab._set_camera(c, "show_beams", True)
 tab.timeline.slider.setValue(0)
 tab.set_view("3d")
 shot("04_xray_world_default", tab)
@@ -256,16 +263,51 @@ print("grid contains tracked bone:", bool(inside), flush=True)
 assert inside
 shot("18_grid_after_tracking", t5)
 
-# ---- bottom options panel: radiographs page open, then folded away
+# ---- navigator + properties: each kind of item, and its right-click menu
 win.tabs.setCurrentIndex(0)
-tab.settings_panel.show_page(1)
-shot("19_options_radiographs", tab)
-tab.settings_panel.show_page(0)
-shot("20_options_scene", tab)
-tab.settings_panel.set_collapsed(True)
-assert not tab.settings_panel.stack.isVisible()
-shot("21_options_folded", tab)
-tab.settings_panel.set_collapsed(False)
+tab.set_view("3d")
+for c in tab.state.cameras:
+    c.visible = True
+    tab._set_camera(c, "show_beams", False)
+tab.refresh_all()
+expected = [
+    ("models", None, ["Add model…", "Show all", "Hide all"]),
+    ("model", tab.state.models[0], ["Replace tracking…", "Tracking format…", "Detach tracking",
+                                     "Hold this bone still", "Hide", "Rename", "Use file name as name",
+                                     "Replace model file…", "Voxel size / surface…", "Remove model"]),
+    ("tracking", tab.state.models[2], ["Attach tracking…"]),
+    ("cameras", None, ["Add X-ray camera…", "Import cameras from .cfg…"]),
+    ("camera", tab.state.cameras[0], ["View through this camera", "Hide", "Rename",
+                                       "Change calibration or images…", "Remove camera"]),
+    ("scene", None, ["Fit bones in view", "Free 3D view"]),
+]
+for kind, obj, names in expected:
+    got = [a.text() for a in tab.build_menu(kind, obj).actions() if not a.isSeparator()]
+    assert got == names, (kind, got)
+print("context menus OK", flush=True)
+for n, (kind, obj) in enumerate([("model", tab.state.models[0]), ("tracking", tab.state.models[1]),
+                                 ("camera", tab.state.cameras[0]), ("cameras", None), ("scene", None),
+                                 ("models", None)], start=19):
+    tab.nav.select(kind, obj)
+    pump(0.3)
+    assert (tab.sel_kind, tab.sel_obj) == (kind, obj), (tab.sel_kind, kind)
+    win.grab().save(str(OUT / f"{n}_props_{kind}.png"))
+# properties edit the model: colour and opacity
+m0 = tab.state.models[0]
+tab.nav.select("model", m0)
+tab._set_model(m0, "color", "#E07A9A")
+tab._set_model(m0, "opacity", 0.5, nav=False)
+assert tab.scene._bone_actors[id(m0)]["surface"].prop.opacity == 0.5
+# per-camera view options: hide camera 2's radiograph only
+c2 = tab.state.cameras[1]
+tab._set_camera(c2, "show_plane", False)
+assert not tab.scene._cam_actors[id(c2)]["plane"].GetVisibility()
+assert tab.scene._cam_actors[id(tab.state.cameras[0])]["plane"].GetVisibility()
+tab.nav.select("model", m0)
+shot("25_props_model_edited", tab)
+tab._set_camera(c2, "show_plane", True)
+tab._set_model(m0, "opacity", 1.0, nav=False)
+print("saved navigator/properties shots", flush=True)
 
 # Video export of the wrist tab (no dialogs): reuse the export loop directly
 import imageio.v2 as imageio  # noqa: E402
