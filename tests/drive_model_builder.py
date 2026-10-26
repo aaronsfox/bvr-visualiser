@@ -149,6 +149,35 @@ shot("mb_05_joint")
 k = tab._preview_kinematics(tab.model.template.joints[0])
 print("preview knee", np.round(k[1], 1), np.round(k[2], 1), flush=True)
 
+# ---- automatic axes: per bone, drawn fits, flips, comparison with the landmark axes
+tab.sel = ("bone", "femur", None)
+tab.refresh()
+tab.set_axes_source("femur", "femur_cylinder")
+assert tab.model.bones["femur"].acs is not None and tab.model.bones["femur"].auto is not None
+tab.plotter.reset_camera()
+shot("mb_08_auto_femur_cylinder")
+tab.sel = ("bone", "tibia", None)
+tab.set_axes_source("tibia", "tibia_ellipse")
+tab.plotter.reset_camera()
+shot("mb_09_auto_tibia_ellipse")
+x_before = tab.model.bones["tibia"].acs[:3, 0].copy()
+tab._toggle_option("tibia", "flip_ap")
+assert tab.model.bones["tibia"].acs[:3, 0] @ x_before < -0.7
+tab._toggle_option("tibia", "flip_ap")
+assert tab.model.bones["tibia"].auto_options == {}
+tab.sel = ("joint", None, "knee")
+tab.refresh()
+rows = tab.compare_methods("knee")
+assert len(rows) == 3 * 4 and sum(r["current"] for r in rows) == 1
+for r in rows:
+    print("compare", f"{r['proximal']:15s} {r['distal']:15s}", np.round(r["angles"], 1), flush=True)
+tab.plotter.reset_camera()
+shot("mb_10_compare")
+auto_path = OUT / "knee_left_auto.bvrmodel.json"
+tab.model.save(auto_path)
+tab.landmarks_all()
+assert tab.model.bones["femur"].axes_source == "landmarks"
+
 # save and reload in a new tab
 path = OUT / "knee_left.bvrmodel.json"
 tab.model.save(path)

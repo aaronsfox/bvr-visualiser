@@ -156,6 +156,7 @@ class BoneRole:
     recipe: str                     # name in RECIPES
     landmarks: tuple = ()
     axes_note: str = ""
+    auto_methods: tuple = ()        # keys in core.auto_axes.AUTO_METHODS that can replace the landmarks
 
 
 @dataclass(frozen=True)
@@ -255,7 +256,8 @@ KNEE = _register(Template(
              "Suntay joint coordinate system: flexion about the femur's Z axis, internal rotation about "
              "the tibia's Y axis, ad/abduction about the floating axis between them. Works with partial "
              "bones from biplanar videoradiography: where the hip centre or ankle isn't in the model, use the "
-             "centre of a band painted around the end of the shaft."),
+             "centre of a band painted around the end of the shaft. Each bone's axes can instead come from an "
+             "automatic method fitted to its surface (no landmarks)."),
     references=("Grood ES, Suntay WJ (1983) J Biomech Eng 105:136–144",
                 "Wu G et al. (2002) ISB recommendation, part I: ankle, hip and spine. J Biomech 35:543–548"),
     bones=(
@@ -268,7 +270,8 @@ KNEE = _register(Template(
                         "Hip joint centre: paint the femoral head and use a sphere fit. On a partial femur, "
                         "paint a band around the most proximal part of the shaft and use its centre.",
                         ("region", "sphere", "point")),
-        ), "Origin at the epicondyle midpoint; Y towards the superior point; Z right; X anterior."),
+        ), "Origin at the epicondyle midpoint; Y towards the superior point; Z right; X anterior.",
+            ("femur_cylinder", "femur_spheres")),
         BoneRole("tibia", "Tibia", "knee_tibia", (
             LandmarkDef("MC", "Medial condyle", "Most medial point of the medial tibial condyle (plateau rim).",
                         ("point", "region")),
@@ -278,7 +281,8 @@ KNEE = _register(Template(
                         "Midpoint between the malleoli if the model includes them. On a partial tibia, paint a "
                         "band around the most distal part of the shaft and use its centre.",
                         ("region", "point")),
-        ), "Origin at the condyle midpoint; Y from the distal point to the origin; Z right; X anterior."),
+        ), "Origin at the condyle midpoint; Y from the distal point to the origin; Z right; X anterior.",
+            ("tibia_ellipse", "tibia_centroids", "tibia_inertia")),
     ),
     joints=(JointDef("knee", "Knee", "femur", "tibia", "grood_suntay_knee"),),
 ))
@@ -336,10 +340,13 @@ class BoneEntry:
     surface: object = None                # a core.models.BoneModel (surface file + model space settings)
     landmarks: dict = field(default_factory=dict)    # key -> {"method": str, "points": [[x,y,z], ...]}
     preview_tracking: str | None = None   # optional .tra to preview the joint at a frame
+    axes_source: str = "landmarks"        # "landmarks", or an automatic method key (core.auto_axes)
+    auto_options: dict = field(default_factory=dict)  # e.g. {"flip_ap": True, "flip_long": False}
 
     # runtime
     acs: np.ndarray | None = None
     error: str = ""
+    auto: object = None                   # core.auto_axes.AutoResult when axes_source is automatic
 
 
 @dataclass
@@ -349,6 +356,7 @@ class JointModel:
     name: str = "Joint model"
     bones: dict = field(default_factory=dict)        # role -> BoneEntry
     path: Path | None = None
+    _auto_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def template(self) -> Template:
@@ -369,18 +377,31 @@ class JointModel:
             return None
         return landmark_value(lm["method"], lm.get("points"))
 
+    def uses_landmarks(self, role: str) -> bool:
+        return self.bones[role].axes_source == "landmarks"
+
+    def set_axes_source(self, role: str, source: str) -> None:
+        if source != "landmarks" and source not in self.template.role(role).auto_methods:
+            raise JointModelError(f"{source!r} isn't an automatic method for this bone.")
+        self.bones[role].axes_source = source
+
     def missing(self, role: str) -> list[str]:
+        if not self.uses_landmarks(role):
+            return []
         r = self.template.role(role)
         return [d.name for d in r.landmarks if self.landmark(role, d.key) is None]
 
     # ---- coordinate systems
     def compute(self) -> None:
-        """(Re)compute every bone's ACS from its landmarks; failures are kept in BoneEntry.error."""
+        """(Re)compute every bone's ACS from its landmarks or automatic method; failures go in BoneEntry.error."""
         for role in self.template.bones:
             e = self.bones[role.key]
-            e.acs, e.error = None, ""
+            e.acs, e.error, e.auto = None, "", None
             if e.surface is None or getattr(e.surface, "mesh", None) is None:
                 e.error = "No surface loaded."
+                continue
+            if e.axes_source != "landmarks":
+                self._compute_auto(role, e)
                 continue
             miss = self.missing(role.key)
             if miss:
@@ -393,12 +414,85 @@ class JointModel:
                 e.error = str(err)
         return None
 
+    def _auto_result(self, role_key: str, source: str, options: dict):
+        """AutoResult (or the JointModelError it raised) for a bone and automatic method, cached."""
+        from . import auto_axes
+
+        e = self.bones[role_key]
+        key = (role_key, source, tuple(sorted(options.items())), id(e.surface.mesh))
+        if key not in self._auto_cache:
+            try:
+                self._auto_cache[key] = auto_axes.run(source, e.surface.mesh, self.side, options)
+            except JointModelError as err:
+                self._auto_cache[key] = err
+            except Exception as err:  # noqa: BLE001 - geometry can fail in many ways; report it
+                self._auto_cache[key] = JointModelError(f"The automatic method failed: {err}")
+        return self._auto_cache[key]
+
+    def _compute_auto(self, role, e) -> None:
+        res = self._auto_result(role.key, e.axes_source, e.auto_options)
+        if isinstance(res, Exception):
+            e.error = str(res)
+        else:
+            e.auto, e.acs = res, res.acs.copy()
+
+    def axes_sources(self, role_key: str) -> list[tuple[str, str]]:
+        """(key, title) of every way this bone's axes can be made: landmarks, then automatic methods."""
+        from .auto_axes import AUTO_METHODS
+
+        r = self.template.role(role_key)
+        out = [("landmarks", "Landmarks (placed by hand)")] if r.landmarks else []
+        return out + [(k, "Automatic: " + AUTO_METHODS[k].title) for k in r.auto_methods]
+
+    def axes_for(self, role_key: str, source: str):
+        """This bone's ACS from a given source, without changing the model. Returns (acs or None, error)."""
+        e = self.bones[role_key]
+        if e.surface is None or getattr(e.surface, "mesh", None) is None:
+            return None, "No surface loaded."
+        if source == "landmarks":
+            r = self.template.role(role_key)
+            L = {d.key: self.landmark(role_key, d.key) for d in r.landmarks}
+            miss = [d.name for d in r.landmarks if L[d.key] is None]
+            if miss:
+                return None, "Missing: " + ", ".join(miss)
+            try:
+                return RECIPES[r.recipe](L, self.side, e.surface.mesh), ""
+            except JointModelError as err:
+                return None, str(err)
+        opts = e.auto_options if source == e.axes_source else {}
+        res = self._auto_result(role_key, source, opts)
+        return (None, str(res)) if isinstance(res, Exception) else (res.acs.copy(), "")
+
+    def compare_methods(self, joint_key: str, prox_pose: np.ndarray, dist_pose: np.ndarray) -> list[dict]:
+        """Joint angles at one pose for every combination of the two bones' axis sources."""
+        j = next(j for j in self.template.joints if j.key == joint_key)
+        rows = []
+        for ps, pt in self.axes_sources(j.proximal):
+            A, _ = self.axes_for(j.proximal, ps)
+            for ds, dt in self.axes_sources(j.distal):
+                B, _ = self.axes_for(j.distal, ds)
+                row = {"proximal": ps, "distal": ds, "proximal_title": pt, "distal_title": dt,
+                       "current": ps == self.bones[j.proximal].axes_source and ds == self.bones[j.distal].axes_source}
+                if A is None or B is None:
+                    row["angles"] = row["translations"] = None
+                else:
+                    k = _kinematics(j, self.side, A, B, prox_pose[None], dist_pose[None])
+                    row["angles"], row["translations"] = k["angles"][0], k["translations"][0]
+                rows.append(row)
+        return rows
+
     def checks(self) -> list[str]:
         """Plain-language warnings about landmarks that look wrong."""
         out = []
         t = self.template
+        for r in t.bones:
+            e = self.bones[r.key]
+            if e.auto is not None:
+                out += [f"{r.title}: {n}" for n in e.auto.notes]
         if t.key == KNEE.key:
             for role, a, b, far, lo, hi in [("femur", "ME", "LE", "FS", 35, 130), ("tibia", "MC", "LC", "TD", 35, 130)]:
+                if not self.uses_landmarks(role):
+                    continue
                 pa, pb, pf = self.landmark(role, a), self.landmark(role, b), self.landmark(role, far)
                 if pa is not None and pb is not None:
                     w = np.linalg.norm(pb - pa)
@@ -427,34 +521,11 @@ class JointModel:
         bone is untracked.
         """
         j = next(j for j in self.template.joints if j.key == joint_key)
-        conv = JOINT_CONVENTIONS[j.convention]
         A = self.bones[j.proximal].acs
         B = self.bones[j.distal].acs
         if A is None or B is None:
             raise JointModelError("Both bones need complete axes first.")
-        n = min(len(prox_poses), len(dist_poses))
-        ang = np.full((n, 3), np.nan)
-        tr = np.full((n, 3), np.nan)
-        sa, st = conv["signs"][self.side]
-        seq = conv["sequence"]
-        idx = {"X": 0, "Y": 1, "Z": 2}
-        for f in range(n):
-            P, D = prox_poses[f], dist_poses[f]
-            if np.isnan(P).any() or np.isnan(D).any():
-                continue
-            Pw, Dw = P @ A, D @ B                                  # axes in the world
-            R = Pw[:3, :3].T @ Dw[:3, :3]                          # distal relative to proximal
-            ang[f] = np.degrees(decompose(R, seq)) * sa
-            e1 = Pw[:3, idx[seq[0]]]
-            e3 = Dw[:3, idx[seq[2]]]
-            e2 = np.cross(e3, e1)
-            nn = np.linalg.norm(e2)
-            e2 = e2 / nn if nn > 1e-9 else Pw[:3, idx[seq[1]]]
-            d = Dw[:3, 3] - Pw[:3, 3]
-            q = np.linalg.solve(np.column_stack([e1, e2, e3]), d)  # d = q1 e1 + q2 e2 + q3 e3
-            tr[f] = q * st
-        return {"angles": ang, "translations": tr, "names": conv["angles"], "short": conv["short"],
-                "t_names": conv["translations"], "t_short": conv["short_t"], "title": conv["title"]}
+        return _kinematics(j, self.side, A, B, prox_poses, dist_poses)
 
     # ---- files
     def to_dict(self) -> dict:
@@ -463,6 +534,7 @@ class JointModel:
             "template": self.template_key, "side": self.side,
             "bones": {role: {"surface": e.surface.to_dict() if e.surface is not None else None,
                              "landmarks": e.landmarks, "preview_tracking": e.preview_tracking,
+                             "axes_source": e.axes_source, "auto_options": e.auto_options,
                              "acs": e.acs.tolist() if e.acs is not None else None}
                       for role, e in self.bones.items()},
         }
@@ -488,6 +560,9 @@ class JointModel:
             e.surface = BoneModel.from_dict(b["surface"]) if b.get("surface") else None
             e.landmarks = b.get("landmarks", {}) or {}
             e.preview_tracking = b.get("preview_tracking")
+            src = b.get("axes_source", "landmarks")
+            e.axes_source = src if src == "landmarks" or src in m.template.role(role).auto_methods else "landmarks"
+            e.auto_options = dict(b.get("auto_options") or {})
             if b.get("acs") is not None:
                 e.acs = np.array(b["acs"], float)
         return m
@@ -502,3 +577,31 @@ class JointModel:
                     e.surface.build()
             m.compute()
         return m
+
+
+def _kinematics(j: JointDef, side: str, A: np.ndarray, B: np.ndarray, prox_poses, dist_poses) -> dict:
+    """Angles and translations of joint j for proximal/distal ACSs A, B over (n, 4, 4) poses."""
+    conv = JOINT_CONVENTIONS[j.convention]
+    n = min(len(prox_poses), len(dist_poses))
+    ang = np.full((n, 3), np.nan)
+    tr = np.full((n, 3), np.nan)
+    sa, st = conv["signs"][side]
+    seq = conv["sequence"]
+    idx = {"X": 0, "Y": 1, "Z": 2}
+    for f in range(n):
+        P, D = prox_poses[f], dist_poses[f]
+        if np.isnan(P).any() or np.isnan(D).any():
+            continue
+        Pw, Dw = P @ A, D @ B                                  # axes in the world
+        R = Pw[:3, :3].T @ Dw[:3, :3]                          # distal relative to proximal
+        ang[f] = np.degrees(decompose(R, seq)) * sa
+        e1 = Pw[:3, idx[seq[0]]]
+        e3 = Dw[:3, idx[seq[2]]]
+        e2 = np.cross(e3, e1)
+        nn = np.linalg.norm(e2)
+        e2 = e2 / nn if nn > 1e-9 else Pw[:3, idx[seq[1]]]
+        d = Dw[:3, 3] - Pw[:3, 3]
+        q = np.linalg.solve(np.column_stack([e1, e2, e3]), d)  # d = q1 e1 + q2 e2 + q3 e3
+        tr[f] = q * st
+    return {"angles": ang, "translations": tr, "names": conv["angles"], "short": conv["short"],
+            "t_names": conv["translations"], "t_short": conv["short_t"], "title": conv["title"]}

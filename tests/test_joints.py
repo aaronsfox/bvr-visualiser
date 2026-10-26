@@ -137,8 +137,14 @@ def _auto_landmarks(femur_mesh, tibia_mesh, Tf, Tt):
     def model(T, P):
         return (np.c_[P, np.ones(len(P))] @ np.linalg.inv(T).T)[:, :3]
 
+    from bvrviewer.core import auto_axes as AA
+
     out = {}
-    up = np.array([0, 0, 1.0])                         # the sample stands along world +Z
+    # femur shaft line in its model space, then into the world
+    Pm = np.asarray(femur_mesh.points, float)
+    Lf = AA.long_axis(femur_mesh, Pm)
+    R = Tf[:3, :3]
+    up = R @ Lf.axis                                   # knee -> shaft: superior
     Pf, Pt = world(Tf, femur_mesh.points), world(Tt, tibia_mesh.points)
     # femur: shaft band near the top, epicondyles = extremes of the widest direction near the bottom
     top = Pf[Pf @ up > (Pf @ up).max() - 8]
@@ -146,13 +152,15 @@ def _auto_landmarks(femur_mesh, tibia_mesh, Tf, Tt):
     c = bot.mean(0)
     Q = bot - c
     Q -= np.outer(Q @ up, up)
-    w, V = np.linalg.eigh(np.cov(Q.T))
+    _w, V = np.linalg.eigh(np.cov(Q.T))
     ml = V[:, -1]
-    # Anterior is perpendicular to the condyle line. The shaft also leans sideways (valgus), so use
-    # only the front-back component: the condyles bulge posteriorly, behind the shaft line.
+    # Anterior is perpendicular to the condyle line, and the condyles reach much further behind the
+    # shaft line than in front of it. (Measured from the shaft line, not from "up" in the lab: the
+    # sample femur leans, which would otherwise reverse the answer.)
     cand = np.cross(up, ml)
     cand /= np.linalg.norm(cand)
-    ant = -cand if (c - top.mean(0)) @ cand > 0 else cand
+    post_m, _ratio = AA.posterior_by_overhang(Pm, Lf, R.T @ cand, (10, 45), at_low_end=True)
+    ant = -(R @ post_m)
     right = np.cross(ant, up)                          # ISB: Z = X × Y
     ends = [bot[np.argmax(Q @ ml)], bot[np.argmin(Q @ ml)]]
     left_knee = True                                   # the sample is "Left_*"

@@ -9,7 +9,8 @@ from __future__ import annotations
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QPushButton,
     QScrollArea, QSlider, QSpinBox, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -308,11 +309,41 @@ class PropertySheet(QWidget):
         self.grid.setHorizontalSpacing(10)
         self.grid.setVerticalSpacing(7)
         self.grid.setColumnStretch(1, 1)
+        # rows keep their full height (wrapped text included) and the sheet scrolls, rather than squashing
+        self.grid.setSizeConstraint(QLayout.SetMinimumSize)
         self.row_i = 0
         self.scroll.setWidget(self.body)
 
     def finish(self) -> None:
         self.grid.setRowStretch(self.row_i, 1)
+        self._fit_wrapped()
+
+    def _fit_wrapped(self) -> None:
+        """Give word-wrapped labels the height their text needs at the sheet's width.
+
+        QGridLayout doesn't apply height-for-width to wrapped labels inside a scroll area, so long
+        notes would otherwise be clipped to two lines.
+        """
+        if self.body is None:
+            return
+        m = self.grid.contentsMargins()
+        sb = self.scroll.verticalScrollBar()
+        # measure as if the scrollbar is showing (it often appears once the labels grow)
+        vw = self.scroll.width() - sb.sizeHint().width() - 2
+        full = max(vw - m.left() - m.right(), 120)
+        value_w = full - self.LABEL_WIDTH - self.grid.horizontalSpacing()
+        for i in range(self.grid.count()):
+            w = self.grid.itemAt(i).widget()
+            if not isinstance(w, QLabel) or not w.wordWrap():
+                continue
+            _r, col, _rs, cs = self.grid.getItemPosition(i)
+            width = full if cs > 1 else (self.LABEL_WIDTH if col == 0 else value_w)
+            w.setMinimumHeight(w.heightForWidth(width) + 2)
+        self.grid.invalidate()
+
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self._fit_wrapped()
 
     def section(self, text: str) -> None:
         lab = h2(text)

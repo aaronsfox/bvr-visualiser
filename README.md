@@ -107,9 +107,27 @@ The Model Builder applies a joint definition to your own bone surfaces. Its navi
 4. **Check the joint:** select **Joints → Knee**. With a tracking file attached to each bone (right-click the bone → **Preview tracking**), both bones are shown in place with the joint's angles and translations at the first tracked frame. Sanity checks (e.g. the epicondyles being implausibly close) are listed there.
 5. **Save model…** writes a `.bvrmodel.json` (surfaces, landmark points, axes). Open it again here to edit it, or load it into a Visualiser tab.
 
+### Automatic axes (no landmarks)
+
+Each bone's axes can come from landmarks you place **or** from an automatic method that fits shapes to the bone surface. Select the bone and choose **Axes from** in Properties (or right-click the bone; **All automatic** / **All landmarks** on the model). For the knee:
+
+| Bone | Method | What it fits | After |
+|---|---|---|---|
+| Femur | Cylinder fitted to the posterior condyles | Z = cylinder axis through the posterior/distal condyle surfaces; origin at its middle | Miranda et al. 2010; GIBOC-Cylinder (Renault et al. 2018) |
+| Femur | Spheres fitted to each posterior condyle | Z joins the two sphere centres; origin midway | Kai et al. 2014; GIBOC-Spheres |
+| Tibia | Ellipse of the largest plateau cross-section | Z = ellipse major axis; origin at the section centroid | Kai et al. 2014; GIBOC-Ellipse |
+| Tibia | Centroids of the two plateau surfaces | Z joins the centroids of the upward-facing medial and lateral plateau surfaces | GIBOC-Centroids |
+| Tibia | Principal axes of the proximal tibia | Z = widest inertial axis of the top 15 mm; origin at its centroid | Miranda et al. 2010 |
+
+In every method Y is the **shaft line** (a line through the centres of shaft cross-sections), so the methods work on partial bones without the hip or ankle. Anterior is found from the joint end's posterior overhang of the shaft line (the femoral condyles and tibial plateau reach further behind the shaft than in front), and right then follows from anterior and superior. **Flip anterior/posterior** and **Flip superior/inferior** correct a bone where that fails (e.g. a whole bone, where both ends are wide); a note appears when the overhang isn't clear-cut. With the bone selected, the view shows what was fitted (purple), the surface points used (orange) and the shaft centres (teal), and Properties shows the fit quality.
+
+These are our own implementations written from the published descriptions (Modenese & Renault 2021 compared these algorithm families in STAPLE); STAPLE's code is not used.
+
+**Compare methods** (select the joint, with preview tracking on both bones) lists the joint angles at the preview frame for every combination of the bones' methods, including landmarks if placed. Different definitions give different offsets: on the knee sample, the femur and tibia method choices each shift flexion by about 8–9°, mainly because the landmark long axis runs from the joint centre to the shaft centre while the automatic methods use the shaft line itself. Report the method you used, and zero to a reference posture when comparing across definitions.
+
 Partial bones: Autoscoper surfaces often stop part way up the femur and down the tibia. Where the template's definition needs the hip centre or the malleoli, paint a band around the shaft end instead — the shaft centre gives a long axis that follows the bone. Report that substitution with your results.
 
-**Planned:** more templates (ISB ankle/hip, multi-segment foot models), automatic axes from surface geometry (e.g. cylinder fits to the femoral condyles, as in the STAPLE/GIBOC and Kai et al. methods), and your own joint definitions.
+**Planned:** more templates (ISB ankle/hip, multi-segment foot models), automatic foot and ankle axes (as in AAFACT, Peterson et al. 2023), and your own joint definitions.
 
 ## How the files are interpreted
 
@@ -130,7 +148,7 @@ BVR_SAMPLE_DATA=/path/to/sample_data pytest   # plus the real-data tests
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.
 
-`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_model_builder.py` builds a knee model on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
+`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_model_builder.py` builds a knee model (landmarks, then every automatic method and the method comparison) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
 
 ## Building the app
 

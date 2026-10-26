@@ -16,6 +16,7 @@ from pyvistaqt import QtInteractor
 from scipy.spatial import cKDTree
 from vtkmodules.vtkRenderingCore import vtkCellPicker
 
+from ..core import auto_axes as AA
 from ..core import joints as J
 from ..core.models import BoneModel, ModelError, is_volume_file
 from ..core.tracking import TrackingError, load_tracking
@@ -66,6 +67,8 @@ class ModelBuilderTab(QWidget):
         self._trees: dict = {}                    # role -> cKDTree of mesh points
         self._actors: list = []
         self._dirty = False
+        self.show_fit = True                      # draw what an automatic method fitted
+        self._compare = None                      # (joint key, frame, rows) from Compare methods
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -170,18 +173,24 @@ class ModelBuilderTab(QWidget):
         for role in t.bones:
             e = self.model.bones[role.key]
             ok = e.acs is not None
+            auto = e.axes_source != "landmarks"
             surf = e.surface.path.name if e.surface is not None else "no surface (right-click to load)"
-            b = self._item(f"{role.title}: {surf}", "bone", role.key,
+            b = self._item(f"{role.title}: {surf}" + ("  · auto" if auto else ""), "bone", role.key,
                            color="#E6E8EC" if e.surface is not None else "#F2C48D",
                            tip="Axes complete" if ok else (e.error or ""))
             b.setText(0, ("✓ " if ok else "○ ") + b.text(0))
             bones.addChild(b)
             if self.sel[:2] == ("bone", role.key):
                 current = b
+            if auto:
+                b.addChild(self._item("Axes: " + AA.AUTO_METHODS[e.axes_source].title, "info", role.key,
+                                      color="#B78AF0", tip=AA.AUTO_METHODS[e.axes_source].summary))
             for d in role.landmarks:
                 done = self.model.landmark(role.key, d.key) is not None
                 lm = self._item(("✓ " if done else "○ ") + d.name, "landmark", role.key, d.key,
-                                color="#8FD3A9" if done else "#C3C8D2", tip=d.hint)
+                                color=("#5E8F72" if done else "#6B7280") if auto else ("#8FD3A9" if done else "#C3C8D2"),
+                                tip=("Not used while this bone's axes are automatic. You can still place it, "
+                                     "e.g. to compare methods. " if auto else "") + d.hint)
                 b.addChild(lm)
                 if self.sel == ("landmark", role.key, d.key):
                     current = lm
@@ -239,10 +248,22 @@ class ModelBuilderTab(QWidget):
             add("Open model…", self.open_model)
             menu.addSeparator()
             add("Change template…", self.change_template_menu)
+            if any(r.auto_methods for r in self.model.template.bones):
+                add("Automatic axes for every bone", self.auto_all)
+                add("Landmark axes for every bone", self.landmarks_all)
         elif kind == "bone" or kind == "info":
             e = self.model.bones[role]
             add("Replace surface…" if e.surface else "Load surface…", lambda: self.load_surface(role))
             add("Preview tracking (.tra)…", lambda: self.attach_preview(role), enabled=e.surface is not None)
+            menu.addSeparator()
+            for src, title in self.model.axes_sources(role):
+                a = QAction(("Axes from landmarks" if src == "landmarks" else title), menu)
+                a.setCheckable(True)
+                a.setChecked(e.axes_source == src)
+                a.setEnabled(e.surface is not None or src == "landmarks")
+                a.triggered.connect(lambda _=False, s=src: self.set_axes_source(role, s))
+                menu.addAction(a)
+            menu.addSeparator()
             add("Clear all landmarks", lambda: self.clear_landmarks(role), enabled=bool(e.landmarks))
         elif kind == "landmark":
             add("Clear this landmark", lambda: self.clear_landmark(role, key),
@@ -273,8 +294,18 @@ class ModelBuilderTab(QWidget):
         p.combo("Template", [(k, v.title) for k, v in J.TEMPLATES.items()], t.key, self.change_template)
         if t.sided:
             p.combo("Side", [("right", "Right"), ("left", "Left")], self.model.side, self._set_side,
-                    tip="Sets which way is 'right' (ISB Z) and the signs of left-side angles.")
+                    tip="Sets the signs of left-side angles, and which way is 'right' (ISB Z) for landmark axes. "
+                        "Automatic axes find right from the bone's shape.")
         p.note(t.summary)
+        if any(r.auto_methods for r in t.bones):
+            p.section("Axes")
+            for r in t.bones:
+                e = self.model.bones[r.key]
+                p.value(r.title, "Landmarks" if e.axes_source == "landmarks"
+                        else AA.AUTO_METHODS[e.axes_source].title)
+            p.note("Each bone's axes come from landmarks you place, or from an automatic method that fits shapes "
+                   "to the bone surface. Choose per bone (select the bone), or for all bones here.")
+            p.buttons([("All automatic", self.auto_all), ("All landmarks", self.landmarks_all)])
         p.section("References")
         for r in t.references:
             p.note(r)
@@ -299,7 +330,32 @@ class ModelBuilderTab(QWidget):
                 p.value("Space", e.surface.surface_note)
             p.buttons([("Replace…", lambda: self.load_surface(role))])
         p.section("Axes")
-        p.note(r.axes_note or J.RECIPES[r.recipe].__doc__.strip().split("\n")[0])
+        sources = self.model.axes_sources(role)
+        if len(sources) > 1:
+            p.combo("Axes from", sources, e.axes_source, lambda src: self.set_axes_source(role, src),
+                    tip="Landmarks you place, or an automatic method fitted to the surface")
+        if e.axes_source == "landmarks":
+            p.note(r.axes_note or J.RECIPES[r.recipe].__doc__.strip().split("\n")[0])
+        else:
+            m = AA.AUTO_METHODS[e.axes_source]
+            p.note(m.summary)
+            for ref in m.references:
+                p.note(ref)
+            if e.auto is not None:
+                for k, v in e.auto.quality.items():
+                    p.value(k, f"{v:.2f}" if isinstance(v, float) else str(v))
+                for n in e.auto.notes:
+                    p.note(n, "Warn")
+            p.check("Show fit", self.show_fit, self._set_show_fit, "Draw the fitted shape and points")
+            fl = [("Flip anterior/posterior", lambda: self._toggle_option(role, "flip_ap"))]
+            fl.append(("Flip superior/inferior", lambda: self._toggle_option(role, "flip_long")))
+            p.buttons(fl)
+            flips = [n for k, n in (("flip_ap", "anterior/posterior"), ("flip_long", "superior/inferior"))
+                     if e.auto_options.get(k)]
+            if flips:
+                p.note("Flipped: " + ", ".join(flips))
+            p.note("Use the flips only if the red X axis doesn't point forwards or green Y doesn't point up "
+                   "the shaft (e.g. on a whole bone, where both ends are wide).")
         if e.acs is not None:
             names = ("X", "Y", "Z") if r.recipe != "inertial" else ("1", "2", "3")
             for k, n in enumerate(names):
@@ -307,7 +363,7 @@ class ModelBuilderTab(QWidget):
             p.value("Origin", "  ".join(f"{v:.1f}" for v in e.acs[:3, 3]) + " mm")
         else:
             p.value("Status", e.error or "Not computed", kind="Warn")
-        if r.landmarks:
+        if r.landmarks and e.axes_source == "landmarks":
             p.section("Landmarks")
             for d in r.landmarks:
                 v = self.model.landmark(role, d.key)
@@ -364,6 +420,25 @@ class ModelBuilderTab(QWidget):
                 p.value(name, f"{(0.0 if abs(v) < 0.05 else v):+.1f}°")
             for name, v in zip(conv["short_t"], tr):
                 p.value(name, f"{(0.0 if abs(v) < 0.05 else v):+.1f} mm")
+        if any(len(self.model.axes_sources(r)) > 1 for r in (j.proximal, j.distal)):
+            p.section("Compare axis methods")
+            cmp = self._compare if self._compare and self._compare[0] == j.key else None
+            if cmp is None:
+                p.note("Joint angles at the preview frame for every combination of the bones' axis methods "
+                       "(landmarks, if placed, and each automatic method). Needs preview tracking on both bones.")
+            else:
+                p.note(f"Frame {cmp[1] + 1}. " + " / ".join(conv["short"]) + " (°). ▸ marks the methods in use.")
+                skipped = [r for r in cmp[2] if r["angles"] is None]
+                for row in [r for r in cmp[2] if r["angles"] is not None]:
+                    name = f"{'▸ ' if row['current'] else ''}{self._short_source(row['proximal'])} · " \
+                           f"{self._short_source(row['distal'])}"
+                    val = "n/a" if row["angles"] is None else \
+                        "  ".join(f"{(0.0 if abs(v) < 0.05 else v):+.1f}" for v in row["angles"])
+                    p.value(name, val, tip=f"{row['proximal_title']}\n{row['distal_title']}")
+                if skipped:
+                    p.note(f"{len(skipped)} combination(s) left out: their axes can't be made yet (e.g. "
+                           "landmarks not placed).")
+            p.buttons([("Compare methods", lambda: self.compare_methods(j.key))])
         warns = self.model.checks()
         if warns:
             p.section("Checks")
@@ -383,6 +458,60 @@ class ModelBuilderTab(QWidget):
     def _set_side(self, side: str) -> None:
         self.model.side = side
         self._changed()
+
+    @staticmethod
+    def _short_source(src: str) -> str:
+        return {"landmarks": "Landmarks", "femur_cylinder": "Cylinder", "femur_spheres": "Spheres",
+                "tibia_ellipse": "Ellipse", "tibia_centroids": "Centroids", "tibia_inertia": "Inertia"}.get(src, src)
+
+    def set_axes_source(self, role: str, source: str) -> None:
+        if self.model.bones[role].axes_source == source:
+            return
+        self.model.set_axes_source(role, source)
+        self._compare = None
+        self._changed()
+
+    def auto_all(self) -> None:
+        for r in self.model.template.bones:
+            if r.auto_methods and self.model.bones[r.key].axes_source == "landmarks":
+                self.model.set_axes_source(r.key, r.auto_methods[0])
+        self._compare = None
+        self._changed()
+
+    def landmarks_all(self) -> None:
+        for r in self.model.template.bones:
+            if r.landmarks:
+                self.model.set_axes_source(r.key, "landmarks")
+        self._compare = None
+        self._changed()
+
+    def _toggle_option(self, role: str, key: str) -> None:
+        o = self.model.bones[role].auto_options
+        o[key] = not o.get(key, False)
+        if not o[key]:
+            o.pop(key)
+        self._compare = None
+        self._changed()
+
+    def _set_show_fit(self, on: bool) -> None:
+        self.show_fit = bool(on)
+        self.draw()
+
+    def compare_methods(self, key: str) -> list | None:
+        j = next(x for x in self.model.template.joints if x.key == key)
+        pp = self._preview_poses([j.proximal, j.distal])
+        if pp is None:
+            QMessageBox.information(self, "Compare methods", "Attach a preview tracking file to both bones first "
+                                    "(right-click each bone → Preview tracking).")
+            return None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            rows = self.model.compare_methods(key, pp[1][0], pp[1][1])
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._compare = (key, pp[0], rows)
+        self.show_properties()
+        return rows
 
     def _set_brush(self, mm: float) -> None:
         self.brush = float(mm)
@@ -414,7 +543,11 @@ class ModelBuilderTab(QWidget):
         self.refresh()
 
     def _changed(self, rebuild_view: bool = True) -> None:
-        self.model.compute()
+        QApplication.setOverrideCursor(Qt.WaitCursor)     # automatic methods take a few seconds the first time
+        try:
+            self.model.compute()
+        finally:
+            QApplication.restoreOverrideCursor()
         self._dirty = True
         self.refresh(rebuild_view)
 
@@ -577,6 +710,8 @@ class ModelBuilderTab(QWidget):
             size = float(np.linalg.norm(np.ptp(np.asarray(mesh.points), axis=0)))
             if e.acs is not None:
                 self._actors += add_triad(pl, e.acs, max(size * 0.28, 15), pose=T)
+            if e.auto is not None and self.show_fit and self.sel[0] == "bone":
+                self._draw_fit(e.auto, T)
             self._draw_landmarks(role, T, size)
         if self.sel[0] in ("bone", "landmark"):
             self.showing.setText(f"Showing: {self.model.template.role(self.sel[1]).title} (its own model space)")
@@ -591,6 +726,39 @@ class ModelBuilderTab(QWidget):
             pl.reset_camera()
             self._last_shown = shown
         pl.render()
+
+    def _draw_fit(self, res, T) -> None:
+        """Draw an automatic method's fitted shapes and the surface points it used."""
+        pl = self.plotter
+
+        def add(mesh, **kw):
+            a = pl.add_mesh(mesh, pickable=False, reset_camera=False, **kw)
+            a.user_matrix = T
+            self._actors.append(a)
+
+        if res.points is not None and len(res.points):
+            pts = np.asarray(res.points)[:: max(1, len(res.points) // 3000)]
+            add(pv.PolyData(pts), color="#F0A04B", point_size=3, render_points_as_spheres=True)
+        for prim in res.primitives:
+            k = prim["kind"]
+            if k == "cylinder":
+                add(pv.Cylinder(center=prim["center"], direction=prim["direction"], radius=prim["radius"],
+                                height=prim["height"] + 10, resolution=48, capping=False),
+                    color="#B78AF0", opacity=0.3, style="wireframe", line_width=1)
+                ax = prim["direction"] * (prim["height"] / 2 + 25)
+                add(pv.Line(prim["center"] - ax, prim["center"] + ax), color="#B78AF0", line_width=3)
+            elif k == "sphere":
+                add(pv.Sphere(radius=prim["radius"], center=prim["center"], theta_resolution=24, phi_resolution=16),
+                    color="#B78AF0", opacity=0.3, style="wireframe" if prim["radius"] > 5 else "surface")
+            elif k == "ellipse":
+                th = np.linspace(0, 2 * np.pi, 97)
+                ring = prim["center"] + np.outer(np.cos(th) * prim["a"], prim["major"]) + \
+                    np.outer(np.sin(th) * prim["b"], prim["minor"])
+                add(pv.lines_from_points(ring), color="#B78AF0", line_width=3)
+            elif k == "line" and prim["points"] is not None and len(prim["points"]) >= 2:
+                c = np.asarray(prim["points"])
+                add(pv.PolyData(c), color="#5CC8A8", point_size=7, render_points_as_spheres=True)
+                add(pv.lines_from_points(c), color="#5CC8A8", line_width=2)
 
     def _draw_landmarks(self, role, T, size) -> None:
         pl = self.plotter
@@ -637,6 +805,9 @@ class ModelBuilderTab(QWidget):
             else:
                 self.hint.setText(f"Right-click and drag over the surface to paint “{d.name}”. Painting adds "
                                   f"to the region; Clear starts again. Brush: {self.brush:.0f} mm.")
+        elif kind == "bone" and self.model.bones[role].axes_source != "landmarks":
+            self.hint.setText("Automatic axes: purple = fitted shape, orange = surface points used, teal = shaft "
+                              "centres. X red (anterior), Y green (superior), Z blue (right).")
         elif kind == "bone":
             self.hint.setText("Select a landmark under this bone in the navigator, then right-click the surface "
                               "to place it.")
