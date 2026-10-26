@@ -56,6 +56,20 @@ def shot(name, tab=None):
     print("saved", name, flush=True)
 
 
+# Start page: three tool cards; only the Visualiser opens a tab for now
+from PySide6.QtTest import QTest  # noqa: E402
+
+shot("00_start")
+assert win.tabs.count() == 1 and win.current() is win.start
+for key in ("reliability", "validity"):
+    QTest.mouseClick(win.start.cards[key], Qt.LeftButton)
+    pump(0.2)
+    assert win.tabs.count() == 1, f"{key} card should not open a tab yet"
+QTest.mouseClick(win.start.cards["visualiser"], Qt.LeftButton)
+pump(0.3)
+assert win.tabs.count() == 2 and win.current().kind == "visualiser"
+assert win.tabs.tabText(1) == "Visualiser 1", win.tabs.tabText(1)
+print("start page OK", flush=True)
 tab = win.current()
 shot("01_empty")
 
@@ -186,7 +200,7 @@ shot("12_ankle_through_xray2", t3)
 # ---- dialogs (constructed directly, grabbed as images, then closed)
 from bvrviewer.app.dialogs import AddCameraDialog, FormatDialog, VoxelDialog  # noqa: E402
 
-win.tabs.setCurrentIndex(0)
+win.tabs.setCurrentWidget(tab)
 tab.timeline.slider.setValue(0)
 dlg = AddCameraDialog(win, tab.scene.n_frames, tab._preview_bones(), existing=tab.state.cameras[0])
 dlg.show()
@@ -264,7 +278,7 @@ assert inside
 shot("18_grid_after_tracking", t5)
 
 # ---- navigator + properties: each kind of item, and its right-click menu
-win.tabs.setCurrentIndex(0)
+win.tabs.setCurrentWidget(tab)
 tab.set_view("3d")
 for c in tab.state.cameras:
     c.visible = True
@@ -312,7 +326,7 @@ print("saved navigator/properties shots", flush=True)
 # Video export of the wrist tab (no dialogs): reuse the export loop directly
 import imageio.v2 as imageio  # noqa: E402
 
-win.tabs.setCurrentIndex(0)
+win.tabs.setCurrentWidget(tab)
 tab.set_view("3d")
 writer = imageio.get_writer(str(OUT / "wrist.mp4"), fps=30, codec="libx264", quality=7, macro_block_size=1)
 for f in range(tab.scene.n_frames):

@@ -88,7 +88,7 @@ class TabState:
     settings: SceneSettings = field(default_factory=SceneSettings)
 
     def to_dict(self) -> dict:
-        return {"version": SESSION_VERSION, "name": self.name,
+        return {"version": SESSION_VERSION, "tool": "visualiser", "name": self.name,
                 "models": [m.to_dict() for m in self.models],
                 "cameras": [c.to_dict() for c in self.cameras],
                 "settings": self.settings.__dict__.copy()}

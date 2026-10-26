@@ -28,10 +28,10 @@ def main(argv: list[str] | None = None) -> int:
         i = argv.index("--selftest")
         run(win, argv[i + 1], argv[i + 2])
         return app.exec()
-    # Optional: open a saved session given on the command line.
+    # Optional: open saved sessions given on the command line, each in its own Visualiser tab.
     for a in argv[1:]:
         if a.endswith(".json") and os.path.exists(a):
-            win.current().load_session_file(a)
+            win.new_visualiser_tab().load_session_file(a)
     return app.exec()
 
 

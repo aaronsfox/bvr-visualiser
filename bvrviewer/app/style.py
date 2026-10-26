@@ -130,6 +130,16 @@ QTabBar::tab {{ background: transparent; color: #A3AAB8; padding: 9px 14px; bord
 QTabBar::tab:selected {{ background: #171A20; color: #E6E8EC; border-color: #262A33; border-bottom-color: #171A20; }}
 QTabBar::tab:hover:!selected {{ color: #E6E8EC; }}
 QSplitter::handle {{ background: #262A33; }}
+QFrame#ToolCard {{ background: #1C1F26; border: 1px solid #343946; border-radius: 14px; }}
+QFrame#ToolCard[available="true"]:hover {{ border-color: {ACCENT}; background: #20242C; }}
+QFrame#ToolCard[available="true"]:focus {{ border: 2px solid {ACCENT}; }}
+QFrame#ToolCard[available="false"] {{ background: #171A20; border: 1px dashed #343946; }}
+QLabel#CardTitle {{ font-size: 19px; font-weight: 600; }}
+QLabel#CardTitleOff {{ font-size: 19px; font-weight: 600; color: #8A92A1; }}
+QLabel#CardBlurb {{ color: #C3C8D2; font-size: 13px; }}
+QLabel#CardMuted {{ color: #8A92A1; font-size: 12px; }}
+QLabel#CardAction {{ font-weight: 600; font-size: 13px; }}
+QLabel#SoonBadge {{ color: #C3C8D2; background: #262A33; border-radius: 9px; padding: 3px 9px; font-size: 11px; }}
 QWidget#PropsHead {{ background: #171A20; border-bottom: 1px solid #262A33; }}
 QTreeWidget#Navigator {{ background: #171A20; border: 0; padding: 4px 6px; outline: 0;
     selection-background-color: #2A3A52; selection-color: #FFFFFF; }}

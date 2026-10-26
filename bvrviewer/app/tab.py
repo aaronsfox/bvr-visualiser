@@ -1,4 +1,4 @@
-"""One tab: navigator + properties on the left, the 3D view and timeline on the right."""
+"""The Visualiser tab: navigator + properties on the left, the 3D view and timeline on the right."""
 
 from __future__ import annotations
 
@@ -114,7 +114,10 @@ def _fmt_pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
 
-class TrialTab(QWidget):
+class VisualiserTab(QWidget):
+    """One trial: its models, tracking, radiographs, 3D view and timeline."""
+
+    kind = "visualiser"
     titleChanged = Signal(str)
 
     def __init__(self, state: TabState | None = None):
@@ -1050,3 +1053,6 @@ class TrialTab(QWidget):
             if cam.images is not None:
                 cam.images.close()
         self.plotter.close()
+
+
+TrialTab = VisualiserTab   # older name, kept for scripts that used it

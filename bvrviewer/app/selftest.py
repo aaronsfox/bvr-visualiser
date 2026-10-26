@@ -18,7 +18,7 @@ def run(win, sample_dir: str, out: str) -> None:
     from ..core.session import XrayCamera
 
     w = Path(sample_dir) / "2025-02-19-Wrist"
-    tab = win.current()
+    tab = win.new_visualiser_tab()
     models = [
         BoneModel(name="Radius", path=w / "Volumes" / "rad.tif", voxel_size=(0.391, 0.391, 0.625),
                   tracking_path=w / "Tracking_SAM" / "flx_ext_rad.tra"),
