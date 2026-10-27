@@ -144,9 +144,10 @@ def test_model_with_automatic_axes_and_scan_reference(tmp_path):
     with pytest.raises(J.JointModelError):
         m.set_axes_source("Femur", "tibia_ellipse")
     rows = m.compare_methods("Knee", Tf[0], Tt[0])
-    assert len(rows) == 5 * 5          # femur: 4 methods + landmarks; tibia: 4 methods + landmarks
+    assert len(rows) == 5 * 6          # femur: 4 methods + landmarks; tibia: 4 methods + AAFACT + landmarks
     ok = [r for r in rows if r.get("angles") is not None]
-    # Kai's femur method needs the whole femur, and landmarks aren't placed: 3 x 4 rows have angles
+    # Kai's femur method needs the whole femur, AAFACT hasn't been run and landmarks aren't placed:
+    # 3 x 4 rows have angles
     assert len(ok) == 3 * 4, [(r["proximal"], r["distal"], r.get("error")) for r in rows if r.get("angles") is None]
     flex = [r["angles"][0] for r in ok]
     print("flexion at frame 1 by method pair:", np.round(flex, 1))
