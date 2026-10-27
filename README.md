@@ -102,18 +102,19 @@ Radiographs are decoded in the background as soon as a camera is added, so playb
 
 ## The Model Builder
 
-A model is built in three steps; the navigator is laid out the same way (**1 Bones**, **2 Joints**, **3 Reference pose** under each joint), with **Properties** for the selected item. Right-click for actions. **Start a knee** (on the model's properties) adds a femur, a tibia and a Grood & Suntay knee in one go.
+A model is built in three steps; the navigator is laid out the same way (**1 Bones**, **2 Joints**, **3 Reference pose** under each joint), with **Properties** for the selected item. Right-click for actions. **Start a knee** (on the model's properties) adds a femur, a tibia and a Grood & Suntay knee in one go; **Start an ankle** adds a distal tibia, a talus, a calcaneus and ISB-style talocrural and subtalar joints.
 
-**1. Bones: axes on each bone.** Right-click **Bones → Add bone** and choose its type: **Femur**, **Tibia** or **Other bone**. The type decides how its axes can be made.
+**1. Bones: axes on each bone.** Right-click **Bones → Add bone** and choose its type: **Femur** or **Tibia** (knee), the ankle and foot bones (**Tibia (distal: ankle)**, fibula, talus, calcaneus, navicular, cuboid, cuneiforms, metatarsals), or **Other bone**. The type decides how its axes can be made.
 - Load its surface (right-click → **Load surface…**): the same file, in the same model space, that you track with. Set its **side**.
 - **Axes from**: an automatic method fitted to the surface (the default; see below), or **landmarks** placed by hand: select a landmark under the bone, then **right-click the surface** (point), or right-click and drag to paint a region (its centre, or a sphere fitted to it). Left-drag still rotates.
-- Femur and tibia axes use ISB names: X anterior, Y superior, Z right (Wu et al. 2002). "Other bone" uses its principal axes of inertia (axis 1 = long axis), with no anatomical names.
+- Anatomical bones use ISB axis names: X anterior, Y superior, Z right on both sides (Wu et al. 2002). "Other bone" uses its principal axes of inertia (axis 1 = long axis), with no anatomical names.
 
 A bone's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, bones already give each bone's motion about its own axes in the Visualiser (right-click a bone → **Add coordinate system…**, or **Load model…**).
 
 **2. Joints (optional).** Right-click **Joints → Add joint…**, choose a definition and its proximal and distal bones:
 - **Knee (tibiofemoral): Grood & Suntay**, femur → tibia. ISB doesn't define the knee; this is the convention most BVR knee studies use. Left knees are mirrored, so positive values mean the same motion on both sides: flexion, adduction (varus), internal rotation; lateral, anterior and proximal translation of the tibia.
-- **Joint coordinate system (ISB style)** between any two femur/tibia-type bones (proximal Z, floating axis, distal Y), without clinical names.
+- **Ankle (talocrural): ISB**, tibia → talus, **Subtalar: ISB style**, talus → calcaneus, and **Ankle complex: ISB**, tibia → calcaneus (Wu et al. 2002): dorsiflexion about the proximal bone's Z, internal rotation about the distal bone's Y, inversion about the floating axis; left sides mirrored like the knee.
+- **Joint coordinate system (ISB style)** between any two bones (proximal Z, floating axis, distal Y), without clinical names.
 - **Cardan X-Y-Z** between any two bones, e.g. two carpals with inertial axes.
 
 With no reference pose, a joint's zero is **anatomical**: all angles are 0 when the two bones' axes line up. No neutral pose is needed for that, so the overlapping model spaces you see when surfaces are loaded don't matter. Tracking places each bone at every frame, and the angles come from the axes' relative orientation.
@@ -129,25 +130,38 @@ The reference is stored as the two bones' relative pose, so it stays valid if a 
 
 ### Automatic axes (no landmarks)
 
-Each bone's axes can come from an automatic method that fits shapes to the bone surface **or** from landmarks you place. Select the bone and choose **Axes from** in Properties (or right-click it). For the knee:
+Each bone's axes can come from an automatic method **or** from landmarks you place. Select the bone and choose **Axes from** in Properties (or right-click it).
 
-| Bone | Method | What it fits | After |
+**Femur and tibia: STAPLE.** The knee methods are those compared by Modenese & Renault (2021) in STAPLE, run through a Python translation of STAPLE's own MATLAB code (`bvrviewer/core/staple/`, see the licence note below). Each finds the articular surfaces from the bone's shape and fits a primitive to them:
+
+| Bone | Method | Z (pointing right) and origin | Source |
 |---|---|---|---|
-| Femur | Cylinder fitted to the posterior condyles | Z = cylinder axis through the posterior/distal condyle surfaces; origin at its middle | Miranda et al. 2010; GIBOC-Cylinder (Renault et al. 2018) |
-| Femur | Spheres fitted to each posterior condyle | Z joins the two sphere centres; origin midway | Kai et al. 2014; GIBOC-Spheres |
-| Tibia | Ellipse of the largest plateau cross-section | Z = ellipse major axis; origin at the section centroid | Kai et al. 2014; GIBOC-Ellipse |
-| Tibia | Centroids of the two plateau surfaces | Z joins the centroids of the upward-facing medial and lateral plateau surfaces | GIBOC-Centroids |
-| Tibia | Principal axes of the proximal tibia | Z = widest inertial axis of the top 15 mm; origin at its centroid | Miranda et al. 2010 |
+| Femur | **GIBOC-Cylinder** (default) | axis of a cylinder fitted to both posterior condyle surfaces; origin midway between the condyles along it | Renault et al. 2018 (most repeatable femur method there; STAPLE's default) |
+| Femur | GIBOC-Spheres | line joining spheres fitted to each posterior condyle surface; origin midway | Renault et al. 2018 (closest to manual axes in Modenese & Renault 2021) |
+| Femur | GIBOC-Ellipsoids | line joining ellipsoids fitted to each whole condyle surface | Renault et al. 2018 |
+| Femur | Kai et al. 2014 | line joining spheres fitted to slices of the condyles; **whole femurs only** | Kai et al. 2014 |
+| Tibia | **Kai et al. 2014** (default) | major axis of an ellipse fitted to the tibia's largest cross-section; origin at its centre | Kai et al. 2014 (STAPLE's default; most robust on poorer surfaces) |
+| Tibia | GIBOC-Ellipse | major axis of an ellipse fitted to the outline of the two plateau surfaces | Renault et al. 2018 |
+| Tibia | GIBOC-Centroids | line joining the centroids of the medial and lateral plateau surfaces | Renault et al. 2018 |
+| Tibia | GIBOC-Plateau | principal axis of a layer of bone just below the plateau | Renault et al. 2018 (PIAASL, the most repeatable tibia variant there) |
 
-In every method Y is the **shaft line** (a line through the centres of shaft cross-sections), so the methods work on partial bones without the hip or ankle. Anterior is found from the joint end's posterior overhang of the shaft line (the femoral condyles and tibial plateau reach further behind the shaft than in front), and right then follows from anterior and superior. **Flip anterior/posterior** and **Flip superior/inferior** correct a bone where that fails (e.g. a whole bone, where both ends are wide); a note appears when the overhang isn't clear-cut. With the bone selected, the view shows what was fitted (purple), the surface points used (orange) and the shaft centres (teal), and Properties shows the fit quality.
+On a whole femur, Y points from the knee centre to the femoral head centre; on a whole tibia, from the ankle centre to the knee centre (the mechanical axes), and X = Y × Z.
 
-These are our own implementations written from the published descriptions (Modenese & Renault 2021 compared these algorithm families in STAPLE); STAPLE's code is not used.
+**Partial bones.** Autoscoper surfaces usually stop part way up the femur and down the tibia, and STAPLE expects whole bones. A bone shorter than a whole one (femur < 300 mm, tibia < 250 mm) is processed with documented adaptations (marked `PARTIAL` in the code, listed in `bvrviewer/core/staple/NOTICE.md`): Y follows the **shaft axis** (the line through the centres of the shaft's cross-sections) instead of the mechanical axis; on the femur, medial and lateral come from the condyles and the body side instead of the femoral head; on the tibia, anterior comes from the shape of the shaft just below the tuberosity (its cross-section is skewed towards the anterior crest) and lateral from the side. Set each bone's **side** correctly. Tested by cutting STAPLE's ten example femurs and tibias down to partial bones, the knee axes stayed within about 3° (femur) and 8° (tibia, mostly the shaft axis standing in for the mechanical axis) of the whole-bone results. **Flip anterior/posterior** and **Flip superior/inferior** correct a partial bone where a guess fails. Properties shows the fit quality and what was changed for a partial bone; the view shows the articular surfaces found (orange, pink) and the fitted shapes (purple).
 
-**Compare methods** (select the joint, with preview tracking on both bones) lists the joint angles at the preview frame for every combination of the bones' methods, including landmarks if placed. Different definitions give different offsets: on the knee sample, the femur and tibia method choices each shift flexion by about 8–9°, mainly because the landmark long axis runs from the joint centre to the shaft centre while the automatic methods use the shaft line itself. Report the method you used, and use a reference pose when comparing across definitions.
+**Talus: STAPLE-Talus.** *Talocrural axis*: Z = axis of a cylinder fitted to the talar trochlea (dome), X along the talus's long axis, Y superior. *Subtalar axis*: X joins the centres of spheres fitted to the talocalcaneal (posterior facet) and talonavicular surfaces, origin at the talocalcaneal centre. The talus is usually imaged whole, so no adaptation is needed.
 
-Partial bones: Autoscoper surfaces often stop part way up the femur and down the tibia. Where the landmark definition needs the hip centre or the malleoli, paint a band around the shaft end instead — the shaft centre gives a long axis that follows the bone. Report that substitution with your results.
+**Foot and ankle bones: AAFACT.** AAFACT (Peterson, Kruger & Lenz 2023) gives axes for 14 foot and ankle bones (tibia, fibula, talus, calcaneus, navicular, cuboid, cuneiforms, metatarsals) by aligning each bone to a template and using regional centroids; several bones have more than one system (talus: talonavicular, tibiotalar or subtalar; calcaneus: calcaneocuboid or subtalar; cuboid, lateral cuneiform and metatarsals: vertical or radial). Its licence doesn't allow modified copies, so it isn't included: install the compiled AAFACT (with the MATLAB Runtime) from https://github.com/Lenz-Lab/AAFACT. Then, with **Axes from: AAFACT** selected, **Run AAFACT on this bone** (point to the program once; it's remembered) or **Import results (.xlsx)** from an AAFACT run of your own, and choose the coordinate system. AAFACT's AP, SI and ML axes become X, Y and Z.
 
-**Planned:** more bone and joint types (ISB ankle/hip, multi-segment foot models), automatic foot and ankle axes (as in AAFACT, Peterson et al. 2023), and your own joint definitions.
+**Licence of the STAPLE translation.** `bvrviewer/core/staple/` is translated from STAPLE (https://github.com/modenaxe/msk-STAPLE, Copyright (c) 2020-2021 Luca Modenese and Jean-Baptiste Renault), licensed **CC BY-NC 4.0: non-commercial use only**; the rest of the viewer doesn't depend on it. Its `NOTICE.md` lists what was translated, every change, and the validation: on STAPLE's example bones the translation reproduces the joint frames in STAPLE's own reference models (femur within 0.25° and 0.7 mm; Kai tibia and talus exactly). Please cite Modenese & Renault (2021) J Biomech 116:110186, and Renault et al. (2018) J Biomech 80:171–178 or Kai et al. (2014) J Biomech 47:1229–1233 for the method used.
+
+Models saved with the earlier, simplified automatic methods still open; those methods are listed as "older" for those bones only.
+
+**Compare methods** (select the joint, with preview tracking on both bones) lists the joint angles at the preview frame for every combination of the bones' methods, including landmarks if placed. Different definitions give different offsets (a few degrees between the STAPLE methods, more against landmarks), so report the method you used, and use a reference pose when comparing across definitions.
+
+Partial bones and landmarks: where a landmark definition needs the hip centre, the malleoli or the tibial condyles that aren't in the surface, paint a band around the shaft end instead — the shaft centre gives a long axis that follows the bone. Report that substitution with your results.
+
+**Planned:** multi-segment foot joint definitions, the hip and upper limb (ISB), and your own joint definitions.
 
 ## How the files are interpreted
 
@@ -164,6 +178,7 @@ These conventions were checked against the SlicerAutoscoperM sample data (by pro
 pip install -e ".[dev]"
 pytest                                   # synthetic tests
 BVR_SAMPLE_DATA=/path/to/sample_data pytest   # plus the real-data tests
+STAPLE_REPO=/path/to/msk-STAPLE pytest tests/test_staple.py   # the STAPLE translation vs STAPLE's reference models
 ```
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.

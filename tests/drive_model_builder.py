@@ -73,8 +73,9 @@ for s, f in [(fem, "Femur"), (tib, "Tibia")]:
     assert tab.set_surface(s, K / "Models" / f"AUT_Left_{f}.stl")
     tab.set_preview(s, K / "Tracking" / f"Left_{f}.tra")
     pump()
-assert fem.axes_source == "femur_cylinder" and fem.acs is not None, fem.error
-assert tib.axes_source == "tibia_ellipse" and tib.acs is not None, tib.error
+assert fem.axes_source == "staple_femur_cylinder" and fem.acs is not None, fem.error
+assert tib.axes_source == "staple_tibia_kai" and tib.acs is not None, tib.error
+assert fem.auto.quality["Bone"].startswith("partial") and fem.auto.notes == [], fem.auto.notes
 tab.select("segment", fem)
 shot("mb_01_femur_auto")
 tab.select("segment", tib)
@@ -323,4 +324,36 @@ vt3.load_full_model(str(path))
 pump(0.3)
 assert len(vt3.state.models) == 2 and len(vt3.state.joints) == 1
 print("VISUALISER OK", flush=True)
+
+# ---- ankle: STAPLE talus axes and AAFACT results (imported; AAFACT itself isn't run here) ----------
+from test_aafact import write_aafact_xlsx  # noqa: E402
+
+A = Path(os.environ["BVR_SAMPLE_DATA"]) / "2025-01-12-Ankle" / "Meshes"
+ab = win.open_tool("model_builder")
+ab.add_preset("ankle")
+am = ab.model
+assert [s.type for s in am.segments] == ["tibia_distal", "talus", "calcaneus"]
+assert [j.type for j in am.joints] == ["ankle_isb", "subtalar_isb"]
+for s, f in zip(am.segments, ("tib", "tal", "cal")):
+    assert ab.set_surface(s, A / f"SOL001A_{f}_aligned.stl")
+    pump()
+tal, cal = am.segment("Talus"), am.segment("Calcaneus")
+assert tal.axes_source == "staple_talus_ankle" and tal.acs is not None, tal.error
+assert tal.auto.quality["Algorithm"] == "STAPLE-Talus"
+ab.select("segment", tal)
+shot("mb_10_talus_staple")
+assert cal.axes_source == "aafact" and cal.acs is None and "AAFACT" in cal.error
+R = np.eye(3)
+xl = OUT / "CoordinateSystem_bvrjob.xlsx"
+write_aafact_xlsx(xl, [("CC_bvr_Calcaneus_Right", "bvr_Calcaneus_Right", "Calcaneus", "Right",
+                        np.array(cal.mesh.center), R),
+                       ("ST_bvr_Calcaneus_Right", "bvr_Calcaneus_Right", "Calcaneus", "Right",
+                        np.array(cal.mesh.center), R[:, [1, 2, 0]] @ np.diag([1, 1, 1]))])
+assert ab.import_aafact(cal, str(xl))
+assert cal.acs is not None and cal.imported["option"] == "CC"
+ab.select("segment", cal)
+shot("mb_11_calcaneus_aafact")
+ab._set_aafact_option(cal, "ST")
+assert cal.imported["option"] == "ST"
+print("ANKLE OK", flush=True)
 win.close()

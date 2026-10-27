@@ -207,11 +207,25 @@ def _tibia_knee(L: dict, side: str, mesh) -> np.ndarray:
     return frame_from_axes(mid, mid - dist, right)
 
 
+def _tibia_ankle(L: dict, side: str, mesh) -> np.ndarray:
+    """ISB tibia/fibula axes for the ankle (Wu et al. 2002), for a distal tibia.
+
+    Origin: midpoint of the malleolar tips (IM). Y: from IM towards the proximal point (ISB uses the
+    midpoint of the tibial condyles; on a distal tibia, the centre of the most proximal shaft). Z:
+    perpendicular to Y in the plane of the malleoli, pointing right. X = Y × Z, anterior.
+    """
+    mm, lm, prox = L["MM"], L["LM"], L["TP"]
+    mid = (mm + lm) / 2
+    right = (lm - mm) if side == "right" else (mm - lm)
+    return frame_from_axes(mid, prox - mid, right)
+
+
 def _inertial(L: dict, side: str, mesh) -> np.ndarray:
     return inertial_frame(mesh)[0]
 
 
-RECIPES = {"isb_femur": _femur_isb, "knee_tibia": _tibia_knee, "inertial": _inertial}
+RECIPES = {"isb_femur": _femur_isb, "knee_tibia": _tibia_knee, "isb_tibia_ankle": _tibia_ankle,
+           "inertial": _inertial}
 
 # Joint conventions: rotation sequence (intrinsic, axes of the distal ACS relative to the proximal),
 # names of the three angles and three translations, and sign flips per side so that positive is
@@ -226,30 +240,15 @@ JOINT_CONVENTIONS = {
         "short_t": ("Lateral", "Anterior", "Proximal"),
         "signs": {"right": ((-1, 1, 1), (1, 1, 1)), "left": ((-1, -1, -1), (-1, 1, 1))},
     },
-    "cardan_xyz": {
-        "title": "Cardan sequence X-Y-Z of the distal axes relative to the proximal axes",
-        "sequence": "XYZ",
-        "angles": ("Rotation about axis 1", "Rotation about axis 2", "Rotation about axis 3"),
-        "short": ("Axis 1", "Axis 2", "Axis 3"),
-        "translations": ("Along axis 1", "Along axis 2", "Along axis 3"),
-        "short_t": ("Along 1", "Along 2", "Along 3"),
-        "signs": {"right": ((1, 1, 1), (1, 1, 1)), "left": ((1, 1, 1), (1, 1, 1))},
-    },
-}
-
-
-# Joint conventions: rotation sequence (intrinsic, axes of the distal ACS relative to the proximal),
-# names of the three angles and three translations, and sign flips per side so that positive is
-# the same anatomical motion on both sides.
-JOINT_CONVENTIONS = {
-    "grood_suntay_knee": {
-        "title": "Grood & Suntay joint coordinate system (e1 = femur Z, e3 = tibia Y)",
+    "isb_ankle": {
+        "title": "ISB ankle joint coordinate system (Wu et al. 2002): e1 = proximal Z, e3 = distal Y, e2 floating",
         "sequence": "ZXY",
-        "angles": ("Flexion (+) / extension", "Adduction (+) / abduction", "Internal (+) / external rotation"),
-        "short": ("Flexion", "Adduction", "Int. rotation"),
+        "angles": ("Dorsiflexion (+) / plantarflexion", "Inversion (+) / eversion",
+                   "Internal (+) / external rotation"),
+        "short": ("Dorsiflexion", "Inversion", "Int. rotation"),
         "translations": ("Lateral (+) / medial", "Anterior (+) / posterior", "Proximal (+) / distal"),
         "short_t": ("Lateral", "Anterior", "Proximal"),
-        "signs": {"right": ((-1, 1, 1), (1, 1, 1)), "left": ((-1, -1, -1), (-1, 1, 1))},
+        "signs": {"right": ((1, 1, 1), (1, 1, 1)), "left": ((1, -1, -1), (-1, 1, 1))},
     },
     "jcs_zxy": {
         "title": "Joint coordinate system: e1 = proximal Z, e3 = distal Y, e2 floating (ISB style)",
@@ -282,6 +281,8 @@ SEGMENT_NAMES = {True: (("About Z (medial–lateral)", "About X (anterior–post
                          ("Along axis 1", "Along axis 2", "Along axis 3"), ("Along 1", "Along 2", "Along 3"))}
 
 WU2002 = "Wu G et al. (2002) ISB recommendation, part I: ankle, hip and spine. J Biomech 35:543–548"
+PETERSON = ("Peterson AC, Kruger KM, Lenz AL (2023) Automatic anatomical foot and ankle coordinate toolbox. "
+            "Front Bioeng Biotechnol 11:1255464 (AAFACT)")
 GROOD = "Grood ES, Suntay WJ (1983) J Biomech Eng 105:136–144"
 
 SEGMENT_TYPES: dict[str, SegmentType] = {t.key: t for t in [
@@ -291,7 +292,8 @@ SEGMENT_TYPES: dict[str, SegmentType] = {t.key: t for t in [
         LandmarkDef("FS", "Superior point (hip centre or shaft centre)",
                     "Hip joint centre: paint the femoral head and use a sphere fit. On a partial femur, paint a band "
                     "around the most proximal part of the shaft and use its centre.", ("region", "sphere", "point")),
-    ), "isb_femur", ("femur_cylinder", "femur_spheres"), True,
+    ), "isb_femur", ("staple_femur_cylinder", "staple_femur_spheres", "staple_femur_ellipsoids", "staple_femur_kai"),
+        True,
         "Origin at the epicondyle midpoint; Y towards the superior point; Z right; X anterior.", (WU2002,)),
     SegmentType("tibia", "Tibia", (
         LandmarkDef("MC", "Medial condyle", "Most medial point of the medial tibial condyle (plateau rim).",
@@ -301,11 +303,52 @@ SEGMENT_TYPES: dict[str, SegmentType] = {t.key: t for t in [
         LandmarkDef("TD", "Distal point (malleoli midpoint or shaft centre)",
                     "Midpoint between the malleoli if the model includes them. On a partial tibia, paint a band "
                     "around the most distal part of the shaft and use its centre.", ("region", "point")),
-    ), "knee_tibia", ("tibia_ellipse", "tibia_centroids", "tibia_inertia"), True,
+    ), "knee_tibia", ("staple_tibia_kai", "staple_tibia_ellipse", "staple_tibia_centroids", "staple_tibia_plateau",
+                      "aafact"),
+        True,
         "Origin at the condyle midpoint; Y from the distal point to the origin; Z right; X anterior.", (WU2002,)),
+    SegmentType("tibia_distal", "Tibia (distal: ankle)", (
+        LandmarkDef("MM", "Medial malleolus", "Most distal point (tip) of the medial malleolus.", ("point", "region")),
+        LandmarkDef("LM", "Lateral malleolus", "Most distal point (tip) of the lateral malleolus. If the fibula isn't "
+                    "part of this surface, use the lateral edge of the tibial plafond.", ("point", "region")),
+        LandmarkDef("TP", "Proximal point (shaft centre)",
+                    "Paint a band around the most proximal part of the shaft and use its centre (or the midpoint "
+                    "of the tibial condyles if the model includes them).", ("region", "point")),
+    ), "isb_tibia_ankle", ("aafact",), True,
+        "Origin at the malleoli midpoint; Y towards the proximal point; Z right (along the malleoli); X anterior.",
+        (WU2002, PETERSON)),
+    SegmentType("talus", "Talus", (), None, ("staple_talus_ankle", "staple_talus_subtalar", "aafact"), True,
+                "", (PETERSON,)),
+    SegmentType("calcaneus", "Calcaneus", (), None, ("aafact",), True, "", (PETERSON,)),
+    SegmentType("navicular", "Navicular", (), None, ("aafact",), True, "", (PETERSON,)),
+    SegmentType("cuboid", "Cuboid", (), None, ("aafact",), True, "", (PETERSON,)),
+    SegmentType("medial_cuneiform", "Medial cuneiform", (), None, ("aafact",), True, "", (PETERSON,)),
+    SegmentType("intermediate_cuneiform", "Intermediate cuneiform", (), None, ("aafact",), True, "", (PETERSON,)),
+    SegmentType("lateral_cuneiform", "Lateral cuneiform", (), None, ("aafact",), True, "", (PETERSON,)),
+    *[SegmentType(f"metatarsal{i}", f"Metatarsal {i}", (), None, ("aafact",), True, "", (PETERSON,))
+      for i in range(1, 6)],
+    SegmentType("fibula", "Fibula", (), None, ("aafact",), True, "", (PETERSON,)),
     SegmentType("generic", "Other bone", (), None, ("inertial",), False,
                 "Principal axes of inertia: axis 1 is the long axis. No anatomical names."),
 ]}
+
+AAFACT_TITLE = "AAFACT (Peterson et al. 2023): run it, or import its results"
+
+
+def axes_source_title(source: str) -> str:
+    """Display name of an axes source ("landmarks", "aafact" or an automatic method key)."""
+    if source == "landmarks":
+        return "Landmarks"
+    if source == "aafact":
+        return "AAFACT (Peterson et al. 2023)"
+    from .auto_axes import AUTO_METHODS
+    m = AUTO_METHODS.get(source)
+    return m.title if m else source
+
+# Bone types AAFACT can do (its own bone names, in core.aafact.BONES)
+AAFACT_TYPES = ("tibia_distal", "talus", "calcaneus", "navicular", "cuboid", "medial_cuneiform", "intermediate_cuneiform",
+                "lateral_cuneiform", "metatarsal1", "metatarsal2", "metatarsal3", "metatarsal4", "metatarsal5",
+                "tibia", "fibula")
 
 JOINT_TYPES: dict[str, JointType] = {t.key: t for t in [
     JointType("knee_grood_suntay", "Knee (tibiofemoral): Grood & Suntay", ("femur",), ("tibia",), "grood_suntay_knee",
@@ -313,8 +356,22 @@ JOINT_TYPES: dict[str, JointType] = {t.key: t for t in [
               "floating axis between them. Left knees are mirrored so positive values mean the same motion on both "
               "sides. ISB doesn't define the knee; this is the convention most BVR knee studies use.",
               (GROOD, WU2002), "Knee"),
-    JointType("jcs_zxy", "Joint coordinate system (ISB style, any two bones)", ("femur", "tibia"),
-              ("femur", "tibia"), "jcs_zxy",
+    JointType("ankle_isb", "Ankle (talocrural): ISB joint coordinate system", ("tibia_distal", "tibia"), ("talus",),
+              "isb_ankle",
+              "Dorsiflexion about the tibia's Z axis, internal rotation about the talus's Y axis, inversion about "
+              "the floating axis between them (Wu et al. 2002, applied to the talocrural joint). Left ankles are "
+              "mirrored so positive values mean the same motion on both sides.", (WU2002,), "Ankle"),
+    JointType("subtalar_isb", "Subtalar (talocalcaneal): ISB-style joint coordinate system", ("talus",),
+              ("calcaneus",), "isb_ankle",
+              "Dorsiflexion about the talus's Z axis, internal rotation about the calcaneus's Y axis, inversion "
+              "about the floating axis (the ISB ankle convention applied to the subtalar joint).", (WU2002,),
+              "Subtalar"),
+    JointType("ankle_complex_isb", "Ankle complex (tibia to calcaneus): ISB", ("tibia_distal", "tibia"),
+              ("calcaneus",),
+              "isb_ankle", "The ISB ankle joint complex (Wu et al. 2002): calcaneus relative to the tibia, "
+              "dorsiflexion about the tibia's Z, internal rotation about the calcaneus's Y, inversion floating.",
+              (WU2002,), "Ankle complex"),
+    JointType("jcs_zxy", "Joint coordinate system (ISB style, any two bones)", (), (), "jcs_zxy",
               "Rotation about the proximal bone's Z axis, then the floating axis, then the distal bone's Y axis. "
               "No clinical names or side mirroring.", (GROOD,)),
     JointType("cardan_xyz", "Cardan X-Y-Z (any two bones)", (), (), "cardan_xyz",
@@ -326,6 +383,9 @@ PRESETS = {
     "knee": {"title": "Knee: femur + tibia + Grood & Suntay knee",
              "segments": [("femur", "Femur"), ("tibia", "Tibia")],
              "joints": [("knee_grood_suntay", "Femur", "Tibia", "Knee")]},
+    "ankle": {"title": "Ankle: tibia + talus + calcaneus, talocrural and subtalar joints",
+              "segments": [("tibia_distal", "Tibia"), ("talus", "Talus"), ("calcaneus", "Calcaneus")],
+              "joints": [("ankle_isb", "Tibia", "Talus", "Ankle"), ("subtalar_isb", "Talus", "Calcaneus", "Subtalar")]},
 }
 
 
@@ -386,6 +446,7 @@ class Segment:
     landmarks: dict = field(default_factory=dict)    # key -> {"method": str, "points": [[x,y,z], ...]}
     auto_options: dict = field(default_factory=dict)  # e.g. {"flip_ap": True}
     preview_tracking: str | None = None   # optional .tra used to preview the segment and its joints
+    imported: dict | None = None          # axes from an external program (AAFACT): see KinematicModel.set_imported
 
     # runtime
     acs: np.ndarray | None = None
@@ -561,8 +622,11 @@ class KinematicModel:
         """(key, title) of every way this segment's axes can be made: automatic methods, then landmarks."""
         from .auto_axes import AUTO_METHODS
 
-        t = self.segment(seg).stype
-        out = [(k, "Automatic: " + AUTO_METHODS[k].title) for k in t.auto_methods]
+        s = self.segment(seg)
+        t = s.stype
+        out = [(k, AAFACT_TITLE if k == "aafact" else "Automatic: " + AUTO_METHODS[k].title) for k in t.auto_methods]
+        if s.axes_source not in t.auto_methods and s.axes_source in AUTO_METHODS:   # an older method, from a file
+            out.append((s.axes_source, "Automatic: " + AUTO_METHODS[s.axes_source].title))
         return out + ([("landmarks", "Landmarks (placed by hand)")] if t.landmarks else [])
 
     def set_axes_source(self, seg: str, source: str) -> None:
@@ -573,7 +637,7 @@ class KinematicModel:
     def _auto_result(self, s: Segment, source: str, options: dict):
         from . import auto_axes
 
-        key = (s.type, source, tuple(sorted(options.items())), id(s.mesh))
+        key = (s.type, source, s.side, tuple(sorted(options.items())), id(s.mesh))
         if key not in self._auto_cache:
             try:
                 self._auto_cache[key] = auto_axes.run(source, s.mesh, s.side, options)
@@ -598,8 +662,49 @@ class KinematicModel:
                 return RECIPES[t.recipe](L, s.side if s.side in ("right", "left") else "right", s.mesh), ""
             except JointModelError as err:
                 return None, str(err)
+        if source == "aafact":
+            opt = self.imported_option(seg)
+            if opt is None:
+                return None, "No AAFACT results yet: run AAFACT on this bone or import its results."
+            return np.array(opt["acs"], float), ""
         res = self._auto_result(s, source, s.auto_options if source == s.axes_source else {})
         return (None, str(res)) if isinstance(res, Exception) else (res.acs.copy(), "")
+
+    # ---- axes from an external program (AAFACT)
+    def set_imported(self, seg: str, results, file: str = "", option: str | None = None) -> None:
+        """Store AAFACT coordinate systems for a segment (core.aafact.AafactCS list for this bone)."""
+        from .aafact import BONES
+
+        s = self.segment(seg)
+        want = BONES.get(s.type)
+        rs = [r for r in results if want is None or r.bone == want]
+        if not rs:
+            raise JointModelError(f"The AAFACT results have no {s.stype.title.lower()}.")
+        sides = {r.side for r in rs}
+        if s.side in ("right", "left") and s.side not in sides:
+            raise JointModelError(f"The AAFACT results are for a {'/'.join(sorted(sides))} "
+                                  f"{s.stype.title.lower()}, but this bone is set to {s.side}.")
+        opts = {}
+        for r in rs:
+            opts.setdefault(r.option, {"acs": r.acs.tolist(), "title": r.title, "sheet": r.sheet,
+                                       "orthogonality": r.orthogonality, "origin": r.origin_name,
+                                       "subject": r.subject})
+        if option is None or option not in opts:
+            option = next(iter(opts))
+        s.imported = {"method": "aafact", "file": str(file), "options": opts, "option": option}
+        s.axes_source = "aafact"
+
+    def set_imported_option(self, seg: str, option: str) -> None:
+        s = self.segment(seg)
+        if not s.imported or option not in s.imported["options"]:
+            raise JointModelError(f"No AAFACT coordinate system {option!r} for this bone.")
+        s.imported["option"] = option
+
+    def imported_option(self, seg: str) -> dict | None:
+        s = self.segment(seg)
+        if not s.imported or s.imported.get("method") != "aafact":
+            return None
+        return s.imported["options"].get(s.imported.get("option"))
 
     def compute(self) -> None:
         """(Re)compute every segment's ACS; failures go in Segment.error."""
@@ -607,6 +712,9 @@ class KinematicModel:
             s.acs, s.error, s.auto = None, "", None
             if s.mesh is None:
                 s.error = "No surface loaded."
+                continue
+            if s.axes_source == "aafact":
+                s.acs, s.error = self.axes_for(s.name, "aafact")
                 continue
             if s.axes_source != "landmarks":
                 res = self._auto_result(s, s.axes_source, s.auto_options)
@@ -760,7 +868,7 @@ class KinematicModel:
             "segments": [{"name": s.name, "type": s.type, "side": s.side,
                           "surface": s.surface.to_dict() if s.surface is not None else None,
                           "axes_source": s.axes_source, "auto_options": s.auto_options, "landmarks": s.landmarks,
-                          "preview_tracking": s.preview_tracking,
+                          "preview_tracking": s.preview_tracking, "imported": s.imported,
                           "acs": s.acs.tolist() if s.acs is not None else None} for s in self.segments],
             "joints": [{"name": j.name, "type": j.type, "proximal": j.proximal, "distal": j.distal,
                         "reference": j.reference.to_dict() if j.reference is not None else None}
@@ -786,10 +894,12 @@ class KinematicModel:
             s = Segment(name=sd["name"], type=sd["type"], side=sd.get("side", "right"),
                         surface=BoneModel.from_dict(sd["surface"]) if sd.get("surface") else None,
                         landmarks=sd.get("landmarks") or {}, auto_options=dict(sd.get("auto_options") or {}),
-                        preview_tracking=sd.get("preview_tracking"))
+                        preview_tracking=sd.get("preview_tracking"), imported=sd.get("imported"))
             src = sd.get("axes_source", "landmarks")
             m.segments.append(s)
-            s.axes_source = src if src in dict(m.axes_sources(s.name)) else m.axes_sources(s.name)[0][0]
+            s.axes_source = src            # set first, so an older method from the file is still offered
+            if src not in dict(m.axes_sources(s.name)):
+                s.axes_source = m.axes_sources(s.name)[0][0]
             if sd.get("acs") is not None:
                 s.acs = np.array(sd["acs"], float)
         for jd in d.get("joints", []):

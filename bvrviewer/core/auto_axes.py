@@ -1,9 +1,13 @@
 """Automatic anatomical axes from bone surface geometry (no landmarks).
 
-Each method is our own implementation, written from the published descriptions of the algorithms
-compared by Modenese & Renault (2021, STAPLE) and of their sources. None of the original code is
-used. The methods are adapted to the partial bones typical of biplanar videoradiography: the long
-axis comes from the shaft that is present (cross-section centroids), never from the hip or ankle.
+The femur and tibia methods are those of STAPLE (Modenese & Renault 2021): GIBOC (Renault et al.
+2018) and Kai et al. (2014), run through our Python translation in core/staple (CC BY-NC 4.0; see
+core/staple/NOTICE.md, which also describes the adaptations for the partial bones typical of
+biplanar videoradiography). "inertial" works for any bone.
+
+The functions further down (femur_cylinder, tibia_ellipse, ...) are our earlier, simplified
+implementations, written from the papers before the translation. They are kept only so models
+saved with them still open, and are not offered for new bones. Notes on them:
 
 Every method returns an AutoResult: the ACS (ISB axis names: X anterior, Y superior, Z right; in
 the surface's model space) plus what was fitted, so the Model Builder can draw it and report the
@@ -43,6 +47,7 @@ class AutoMethod:
     summary: str
     references: tuple
     fn: object
+    legacy: bool = False      # kept for saved models; not offered for new ones
 
 
 # ---------------------------------------------------------------- shared geometry
@@ -507,40 +512,278 @@ def inertial_axes(mesh, side, options) -> AutoResult:
 # ---------------------------------------------------------------- registry
 
 MIRANDA = "Miranda DL et al. (2010) J Biomech 43:1623–1626"
-KAI = "Kai S et al. (2014) J Biomech 47:1229–1233"
-RENAULT = "Renault JB et al. (2018) Articular-surface-based automatic anatomical coordinate systems for the knee bones. J Biomech (GIBOC)"
-MODENESE = "Modenese L, Renault JB (2021) J Biomech 116:110186 (STAPLE)"
+KAI = "Kai S et al. (2014) Automatic construction of an anatomical coordinate system for three-dimensional bone " \
+      "models of the lower extremities – pelvis, femur, and tibia. J Biomech 47:1229–1233"
+RENAULT = "Renault JB et al. (2018) Articular-surface-based automatic anatomical coordinate systems for the knee " \
+          "bones. J Biomech 80:171–178 (GIBOC)"
+MODENESE = "Modenese L, Renault JB (2021) Automatic generation of personalised skeletal models of the lower limb " \
+           "from three-dimensional bone geometries. J Biomech 116:110186 (STAPLE)"
+STAPLE_NOTE = "Python translation of STAPLE (github.com/modenaxe/msk-STAPLE, CC BY-NC 4.0, non-commercial use)"
+
+
+# ---------------------------------------------------------------- STAPLE (translated; see core/staple/NOTICE.md)
+
+_TRI_CACHE: list = []          # [(mesh id, n_points, mesh, Tri)], a few recent meshes
+
+
+def _staple_tri(mesh):
+    from .staple import tri_from_pyvista
+
+    for mid, n, m, t in _TRI_CACHE:
+        if mid == id(mesh) and n == mesh.n_points and m is mesh:
+            return t
+    t = tri_from_pyvista(mesh)
+    _TRI_CACHE.insert(0, (id(mesh), mesh.n_points, mesh, t))
+    del _TRI_CACHE[4:]
+    return t
+
+
+def _staple_side(side):
+    if side not in ("right", "left"):
+        raise JointModelError("STAPLE methods need the body side: set the bone's side to right or left.")
+    return side[0]
+
+
+def _surface_prim(t, color="#F0A04B"):
+    return {"kind": "surface", "points": t.Points, "faces": t.ConnectivityList, "color": color}
+
+
+def _staple_result(r, prims, quality) -> AutoResult:
+    res = AutoResult(r.frame("knee"))
+    res.primitives = prims
+    q = {"Algorithm": r.method + " (STAPLE)", "Bone": "whole" if r.whole else "partial (adapted)"}
+    q.update(quality)
+    res.quality = q
+    res.notes = list(r.notes)
+    if r.aux.get("adaptation"):
+        res.quality["Partial-bone change"] = r.aux["adaptation"]
+    if not r.whole and "shaft_axis" in r.aux:
+        p, d = r.aux["shaft_point"], r.aux["shaft_axis"]
+        res.primitives.append({"kind": "line", "points": np.array([p - 40 * d, p + 40 * d])})
+    return res
+
+
+def _staple_run(fn, mesh, side, options, **kw):
+    from .staple import StapleError
+
+    try:
+        return fn(_staple_tri(mesh), _staple_side(side), flip_ap=bool(options.get("flip_ap")),
+                  flip_long=bool(options.get("flip_long")), **kw)
+    except StapleError as err:
+        raise JointModelError(str(err)) from err
+
+
+def staple_femur(fit):
+    def run(mesh, side, options) -> AutoResult:
+        from .staple import GIBOC_femur
+
+        r = _staple_run(GIBOC_femur, mesh, side, options, fit_method=fit)
+        a = r.aux
+        prims = [_surface_prim(r.art_surf["fitted_lat"]), _surface_prim(r.art_surf["fitted_med"], "#E07B91")]
+        q = {}
+        if fit == "cylinder":
+            K, Z = r.frame("knee")[:3, 3], r.frame("knee")[:3, 2]
+            prims.append({"kind": "cylinder", "center": K, "direction": Z, "radius": a["Cyl_Radius"],
+                          "height": a["Cyl_Range"]})
+            q = {"Cylinder radius": f"{a['Cyl_Radius']:.1f} mm", "RMS residual": f"{a['Cyl_rmse']:.2f} mm"}
+        elif fit == "spheres":
+            prims += [{"kind": "sphere", "center": a["sphere_center_lat"], "radius": a["sphere_radius_lat"]},
+                      {"kind": "sphere", "center": a["sphere_center_med"], "radius": a["sphere_radius_med"]}]
+            q = {"Radii (lat, med)": f"{a['sphere_radius_lat']:.1f}, {a['sphere_radius_med']:.1f} mm",
+                 "RMS residual": f"{a['sphere_rmse']:.2f} mm"}
+        else:
+            for k in ("lat", "med"):
+                prims.append({"kind": "ellipsoid", "center": a[f"ellips_centre_{k}"], "radii": a[f"ellips_radii_{k}"],
+                              "axes": a[f"ellips_evec_{k}"]})
+            q = {"Semi-axes (lat)": " × ".join(f"{abs(v):.0f}" for v in a["ellips_radii_lat"]) + " mm",
+                 "Semi-axes (med)": " × ".join(f"{abs(v):.0f}" for v in a["ellips_radii_med"]) + " mm"}
+        if a.get("CenterFH_Renault") is not None:
+            prims.append({"kind": "sphere", "center": a["CenterFH_Renault"], "radius": a["RadiusFH_Renault"]})
+            q["Femoral head radius"] = f"{a['RadiusFH_Renault']:.1f} mm"
+        return _staple_result(r, prims, q)
+    return run
+
+
+def staple_femur_kai(mesh, side, options) -> AutoResult:
+    from .staple import Kai2014_femur
+
+    r = _staple_run(Kai2014_femur, mesh, side, {}, )
+    a = r.aux
+    prims = [{"kind": "sphere", "center": a["Center_Lat"], "radius": a["Radius_Lat"]},
+             {"kind": "sphere", "center": a["Center_Med"], "radius": a["Radius_Med"]},
+             {"kind": "sphere", "center": a["CenterFH_Kai"], "radius": a["RadiusFH_Kai"]}]
+    res = _staple_result(r, prims, {"Radii (lat, med)": f"{a['Radius_Lat']:.1f}, {a['Radius_Med']:.1f} mm",
+                                    "Femoral head radius": f"{a['RadiusFH_Kai']:.1f} mm"})
+    res.points = np.r_[a["FC_Lat_Pts"], a["FC_Med_Pts"]]
+    return res
+
+
+def staple_tibia_kai(mesh, side, options) -> AutoResult:
+    from .staple import Kai2014_tibia
+
+    r = _staple_run(Kai2014_tibia, mesh, side, options)
+    a, F = r.aux, r.frame("knee")
+    E = a["Ellipse"]
+    major, minor = (E["a"], E["b"]) if E["a"] > E["b"] else (E["b"], E["a"])
+    prims = [{"kind": "ellipse", "center": a["EllipseCenter"], "major": F[:3, 2],
+              "minor": np.cross(a["Y0"], F[:3, 2]), "a": float(major), "b": float(minor)},
+             {"kind": "loop", "points": a["SectionPts"]}]
+    return _staple_result(r, prims, {"Section ellipse": f"{2 * major:.0f} × {2 * minor:.0f} mm"})
+
+
+def staple_tibia(fit):
+    def run(mesh, side, options) -> AutoResult:
+        from .staple import GIBOC_tibia
+
+        r = _staple_run(GIBOC_tibia, mesh, side, options, fit_method=fit)
+        a = r.aux
+        prims = [_surface_prim(r.art_surf["plateau_lat"]), _surface_prim(r.art_surf["plateau_med"], "#E07B91")]
+        q = {}
+        if fit == "ellipse":
+            prims.append({"kind": "loop", "points": a["ElpsPts"]})
+            q = {"Plateau ellipse": f"{2 * max(a['Ellipse']['a'], a['Ellipse']['b']):.0f} × "
+                                    f"{2 * min(a['Ellipse']['a'], a['Ellipse']['b']):.0f} mm"}
+        elif fit == "centroids":
+            prims += [{"kind": "sphere", "center": a["Centroid_AS_lat"], "radius": 2.0},
+                      {"kind": "sphere", "center": a["Centroid_AS_med"], "radius": 2.0}]
+            q = {"Centroid distance": f"{np.linalg.norm(a['Centroid_AS_lat'] - a['Centroid_AS_med']):.1f} mm"}
+        else:
+            L = a["PlateauLayerPts"]
+            prims.append({"kind": "points", "points": L[:: max(1, len(L) // 3000)]})
+        if r.whole and a.get("AnkleCenter") is not None:
+            prims.append({"kind": "sphere", "center": a["AnkleCenter"], "radius": 3.0})
+        return _staple_result(r, prims, q)
+    return run
+
+
+def _talus_result(r, key):
+    a = r.aux
+    prims = [_surface_prim(r.art_surf["talar_trochlea"]), _surface_prim(r.art_surf["talo_calcn"], "#E07B91"),
+             _surface_prim(r.art_surf["talo_navic"], "#5CC8A8")]
+    if key == "ankle":
+        acs = r.frame("ankle")
+        prims.append({"kind": "cylinder", "center": a["ankle_cyl_centre"], "direction": acs[:3, 2],
+                      "radius": a["ankle_cyl_radius"], "height": a["ankle_cyl_range"]})
+        q = {"Trochlea cylinder radius": f"{a['ankle_cyl_radius']:.1f} mm",
+             "RMS residual": f"{a['ankle_cyl_rmse']:.2f} mm"}
+    else:
+        sgn = 1 if r.side == "r" else -1
+        X = a["X1"]
+        Y = sgn * a["Z1"]
+        Y = Y - (Y @ X) * X
+        Y /= np.linalg.norm(Y)
+        acs = np.eye(4)
+        acs[:3, 0], acs[:3, 1], acs[:3, 2], acs[:3, 3] = X, Y, np.cross(X, Y), a["talocalc_centre"]
+        prims += [{"kind": "sphere", "center": a["talocalc_centre"], "radius": a["talocalc_radius"]},
+                  {"kind": "sphere", "center": a["talonav_centre"], "radius": a["talonav_radius"]},
+                  {"kind": "line", "points": np.array([a["talocalc_centre"], a["talonav_centre"]])}]
+        q = {"Talocalcaneal sphere": f"r {a['talocalc_radius']:.1f} mm",
+             "Talonavicular sphere": f"r {a['talonav_radius']:.1f} mm",
+             "Subtalar axis length": f"{np.linalg.norm(a['talonav_centre'] - a['talocalc_centre']):.1f} mm"}
+    res = AutoResult(acs)
+    res.primitives = prims
+    res.quality = {"Algorithm": "STAPLE-Talus", "Bone": "whole", **q}
+    res.notes = list(r.notes)
+    return res
+
+
+def staple_talus(key):
+    def run(mesh, side, options) -> AutoResult:
+        from .staple import StapleError
+        from .staple.talus import STAPLE_talus
+
+        try:
+            r = STAPLE_talus(_staple_tri(mesh), _staple_side(side))
+        except StapleError as err:
+            raise JointModelError(str(err)) from err
+        return _talus_result(r, key)
+    return run
+
+
+_STAPLE_REFS_F = (RENAULT, MODENESE, STAPLE_NOTE)
+_STAPLE_PARTIAL = (" On a partial (distal) femur, as from BVR, the hip centre isn't available: Y follows the shaft "
+                   "axis and anterior comes from the condyles (an adaptation, not part of STAPLE).")
+_STAPLE_PARTIAL_T = (" On a partial (proximal) tibia the ankle and fibula aren't available: Y follows the shaft axis "
+                     "and anterior comes from the shape of the tuberosity region (an adaptation, not part of STAPLE).")
+
+_OWN = (" (Our earlier simplified implementation, kept so models saved with it still open; prefer the STAPLE "
+        "methods.)")
 
 AUTO_METHODS: dict[str, AutoMethod] = {m.key: m for m in [
-    AutoMethod("femur_cylinder", "Cylinder fitted to the posterior condyles", "femur",
-               "Flexion axis (Z) = axis of a cylinder fitted to the posterior and distal condyle surfaces; origin at "
-               "its middle. Y from the shaft line (centroids of shaft cross-sections), made perpendicular to Z. "
-               "After Miranda et al. (2010) and GIBOC-Cylinder; the most repeatable femur method in Renault et "
-               "al. (2018).", (MIRANDA, RENAULT, MODENESE), femur_cylinder),
-    AutoMethod("femur_spheres", "Spheres fitted to each posterior condyle", "femur",
-               "A sphere is fitted to each posterior condyle; Z joins their centres, the origin is midway. Y from the "
-               "shaft line, made perpendicular to Z. After Kai et al. (2014) and GIBOC-Spheres (closest to manual "
-               "axes in Modenese & Renault 2021).", (KAI, RENAULT, MODENESE), femur_spheres),
-    AutoMethod("tibia_ellipse", "Ellipse of the largest plateau cross-section", "tibia",
-               "The largest cross-section near the top of the tibia is fitted with an ellipse: Z along its major "
-               "axis, origin at its centroid. Y = the shaft line. After Kai et al. (2014) and GIBOC-Ellipse.",
-               (KAI, RENAULT, MODENESE), tibia_ellipse),
-    AutoMethod("tibia_centroids", "Centroids of the two plateau surfaces", "tibia",
-               "The upward-facing medial and lateral plateau surfaces are found; Z joins their centroids and the "
-               "origin is midway. Y = the shaft line. After GIBOC-Centroids.", (RENAULT, MODENESE),
-               tibia_centroids),
-    AutoMethod("tibia_inertia", "Principal axes of the proximal tibia", "tibia",
-               "The top 15 mm of the tibia is treated as a solid: Z along its widest principal axis, origin at its "
-               "centroid. Y = the shaft line. After Miranda et al. (2010).", (MIRANDA, MODENESE),
-               tibia_plateau_inertia),
+    # ---- STAPLE (Modenese & Renault 2021), translated from MATLAB
+    AutoMethod("staple_femur_cylinder", "GIBOC-Cylinder (STAPLE)", "femur",
+               "The medial and lateral posterior condyle articular surfaces are found from the surface's shape, and a "
+               "cylinder is fitted to both: Z (flexion axis) = cylinder axis, pointing right; origin midway between "
+               "the two surfaces along it. Y towards the femoral head centre, X = Y × Z. The most repeatable femur "
+               "method in Renault et al. (2018) and STAPLE's default." + _STAPLE_PARTIAL, _STAPLE_REFS_F,
+               staple_femur("cylinder")),
+    AutoMethod("staple_femur_spheres", "GIBOC-Spheres (STAPLE)", "femur",
+               "A sphere is fitted to each posterior condyle articular surface: Z joins their centres (pointing "
+               "right), origin midway. Y towards the femoral head centre. Closest to manual axes in Modenese & "
+               "Renault (2021)." + _STAPLE_PARTIAL, _STAPLE_REFS_F, staple_femur("spheres")),
+    AutoMethod("staple_femur_ellipsoids", "GIBOC-Ellipsoids (STAPLE)", "femur",
+               "An ellipsoid is fitted to each whole condyle articular surface: Z joins their centres (pointing "
+               "right), origin midway. Y towards the femoral head centre." + _STAPLE_PARTIAL, _STAPLE_REFS_F,
+               staple_femur("ellipsoids")),
+    AutoMethod("staple_femur_kai", "Kai et al. 2014 (STAPLE; whole femur only)", "femur",
+               "Spheres fitted to the femoral head and to slices through each posterior condyle: Z joins the condyle "
+               "centres (pointing right), origin midway, Y towards the femoral head centre. Needs the whole femur.",
+               (KAI, MODENESE, STAPLE_NOTE), staple_femur_kai),
+    AutoMethod("staple_tibia_kai", "Kai et al. 2014 (STAPLE)", "tibia",
+               "The largest cross-section of the tibia (at the plateau) is fitted with an ellipse: Z along its major "
+               "axis (pointing right), origin at its centre, Y = the tibia's long axis. STAPLE's default tibia "
+               "method; the most robust on lower-quality surfaces." + _STAPLE_PARTIAL_T.replace(
+                   "Y follows the shaft axis", "Y is the shaft axis"), (KAI, MODENESE, STAPLE_NOTE), staple_tibia_kai),
+    AutoMethod("staple_tibia_ellipse", "GIBOC-Ellipse (STAPLE)", "tibia",
+               "The medial and lateral plateau articular surfaces are found; an ellipse is fitted to their outline: "
+               "Z along its major axis (pointing right), origin at its centre. Y from the ankle centre to the origin."
+               + _STAPLE_PARTIAL_T, (RENAULT, MODENESE, STAPLE_NOTE), staple_tibia("ellipse")),
+    AutoMethod("staple_tibia_centroids", "GIBOC-Centroids (STAPLE)", "tibia",
+               "The medial and lateral plateau articular surfaces are found: Z joins their centroids (pointing "
+               "right), origin midway. Y from the ankle centre to the origin." + _STAPLE_PARTIAL_T,
+               (RENAULT, MODENESE, STAPLE_NOTE), staple_tibia("centroids")),
+    AutoMethod("staple_tibia_plateau", "GIBOC-Plateau (STAPLE)", "tibia",
+               "A layer of bone just below the plateau surfaces is filled with points: Z along its principal "
+               "medio-lateral axis (pointing right), origin between the centres of its medial and lateral halves. Y "
+               "from the ankle centre to the origin. The most repeatable tibia variant in Renault et al. (2018)."
+               + _STAPLE_PARTIAL_T, (RENAULT, MODENESE, STAPLE_NOTE), staple_tibia("plateau")),
+    AutoMethod("staple_talus_ankle", "STAPLE-Talus: talocrural axis", "talus",
+               "A cylinder is fitted to the talar trochlea (the dome): Z = its axis (the talocrural axis), pointing "
+               "right; origin on the axis, level with the middle of the trochlea. Y is perpendicular to Z and the "
+               "talus's long axis (superior), X = Y × Z (anterior). Use for the ankle (talocrural) joint.",
+               (MODENESE, STAPLE_NOTE), staple_talus("ankle")),
+    AutoMethod("staple_talus_subtalar", "STAPLE-Talus: subtalar axis", "talus",
+               "Spheres are fitted to the talocalcaneal (posterior facet) and talonavicular surfaces: X joins their "
+               "centres (the subtalar axis, pointing forwards), origin at the talocalcaneal centre; Y is "
+               "perpendicular to X, superior; Z = X × Y (right). Use for the subtalar joint.",
+               (MODENESE, STAPLE_NOTE), staple_talus("subtalar")),
+    # ---- generic
     AutoMethod("inertial", "Principal axes of inertia", "any",
                "The bone is treated as a solid of uniform density: axis 1 is its long axis (smallest moment), then "
                "axes 2 and 3; origin at the centroid. Works for any bone (e.g. carpals), but the axes carry no "
                "anatomical names.", ("Principal inertial axes, as used for carpal bones: Coburn JC et al. (2007) "
                                      "J Biomech 40:203–209",), inertial_axes),
+    # ---- legacy: our own simplified versions (hidden unless a saved model uses them)
+    AutoMethod("femur_cylinder", "Cylinder on the posterior condyles (simplified, older)", "femur",
+               "Cylinder fitted to the posterior condyle surface; Y from the shaft line." + _OWN,
+               (MIRANDA, RENAULT, MODENESE), femur_cylinder, legacy=True),
+    AutoMethod("femur_spheres", "Spheres on the posterior condyles (simplified, older)", "femur",
+               "A sphere fitted to each posterior condyle; Y from the shaft line." + _OWN, (KAI, RENAULT, MODENESE),
+               femur_spheres, legacy=True),
+    AutoMethod("tibia_ellipse", "Ellipse of the largest plateau section (simplified, older)", "tibia",
+               "Ellipse of the largest proximal cross-section; Y = the shaft line." + _OWN, (KAI, RENAULT, MODENESE),
+               tibia_ellipse, legacy=True),
+    AutoMethod("tibia_centroids", "Centroids of the plateau surfaces (simplified, older)", "tibia",
+               "Centroids of the upward-facing plateau surfaces; Y = the shaft line." + _OWN, (RENAULT, MODENESE),
+               tibia_centroids, legacy=True),
+    AutoMethod("tibia_inertia", "Principal axes of the proximal tibia (simplified, older)", "tibia",
+               "Principal axes of the top 15 mm of the tibia; Y = the shaft line." + _OWN, (MIRANDA, MODENESE),
+               tibia_plateau_inertia, legacy=True),
 ]}
 
 
 def run(method_key: str, mesh, side: str, options: dict | None = None) -> AutoResult:
+    if method_key not in AUTO_METHODS:
+        raise JointModelError(f"Unknown automatic method {method_key!r}.")
     m = AUTO_METHODS[method_key]
     return m.fn(mesh, side, options or {})

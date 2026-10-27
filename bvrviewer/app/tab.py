@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 from pyvistaqt import QtInteractor
 
-from ..core.auto_axes import AUTO_METHODS
+from ..core import joints as J
 from ..core.config import read_cfg
 from ..core.models import PALETTE, BoneModel, ModelError, is_volume_file
 from ..core.session import KinItem, TabState, XrayCamera, load_session, save_session
@@ -1545,8 +1545,7 @@ class VisualiserTab(QWidget):
         if seg is None:
             p.note("This bone isn't in the file any more, or has no axes.", "Warn")
         else:
-            p.value("Axes from", "Landmarks" if seg.axes_source == "landmarks" else
-                    AUTO_METHODS[seg.axes_source].title)
+            p.value("Axes from", J.axes_source_title(seg.axes_source))
             if seg.surface is not None:
                 same = Path(seg.surface.path).name == Path(m.path).name
                 p.value("Defined on", Path(seg.surface.path).name, kind="Value" if same else "Warn",

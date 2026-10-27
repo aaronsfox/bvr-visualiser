@@ -85,7 +85,8 @@ def _angle(a, b):
 
 
 @sample
-@pytest.mark.parametrize("key", [k for k, v in AA.AUTO_METHODS.items() if v.bone in ("femur", "tibia")])
+@pytest.mark.parametrize("key", [k for k, v in AA.AUTO_METHODS.items()
+                                 if v.bone in ("femur", "tibia") and k != "staple_femur_kai"])
 def test_auto_methods_agree_with_landmarks_on_the_sample(key):
     """Each automatic method gives axes close to landmark-based ones (same direction, near the same origin)."""
     F, T, L = _sample()
@@ -116,7 +117,8 @@ def test_model_with_automatic_axes_and_scan_reference(tmp_path):
         bm = BoneModel(name=f, path=K / "Models" / f"AUT_Left_{f}.stl")
         bm.build()
         m.segment(f).surface = bm
-    assert m.segment("Femur").axes_source == "femur_cylinder" and m.segment("Tibia").axes_source == "tibia_ellipse"
+    assert m.segment("Femur").axes_source == "staple_femur_cylinder"
+    assert m.segment("Tibia").axes_source == "staple_tibia_kai"
     m.compute()
     assert m.segment("Femur").acs is not None, m.segment("Femur").error
     assert m.checks() == []
@@ -137,9 +139,15 @@ def test_model_with_automatic_axes_and_scan_reference(tmp_path):
         np.testing.assert_allclose(z["translations"][0], 0, atol=1e-6)
     m.save(tmp_path / "auto.bvrmodel.json")
     m2 = J.KinematicModel.load(tmp_path / "auto.bvrmodel.json")
-    assert m2.segment("Femur").axes_source == "femur_cylinder" and m2.joint("Knee").reference.mode == "realign"
+    assert m2.segment("Femur").axes_source == "staple_femur_cylinder" and m2.joint("Knee").reference.mode == "realign"
     np.testing.assert_allclose(m2.segment("Femur").acs, m.segment("Femur").acs, atol=1e-9)
     with pytest.raises(J.JointModelError):
         m.set_axes_source("Femur", "tibia_ellipse")
     rows = m.compare_methods("Knee", Tf[0], Tt[0])
-    assert len(rows) == 3 * 4          # femur: 2 methods + landmarks; tibia: 3 methods + landmarks
+    assert len(rows) == 5 * 5          # femur: 4 methods + landmarks; tibia: 4 methods + landmarks
+    ok = [r for r in rows if r.get("angles") is not None]
+    # Kai's femur method needs the whole femur, and landmarks aren't placed: 3 x 4 rows have angles
+    assert len(ok) == 3 * 4, [(r["proximal"], r["distal"], r.get("error")) for r in rows if r.get("angles") is None]
+    flex = [r["angles"][0] for r in ok]
+    print("flexion at frame 1 by method pair:", np.round(flex, 1))
+    assert np.ptp(flex) < 15

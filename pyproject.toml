@@ -20,16 +20,20 @@ dependencies = [
     "imagecodecs>=2023.1",
     "imageio>=2.31",
     "imageio-ffmpeg>=0.4.9",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff", "pyinstaller>=6"]
+dev = ["pytest>=7", "ruff", "pyinstaller>=6", "mat-io"]
 
 [project.gui-scripts]
 bvr-viewer = "bvrviewer.app.main:main"
 
 [tool.setuptools.packages.find]
 include = ["bvrviewer*"]
+
+[tool.setuptools.package-data]
+"bvrviewer.core.staple" = ["*.txt", "*.md", "third_party_licenses/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

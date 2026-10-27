@@ -228,7 +228,7 @@ def test_segments_and_joints_structure():
     f = m.add_segment("femur", side="left")
     m.add_segment("tibia", side="left")
     assert f.name == "Femur" and m.add_segment("femur").name == "Femur 2"
-    assert f.axes_source == "femur_cylinder"                       # automatic by default
+    assert f.axes_source == "staple_femur_cylinder"                # automatic by default
     with pytest.raises(J.JointModelError):
         m.add_joint("knee_grood_suntay", "Tibia", "Femur")         # wrong way round
     j = m.add_joint("knee_grood_suntay", "Femur", "Tibia")
@@ -309,6 +309,8 @@ def test_version1_files_are_upgraded():
     m = J.KinematicModel.from_dict(old)
     assert [s.name for s in m.segments] == ["Femur", "Tibia"] and m.segment("Femur").side == "left"
     assert m.segment("Femur").axes_source == "femur_spheres" and m.segment("Tibia").axes_source == "landmarks"
+    # an older method from a file is still offered for that bone, after the current ones
+    assert m.axes_sources("Femur")[-2][0] == "femur_spheres"
     assert m.joints[0].name == "Knee" and m.joints[0].type == "knee_grood_suntay"
     d = m.to_dict()
     assert d["version"] == 2 and J.KinematicModel.from_dict(d).joints[0].distal == "Tibia"

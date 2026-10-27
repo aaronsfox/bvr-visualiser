@@ -9,3 +9,4 @@ tifffile>=2023.1
 imagecodecs>=2023.1
 imageio>=2.31
 imageio-ffmpeg>=0.4.9
+openpyxl>=3.1

@@ -19,9 +19,12 @@ hidden = (
     + collect_submodules("imagecodecs")
     + collect_submodules("pyvistaqt")
     + collect_submodules("pyqtgraph", filter=lambda n: not any(x in n for x in (".examples", ".opengl", ".jupyter")))
-    + ["scipy.spatial.transform._rotation_groups", "skimage.measure", "skimage.filters"]
+    + ["scipy.spatial.transform._rotation_groups", "skimage.measure", "skimage.filters", "scipy.cluster.vq",
+       "openpyxl"]
 )
 datas = collect_data_files("pyvista") + collect_data_files("imageio_ffmpeg")
+# Licence and notice of the STAPLE translation (CC BY-NC 4.0) and the BSD/MIT notices it carries
+datas += collect_data_files("bvrviewer.core.staple", includes=["*.txt", "*.md", "third_party_licenses/*"])
 
 # Large Qt and Python parts the app never uses.
 EXCLUDE = ["pyqtgraph.examples", "pyqtgraph.opengl", "pyqtgraph.jupyter", "tkinter", "matplotlib.tests", "PyQt5", "PyQt6", "PySide2", "IPython", "jupyter", "cv2",

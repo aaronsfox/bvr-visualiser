@@ -34,9 +34,25 @@ TFM_FILTER = "ITK transform (*.tfm *.txt);;All files (*)"
 AXIS_COLOURS = ("#E5534B", "#57AB5A", "#539BF5")        # X red, Y green, Z blue
 BONE_COLOURS = ("#E8D9B5", "#C9B98F", "#B9C7D6", "#D6B9C9")
 KIND, OBJ, KEY = Qt.UserRole, Qt.UserRole + 1, Qt.UserRole + 2
-SHORT_SOURCE = {"landmarks": "Landmarks", "femur_cylinder": "Cylinder", "femur_spheres": "Spheres",
-                "tibia_ellipse": "Ellipse", "tibia_centroids": "Centroids", "tibia_inertia": "Plateau inertia",
-                "inertial": "Inertial"}
+SHORT_SOURCE = {"landmarks": "Landmarks", "staple_femur_cylinder": "Cylinder", "staple_femur_spheres": "Spheres",
+                "staple_femur_ellipsoids": "Ellipsoids", "staple_femur_kai": "Kai", "staple_tibia_kai": "Kai",
+                "staple_tibia_ellipse": "Ellipse", "staple_tibia_centroids": "Centroids",
+                "staple_tibia_plateau": "Plateau", "femur_cylinder": "Cylinder (old)",
+                "femur_spheres": "Spheres (old)", "tibia_ellipse": "Ellipse (old)", "tibia_centroids": "Centroids (old)",
+                "tibia_inertia": "Plateau inertia (old)", "inertial": "Inertial",
+                "staple_talus_ankle": "Talocrural", "staple_talus_subtalar": "Subtalar", "aafact": "AAFACT"}
+
+
+BONE_GROUPS = (("Knee", ("femur", "tibia")),
+               ("Ankle and foot", ("tibia_distal", "fibula", "talus", "calcaneus", "navicular", "cuboid",
+                                   "medial_cuneiform", "intermediate_cuneiform", "lateral_cuneiform",
+                                   "metatarsal1", "metatarsal2", "metatarsal3", "metatarsal4", "metatarsal5")),
+               ("Any bone", ("generic",)))
+
+
+def _settings():
+    from PySide6.QtCore import QSettings
+    return QSettings("BVR", "BVR Motion Viewer")
 
 
 class _State:
@@ -424,8 +440,9 @@ class ModelBuilderTab(QWidget):
             if self.sel[0] == "segment" and self.sel[1] is s:
                 current = si
             if auto:
-                si.addChild(self._item("Axes: " + AA.AUTO_METHODS[s.axes_source].title, "axesinfo", s,
-                                       color="#B78AF0", tip=AA.AUTO_METHODS[s.axes_source].summary))
+                am = AA.AUTO_METHODS.get(s.axes_source)
+                si.addChild(self._item("Axes: " + J.axes_source_title(s.axes_source), "axesinfo", s,
+                                       color="#B78AF0", tip=am.summary if am else J.AAFACT_TITLE))
             for d in s.stype.landmarks:
                 done = self.model.landmark(s.name, d.key) is not None
                 if auto and not done:
@@ -499,8 +516,12 @@ class ModelBuilderTab(QWidget):
 
         if kind in ("model", "segments"):
             sub = menu.addMenu("Add bone")
-            for k, t in J.SEGMENT_TYPES.items():
-                add(t.title, lambda k=k: self.add_segment(k), parent=sub)
+            for gi, (title, keys) in enumerate(BONE_GROUPS):
+                if gi:
+                    sub.addSeparator()
+                grp = sub.addMenu(title) if len(keys) > 3 else sub
+                for k in keys:
+                    add(J.SEGMENT_TYPES[k].title, lambda k=k: self.add_segment(k), parent=grp)
             for k, p in J.PRESETS.items():
                 add("Add " + p["title"], lambda k=k: self.add_preset(k))
         if kind in ("model", "joints"):
@@ -566,6 +587,7 @@ class ModelBuilderTab(QWidget):
                "taken as zero. Without one, zero is anatomical (the bones' axes lined up).")
         p.buttons([("Add bone…", self._add_segment_menu), ("Add joint…", self.add_joint)])
         p.buttons([("Start a knee (femur + tibia + joint)", lambda: self.add_preset("knee"))])
+        p.buttons([("Start an ankle (tibia + talus + calcaneus + joints)", lambda: self.add_preset("ankle"))])
         p.section("Contents")
         p.value("Bones", ", ".join(s.name for s in m.segments) or "none")
         p.value("Joints", ", ".join(j.name for j in m.joints) or "none")
@@ -578,8 +600,11 @@ class ModelBuilderTab(QWidget):
         p.clear("Bones")
         p.note("Each bone is one surface with its own axes. Choose its type: the type decides which "
                "landmarks and automatic methods it can use.")
-        for k, t in J.SEGMENT_TYPES.items():
-            p.buttons([(f"Add {t.title.lower()}", lambda k=k: self.add_segment(k))])
+        for title, keys in BONE_GROUPS:
+            p.section(title)
+            items = [(J.SEGMENT_TYPES[k].title, lambda k=k: self.add_segment(k)) for k in keys]
+            for i in range(0, len(items), 3):
+                p.buttons(items[i:i + 3])
 
     def _props_joints(self) -> None:
         p = self.props
@@ -598,7 +623,7 @@ class ModelBuilderTab(QWidget):
         if t.anatomical:
             p.combo("Side", [("right", "Right"), ("left", "Left")], s.side, lambda v: self._set_side(s, v),
                     tip="Sets which way is right (ISB Z) for landmark axes, and joint angle signs on the left side. "
-                        "Automatic axes find right from the bone's shape.")
+                        "The automatic (STAPLE) methods also use it to tell medial from lateral.")
         p.section("Surface")
         if s.surface is None:
             p.note("Load this bone's surface (STL, or a TIF partial volume): the same file and model space you "
@@ -618,6 +643,8 @@ class ModelBuilderTab(QWidget):
             p.note(t.axes_note or "")
             for ref in t.references:
                 p.note(ref)
+        elif s.axes_source == "aafact":
+            self._props_aafact(s)
         else:
             am = AA.AUTO_METHODS[s.axes_source]
             p.note(am.summary)
@@ -629,8 +656,10 @@ class ModelBuilderTab(QWidget):
                 for n in s.auto.notes:
                     p.note(n, "Warn")
             p.check("Show fit", self.show_fit, self._set_show_fit, "Draw the fitted shape and points")
-            p.buttons([("Flip anterior/posterior", lambda: self._toggle_option(s, "flip_ap")),
-                       ("Flip superior/inferior", lambda: self._toggle_option(s, "flip_long"))])
+            whole = bool(s.auto is not None and str(s.auto.quality.get("Bone", "")).startswith("whole"))
+            if not whole:
+                p.buttons([("Flip anterior/posterior", lambda: self._toggle_option(s, "flip_ap")),
+                           ("Flip superior/inferior", lambda: self._toggle_option(s, "flip_long"))])
             flips = [n for k, n in (("flip_ap", "anterior/posterior"), ("flip_long", "superior/inferior"))
                      if s.auto_options.get(k)]
             if flips:
@@ -654,6 +683,89 @@ class ModelBuilderTab(QWidget):
         p.buttons([("Attach .tra…", lambda: self.attach_preview(s))])
         p.section("")
         p.buttons([("Remove bone", lambda: self.remove_segment(s))])
+
+    def _props_aafact(self, s: J.Segment) -> None:
+        from ..core import aafact as AF
+
+        p = self.props
+        p.note("AAFACT aligns the bone to a template and builds its axes from regional centroids: X = AP "
+               "(anterior), Y = SI (superior), Z = ML (pointing right). It is a separate program: install the "
+               "compiled AAFACT (with the MATLAB Runtime) from github.com/Lenz-Lab/AAFACT, then run it here, or "
+               "import the CoordinateSystem_….xlsx it writes. Set the bone's side first.")
+        p.note(AF.PETERSON)
+        exe = _settings().value("aafact/exe", "", str)
+        p.value("AAFACT program", Path(exe).name if exe else "Not set", tip=exe or None,
+                kind="Value" if exe else "Warn")
+        p.buttons([("Run AAFACT on this bone", lambda: self.run_aafact(s)),
+                   ("Import results (.xlsx)…", lambda: self.import_aafact(s))])
+        p.buttons([("Set AAFACT program…", self._choose_aafact_exe)])
+        imp = s.imported if s.imported and s.imported.get("method") == "aafact" else None
+        if imp:
+            opts = imp["options"]
+            if len(opts) > 1:
+                p.combo("Coordinate system", [(k, v["title"]) for k, v in opts.items()], imp["option"],
+                        lambda k: self._set_aafact_option(s, k),
+                        tip="AAFACT offers several systems for this bone")
+            cur = opts[imp["option"]]
+            p.value("From", Path(imp["file"]).name if imp["file"] else "AAFACT", tip=imp["file"] or None)
+            p.value("Origin", cur.get("origin", ""))
+            dev = float(cur.get("orthogonality", 0))
+            p.value("Axes orthogonality", f"{dev:.2f}° from 90°", kind="Value" if dev < 2 else "Warn",
+                    tip="AAFACT's axes are made exactly orthogonal here (nearest rotation)")
+
+    def _choose_aafact_exe(self) -> str:
+        from PySide6.QtWidgets import QFileDialog
+        st = _settings()
+        path, _ = QFileDialog.getOpenFileName(self, "Find the compiled AAFACT program", st.value("aafact/exe", "", str),
+                                              "AAFACT program (AAFACT.exe AAFACT *.exe *);;All files (*)")
+        if path:
+            st.setValue("aafact/exe", path)
+            self._changed()
+        return path
+
+    def _set_aafact_option(self, s: J.Segment, key: str) -> None:
+        self.model.set_imported_option(s.name, key)
+        self._changed()
+
+    def import_aafact(self, s: J.Segment, path: str | None = None) -> bool:
+        from PySide6.QtWidgets import QFileDialog
+        from ..core import aafact as AF
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "AAFACT results", "", "AAFACT results (*.xlsx);;All files (*)")
+            if not path:
+                return False
+        try:
+            res = AF.read_results(path)
+            self.model.set_imported(s.name, res, file=path)
+        except (AF.AafactError, J.JointModelError) as err:
+            QMessageBox.warning(self, "AAFACT results", str(err))
+            return False
+        self._changed()
+        return True
+
+    def run_aafact(self, s: J.Segment) -> bool:
+        import tempfile
+        from PySide6.QtGui import QGuiApplication
+        from ..core import aafact as AF
+        if s.mesh is None:
+            QMessageBox.information(self, "Run AAFACT", "Load this bone's surface first.")
+            return False
+        exe = _settings().value("aafact/exe", "", str) or self._choose_aafact_exe()
+        if not exe:
+            return False
+        bone = AF.BONES.get(s.type)
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            work = Path(tempfile.mkdtemp(prefix="aafact_"))
+            res = AF.run(exe, s.mesh, bone, s.side, work)
+            self.model.set_imported(s.name, res, file=str(next(work.glob("*/CoordinateSystem_*.xlsx"), "")))
+        except (AF.AafactError, J.JointModelError) as err:
+            QMessageBox.warning(self, "Run AAFACT", str(err))
+            return False
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        self._changed()
+        return True
 
     def _props_landmark(self, s: J.Segment, key: str) -> None:
         p = self.props
@@ -1153,6 +1265,23 @@ class ModelBuilderTab(QWidget):
                 ring = prim["center"] + np.outer(np.cos(th) * prim["a"], prim["major"]) + \
                     np.outer(np.sin(th) * prim["b"], prim["minor"])
                 add(pv.lines_from_points(ring), color="#B78AF0", line_width=3)
+            elif k == "surface":
+                F = np.asarray(prim["faces"], np.int64)
+                if len(F):
+                    add(pv.PolyData(np.asarray(prim["points"], float), np.c_[np.full(len(F), 3), F].ravel()),
+                        color=prim.get("color", "#F0A04B"), opacity=0.85)
+            elif k == "ellipsoid":
+                e = pv.ParametricEllipsoid(*np.abs(prim["radii"]))
+                M = np.eye(4)
+                M[:3, :3] = prim["axes"]
+                M[:3, 3] = prim["center"]
+                add(e.transform(M, inplace=False), color="#B78AF0", opacity=0.3, style="wireframe", line_width=1)
+            elif k == "loop" and len(prim["points"]) >= 3:
+                c = np.asarray(prim["points"], float)
+                add(pv.lines_from_points(np.vstack([c, c[:1]])), color="#B78AF0", line_width=3)
+            elif k == "points" and len(prim["points"]):
+                add(pv.PolyData(np.asarray(prim["points"], float)), color="#F0A04B", point_size=3,
+                    render_points_as_spheres=True)
             elif k == "line" and prim["points"] is not None and len(prim["points"]) >= 2:
                 c = np.asarray(prim["points"])
                 add(pv.PolyData(c), color="#5CC8A8", point_size=7, render_points_as_spheres=True)
