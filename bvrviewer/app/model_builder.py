@@ -1332,8 +1332,8 @@ class ModelBuilderTab(QWidget):
                 self.hint.setText(f"Right-click and drag over the surface to paint “{d.name}”. Painting adds "
                                   f"to the region; Clear starts again. Brush: {self.brush:.0f} mm.")
         elif kind == "segment" and obj.axes_source != "landmarks":
-            self.hint.setText("Automatic axes: purple = fitted shape, orange = surface points used, teal = shaft "
-                              "centres. X red, Y green, Z blue.")
+            self.hint.setText("Automatic axes: purple = fitted shape, orange/pink = articular surfaces found "
+                              "(lateral/medial), teal = shaft line. X red, Y green, Z blue.")
         elif kind == "segment":
             self.hint.setText("Select a landmark under this bone in the navigator, then right-click the surface "
                               "to place it.")

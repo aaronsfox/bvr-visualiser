@@ -103,7 +103,22 @@ The `paper/` reference models were made with an older STAPLE version for the tib
 their femur frames are used. STAPLE's reference models contain no GIBOC tibia frames; those were
 checked for consistency with Kai2014 and for the medial/lateral assignment on both sides.
 
-The partial-bone adaptations were checked by cutting STAPLE's whole example bones down to a distal femur
-(115 mm above the knee centre) and a proximal tibia (105 mm below it) and comparing with the whole-bone
-results: GIBOC femur 0.5-3.4 degrees, GIBOC/Kai tibia 0.2-7.8 degrees (the difference being mostly the
-shaft axis standing in for the mechanical or whole-bone axis), with medial and lateral right on every bone.
+The partial-bone adaptations were checked by cutting ten of STAPLE's whole example femurs and tibias (LHDL_CT,
+TLEM2_CT left and right, ICL_MRI, JIA_MRI left and right, VAKHUM_CT, TLEM2_MRI left and right, MC22) down
+to a distal femur (115 mm above the knee centre) and a proximal tibia (105 mm below it), and comparing
+the knee frames with the whole-bone results (largest axis difference per bone; median, maximum):
+
+| Method | Axes (degrees) | Origin (mm) |
+|---|---|---|
+| GIBOC-Cylinder femur | 2.1, 2.8 | 2.2, 4.4 |
+| GIBOC-Spheres femur | 2.3, 4.0 | 2.7, 4.8 |
+| GIBOC-Ellipsoids femur | 2.9, 6.0 | 0.4, 2.1 |
+| Kai2014 tibia | 3.5, 11.5 | 1.0, 2.0 |
+| GIBOC-Ellipse tibia | 3.5, 10.4 | 0.2, 2.9 |
+| GIBOC-Centroids tibia | 3.6, 10.0 | 0.3, 3.8 |
+| GIBOC-Plateau tibia | 2.7, 10.8 | 0.2, 1.6 |
+
+None failed, and medial and lateral (so the sign of every axis) were right on every bone. The
+differences are mostly the shaft axis standing in for the mechanical (or whole-bone) axis, which moves
+Y and X; the knee's flexion axis (femur Z) moved least. Kai's femur method isn't offered for partial
+femurs: estimating its slicing direction without the head moved it by 10-90 degrees.

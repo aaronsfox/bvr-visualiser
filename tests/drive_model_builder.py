@@ -156,9 +156,11 @@ assert fem.acs is not None and tib.acs is not None and m.checks() == [], m.check
 knee = m.joint("Knee")
 tab.select("joint", knee)
 rows = tab.compare_methods(knee)
-assert len(rows) == 3 * 4 and sum(r["current"] for r in rows) == 1
+assert len(rows) == 5 * 6 and sum(r["current"] for r in rows) == 1
+rows = [r for r in rows if r["angles"] is not None]   # Kai femur needs a whole femur; AAFACT not run
+assert len(rows) == 4 * 5, len(rows)                   # 3 femur methods + landmarks, 4 tibia + landmarks
 for r in rows:
-    print("compare", f"{r['proximal']:15s} {r['distal']:15s}", np.round(r["angles"], 1), flush=True)
+    print("compare", f"{r['proximal']:22s} {r['distal']:22s}", np.round(r["angles"], 1), flush=True)
 shot("mb_04_joint_compare")
 for s in (fem, tib):                                  # back to automatic axes
     tab.set_axes_source(s, s.stype.auto_methods[0])
@@ -256,7 +258,7 @@ np.testing.assert_allclose(k["angles"][ok, 0], flex[ok], atol=1e-6)        # fra
 np.testing.assert_allclose(k["angles"][ok, 1:], 0, atol=1e-6)
 vt._set_use_reference(knee_item, False)
 anat = vt.joint_values(knee_item)["angles"]
-assert abs(anat[0, 0] - 17.5) < 0.2, anat[0]                                 # anatomical: automatic-axes offset
+assert abs(anat[0, 0] - 17.7) < 0.2, anat[0]                                 # anatomical: automatic-axes offset
 vt._set_use_reference(knee_item, True)
 assert vt.curves.isVisible()
 vt.timeline.slider.setValue(39)
