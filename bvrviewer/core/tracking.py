@@ -58,6 +58,8 @@ class Tracking:
     fmt: TrackingFormat
     volume_index: int = 0
     warnings: list[str] = field(default_factory=list)
+    offset: int = 0                 # trial frame (0-based) of the file's first row; poses are already shifted
+    n_rows: int = 0                 # rows in the file
     _filled: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -230,15 +232,34 @@ def to_poses(raw: np.ndarray, fmt: TrackingFormat, volume_index: int = 0) -> np.
     return poses
 
 
-def load_tracking(path: str | Path, volume_index: int = 0, overrides: dict | None = None) -> Tracking:
-    """Load a .tra file. `overrides` can set any TrackingFormat field the user corrects."""
+def shift_rows(poses: np.ndarray, offset: int) -> np.ndarray:
+    """Place a file's rows so that its first row is trial frame `offset` (0-based).
+
+    A positive offset puts untracked frames before the file's rows; a negative one drops that many
+    of its first rows (they come before the trial's first frame).
+    """
+    if offset > 0:
+        return np.concatenate([np.full((offset, 4, 4), np.nan), poses])
+    if offset < 0:
+        return poses[-offset:]
+    return poses
+
+
+def load_tracking(path: str | Path, volume_index: int = 0, overrides: dict | None = None,
+                  offset: int = 0) -> Tracking:
+    """Load a .tra file. `overrides` can set any TrackingFormat field the user corrects; `offset` is the
+    trial frame (0-based) of the file's first row."""
     path = Path(path)
     raw, sep = read_raw(path)
     fmt = detect_format(raw, sep)
     for k, v in (overrides or {}).items():
         setattr(fmt, k, v)
-    poses = to_poses(raw, fmt, volume_index)
-    t = Tracking(path=path, poses=poses, fmt=fmt, volume_index=volume_index)
+    rows = to_poses(raw, fmt, volume_index)
+    if offset < 0 and -offset >= len(rows):
+        raise TrackingError(f"The file has {len(rows)} rows, so its first row can't start {-offset} frames "
+                            "before the trial.")
+    poses = shift_rows(rows, int(offset))
+    t = Tracking(path=path, poses=poses, fmt=fmt, volume_index=volume_index, offset=int(offset), n_rows=len(rows))
     valid = t.valid
     if not valid.any():
         t.warnings.append("No tracked frames in this file (every row is NaN).")

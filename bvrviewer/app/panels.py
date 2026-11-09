@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QHBoxLayout, QLabel, QPushButton,
-    QSlider, QVBoxLayout, QWidget,
+    QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..core.session import SceneSettings
@@ -116,8 +116,19 @@ class Timeline(QWidget):
         mid.addWidget(self.slider)
         mid.addWidget(self.coverage)
         r.addLayout(mid, 1)
-        self.counter = label("Frame 1 / 1", "Mono", wrap=False)
-        self.counter.setMinimumWidth(110)
+        # Frame number: type one and press Enter to go there.
+        self.frame_box = QSpinBox()
+        self.frame_box.setObjectName("FrameBox")
+        self.frame_box.setKeyboardTracking(False)
+        self.frame_box.setRange(1, 1)
+        self.frame_box.setPrefix("Frame ")
+        self.frame_box.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.frame_box.setFixedWidth(92)
+        self.frame_box.setToolTip("Type a frame number and press Enter")
+        self.frame_box.valueChanged.connect(lambda n: self.slider.setValue(n - 1))
+        r.addWidget(self.frame_box)
+        self.counter = label("/ 1", "Mono", wrap=False)
+        self.counter.setMinimumWidth(44)
         r.addWidget(self.counter)
         r.addWidget(QLabel("Speed"))
         self.speed = QComboBox()
@@ -137,8 +148,15 @@ class Timeline(QWidget):
         self.prev.clicked.connect(lambda: self.step(-1))
         self.next.clicked.connect(lambda: self.step(1))
 
+    def _show_frame(self, f: int, n: int) -> None:
+        self.frame_box.blockSignals(True)
+        self.frame_box.setRange(1, max(n, 1))
+        self.frame_box.setValue(f + 1)
+        self.frame_box.blockSignals(False)
+        self.counter.setText(f"/ {n}")
+
     def _changed(self, f: int) -> None:
-        self.counter.setText(f"Frame {f + 1} / {self.slider.maximum() + 1}")
+        self._show_frame(f, self.slider.maximum() + 1)
         self.frameChanged.emit(f)
 
     def set_count(self, n: int) -> None:
@@ -147,7 +165,7 @@ class Timeline(QWidget):
         self.slider.setRange(0, max(n - 1, 0))
         self.slider.setValue(f)
         self.slider.blockSignals(False)
-        self.counter.setText(f"Frame {f + 1} / {n}")
+        self._show_frame(f, n)
 
     def step(self, d: int) -> bool:
         """Advance; returns False when it stops at the end."""

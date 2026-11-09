@@ -30,7 +30,7 @@ The reliable route is Python 3.12 from https://www.python.org/downloads/windows/
 
 ## The Start page and tools
 
-The app opens on a **Start** page with one box per tool. Click a box to open that tool in a new tab; you can have several tabs open, of the same or different tools. **+ New tab** (top right) brings you back to the Start page. Tabs are named after their tool ("Visualiser 1", …) and can be renamed by double-clicking.
+The app opens on a **Start** page with one box per tool. Click a box to open that tool in a new tab; you can have several tabs open, of the same or different tools. **+ New tab** (top right) and **File → New tab** list every tool, so a new tab of any kind can be opened from inside another tab. Tabs are named after their tool ("Visualiser 1", …) and can be renamed by double-clicking.
 
 | Tool | Status | What it's for |
 |---|---|---|
@@ -45,12 +45,14 @@ Adding a tool: describe it in `bvrviewer/app/tools.py` (it then appears on the S
 
 The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** lists what's in the tab under **Bones**, **X-ray cameras**, **Joints** and **Scene**. Below it, **Properties** shows the settings of whatever is selected there. The 3D view and timeline are on the right. **Right-click** any level or item in the navigator for its actions.
 
-1. **Open a Visualiser tab** from the Start page (or File → New Visualiser tab, Ctrl+T). Each tab starts empty.
+1. **Open a Visualiser tab** from the Start page (or File → New tab → Visualiser, Ctrl+T; any tool can be opened this way, or from "+ New tab"). Each tab starts empty.
 2. **Add a bone:** right-click **Bones → Add bone…** (or File → Add bone). STL, OBJ, PLY, VTK or TIF; you can select several at once. Each bone is listed by name, which starts as its file name.
-   - Or **load a model** built in the Model Builder: right-click **Bones → Load model…** (or File → Load model, Ctrl+M). This brings in all of the model's bones (from the surface files it was built on; bones already in the tab with the same surface file are reused), each with its coordinate system, and all its joints. Then attach each bone's tracking for the trial.
+   - Or **load a model** built in the Model Builder: right-click **Bones → Load model…** (or File → Load model, Ctrl+M). This brings in all of the model's bones (from the surface files it was built on; bones already in the tab with the same surface file are reused), each with its coordinate system, and all its joints. Then load each bone's tracking for the trial.
    - **TIF partial volumes** ask for the voxel size, which TIFs don't store. Type it in, or read it from the trial's `.cfg`. The surface is built from the edge of the masked volume, which reproduces SlicerAutoscoperM's `AUT_*.stl` meshes. TIF bones can also be shown as a volume rendering (Display as: Volume).
    - **STL surfaces** are assumed to be in Autoscoper space, like SlicerAutoscoperM's `AUT_*.stl`. If a surface is in CT space instead (e.g. SlicerAutoscoperM's `Models/rad.stl`), right-click it and choose **Apply .tfm transform…** with its `*-DICOM2AUT.tfm`.
-3. **Attach tracking:** right-click the bone → **Attach tracking…**. The tracking file then shows under the bone. The format is detected: matrix or x y z yaw pitch roll, row or column order, comma or space, and several bones in one file (you'll be asked which). Untracked frames (`NaN`) show in orange on the timeline. If something looks wrong, right-click → **Tracking format…** to change the units (mm/cm, degrees/radians) or the order.
+3. **Load tracking:** each bone has two rows under it, **Tracking** and **Axes**, greyed out until something is loaded and bold in colour once it is. Right-click **Tracking → Load file…**. You're asked how the file was saved from Autoscoper (matrix or x y z yaw pitch roll, row or column order, mm or cm, degrees or radians, and which bone if the file holds several), pre-filled from what the numbers suggest and checked as you change them. Tick **Use these options for this tab's other tracking files** to skip the question for the rest of the tab's files (you're still asked when a file doesn't fit them). Untracked frames (`NaN`) show in orange on the timeline.
+   - **Different lengths:** Autoscoper files have no timestamps, so rows are matched to trial frames by number. When a file's frames differ from the other bones' (or from the radiographs), the dialog and the tracking's properties say so. **First row is trial frame** places a file that starts later (or earlier) in the trial.
+   - Right-click a loaded row for **Load new file…** or **Refresh current file** (re-reads it with the same options, e.g. after saving over it in Autoscoper or the Model Builder), and **Tracking format and frames…** to change the options.
 4. **Change how it looks:** select the bone and use **Properties**: name, colour, opacity, visible, and surface or volume display. The tick box beside each bone in the navigator shows or hides it, and F2 (or clicking a selected name) renames it.
 5. **Look around:** drag to rotate, Shift-drag to pan, scroll to zoom, right-click a bone in the 3D view to select it. Use the Free 3D / XY / YZ / XZ buttons, and **Flip** to look from the other side.
 6. **Play** with Space, step with ← →. Speed and Loop are on the timeline.
@@ -60,16 +62,19 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 | Select… | Properties | Right-click |
 |---|---|---|
 | **Bones** | count, frames | Add bone, Load model, Show all, Hide all |
-| a **bone** | name, colour, opacity, visible, display; hold this bone still; surface file details | attach/replace/detach tracking, tracking format, add/remove coordinate system, hold still, show/hide, rename, replace surface file, .tfm or voxel size, remove |
-| its **tracking** | file, frames, untracked frames, detected format | attach/replace, format, detach |
-| **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
+| a **bone** | name, colour, opacity, visible, display; hold this bone still; surface file details | load tracking, load coordinate system, hold still, show/hide, rename, replace surface file, .tfm or voxel size, remove |
+| its **Tracking** | file, rows, trial frames it covers, untracked frames, format | load file / load new file, refresh current file, format and frames, hold still, remove |
+| **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, camera views (2D) and their overlay, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
 | a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); which image is frame 1; files | view through it, show/hide, rename, change files, remove |
-| its **coordinate system** | model file and the model's bone, axes and curves on/off, motion relative to, zero at a frame, values at this frame | add/replace, show curves, show/hide axes, zero, export CSV, remove |
+| its **Axes** (coordinate system) | model file and the model's bone, axes and curves on/off, motion relative to, zero at a frame, values at this frame | load file / load new file, refresh current file, show curves, show/hide axes, zero, export CSV, remove |
 | **Joints** | show curves | Add joint, show/hide curves |
 | a **joint** | model file, which bones in the tab it joins, axes and curves on/off, use the reference pose, zero at a frame, values at this frame | show curves, show/hide axes, reference pose, zero, export CSV, rename, change bones, remove |
 | **Scene** | axes, grid, background, motion trail, untracked frames | fit bones in view |
 
 - **Hold this bone still** (bone properties or right-click): view the other bones' motion relative to it.
+- **Camera views** (view bar, View → Show/hide camera views, Ctrl+K, or X-ray cameras properties): each X-ray camera's radiograph in its own 2D panel beside the 3D view, with the tracked bones projected onto it in their colours, as a filled silhouette (like Autoscoper's overlay) or a point cloud. Scroll to zoom, drag to pan, double-click to fit. The **Through X-ray** buttons still look through a camera in the 3D view.
+- Every slider has a box beside it to type the value (press Enter), and the timeline's frame number can be typed too.
+- Curves are labelled **Angle X/Y/Z** and **Translation X/Y/Z** (the coordinate system's axes, coloured like the 3D axes) by default; **Labels** above the curves switches to the anatomical names (Flexion, …). CSV exports follow the same order and add the anatomical name to each column.
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4).
 - **Save tab as session** (Ctrl+S) saves file paths and every setting to a `.json`. **Open saved session** restores it.
 
@@ -77,7 +82,7 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 
 Both come from a **model** built in the **Model Builder** (next section): one `.bvrmodel.json` holds all of a model's bones, each with its coordinate system, and its joints. Build one model with every bone and joint you need; **Load model…** (above) then brings it all in at once. They can also be added piece by piece:
 
-- **Coordinate system on a bone:** right-click the bone → **Add coordinate system…** and pick the model; the model's bone that matches (by surface file) is chosen, or you're asked. It's listed under the bone, next to its tracking. Its axes are drawn on the bone (tick box), and selecting it plots the bone's motion about its own axes (rotation as a Z-X-Y sequence, and the origin's movement), relative to its first tracked frame, a chosen frame, or the lab (tracking) axes.
+- **Coordinate system on a bone:** right-click **Axes** under the bone → **Load file…** and pick the model; the model's bone that matches (by surface file) is chosen, or you're asked. It's listed under the bone, next to its tracking. Its axes are drawn on the bone (tick box), and selecting it plots the bone's motion about its own axes (rotation as a Z-X-Y sequence, and the origin's movement), relative to its first tracked frame, a chosen frame, or the lab (tracking) axes.
 - **Joints:** right-click **Joints → Add joint…** and pick the model. Its joints are matched to the tab's bones (bones already using that model first, then by surface file; you're asked if that's ambiguous, and can change it later with **Change bones…**). Bones without a coordinate system get the model's. A joint gives its angles and translations, anatomical or relative to the model's **reference pose** if it has one (**Use it** in Properties). Joint values need both bones tracked.
 
 The selected coordinate system's or joint's curves are plotted under the 3D view with a cursor at the current frame (click a plot to jump there). **Zero at this frame** also subtracts the values at a frame of this trial. **Export CSV** writes every frame. All of this is saved with the session.
@@ -109,7 +114,7 @@ A model is built in three steps; the navigator is laid out the same way (**1 Bon
 - **Axes from**: an automatic method fitted to the surface (the default; see below), or **landmarks** placed by hand: select a landmark under the bone, then **right-click the surface** (point), or right-click and drag to paint a region (its centre, or a sphere fitted to it). Left-drag still rotates.
 - Anatomical bones use ISB axis names: X anterior, Y superior, Z right on both sides (Wu et al. 2002). "Other bone" uses its principal axes of inertia (axis 1 = long axis), with no anatomical names.
 
-A bone's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, bones already give each bone's motion about its own axes in the Visualiser (right-click a bone → **Add coordinate system…**, or **Load model…**).
+A bone's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, bones already give each bone's motion about its own axes in the Visualiser (right-click **Axes** under a bone → **Load file…**, or **Load model…**).
 
 **2. Joints (optional).** Right-click **Joints → Add joint…**, choose a definition and its proximal and distal bones:
 - **Knee (tibiofemoral): Grood & Suntay**, femur → tibia. ISB doesn't define the knee; this is the convention most BVR knee studies use. Left knees are mirrored, so positive values mean the same motion on both sides: flexion, adduction (varus), internal rotation; lateral, anterior and proximal translation of the tibia.
@@ -183,7 +188,7 @@ STAPLE_REPO=/path/to/msk-STAPLE pytest tests/test_staple.py   # the STAPLE trans
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.
 
-`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
+`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_requests.py` checks the features from `feature_requests/REQUESTS.md` (tab menus, typed slider values, curve labels, the tracking prompt, Tracking/Axes rows, frame offsets, camera views) on the wrist data. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
 
 ## Building the app
 
@@ -202,5 +207,4 @@ The Linux build is about 1.1 GB unzipped, most of it VTK.
 - Calibration: only MayaCam 2.0 so far. MayaCam 1.0 and VTK camera (.json) files are detected and reported as unsupported.
 - `VolumeFlip` values other than 0 0 0 are applied but haven't been tested against real data.
 - Units in .tra files can't be detected; they default to Autoscoper's mm and degrees.
-- One viewport per tab. A split layout (3D plus both X-ray views at once) is in the design but not built yet.
 - The through-X-ray view frames the image approximately (bones and image always line up exactly).

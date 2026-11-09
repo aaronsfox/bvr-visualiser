@@ -23,6 +23,7 @@ class SceneController:
         self._cam_actors: dict[int, dict] = {}      # id(camera) -> {"plane", "source", "beams"}
         self._axes_actors: list = []
         self._detector_depths: dict[int, float] = {}
+        self.on_frame = None             # called with the frame after each update (the 2D camera panels)
         self.p.set_background(BACKGROUNDS["dark"])
         self.p.add_axes(color="#C3C8D2", line_width=2)
 
@@ -263,6 +264,8 @@ class SceneController:
         if self.view_mode.startswith("xray"):
             self._apply_xray_camera(int(self.view_mode.split(":")[1]))
         self.p.render()
+        if self.on_frame is not None:
+            self.on_frame(self.frame)
 
     # ---------------- scene options ----------------
     def apply_settings(self) -> None:

@@ -5,14 +5,14 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QHBoxLayout, QInputDialog, QMainWindow, QMessageBox, QPushButton, QTabBar, QTabWidget, QWidget,
+    QHBoxLayout, QInputDialog, QMainWindow, QMenu, QMessageBox, QPushButton, QTabBar, QTabWidget, QWidget,
 )
 
 from .. import __version__
 from .model_builder import ModelBuilderTab
 from .start_page import StartPage
 from .tab import VisualiserTab
-from .tools import tool
+from .tools import TOOLS, tool
 
 
 def _tab_icon(color: str) -> QIcon:
@@ -51,9 +51,10 @@ class MainWindow(QMainWindow):
         cl.setContentsMargins(0, 4, 8, 4)
         plus = QPushButton("+  New tab")
         plus.setObjectName("Small")
-        plus.setToolTip("Go to the Start page to open a new tool tab")
-        plus.clicked.connect(self.show_start)
+        plus.setToolTip("Open a new tab for any tool")
+        plus.setMenu(self._new_tab_menu(QMenu(plus)))
         cl.addWidget(plus)
+        self.plus = plus
         self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
         self.setCentralWidget(self.tabs)
         self.start = StartPage()
@@ -72,6 +73,20 @@ class MainWindow(QMainWindow):
         menu.addAction(a)
         return a
 
+    def _new_tab_menu(self, menu: QMenu, with_shortcuts: bool = False) -> QMenu:
+        """One entry per tool (unavailable tools shown greyed out), then the Start page."""
+        shortcuts = {"visualiser": "Ctrl+T", "model_builder": "Ctrl+Shift+M"}
+        for t in TOOLS:
+            ok = t.available and t.key in self.TAB_CLASSES
+            a = self._act(menu, t.title if ok else f"{t.title} (coming soon)",
+                          lambda _=False, k=t.key: self.open_tool(k),
+                          shortcuts.get(t.key) if with_shortcuts else None)
+            a.setIcon(_tab_icon(t.color))
+            a.setEnabled(ok)
+        menu.addSeparator()
+        self._act(menu, "Start page", self.show_start)
+        return menu
+
     def _vis(self, method: str, *args):
         """Menu action that needs a Visualiser tab: run it on the current one, or explain."""
         def run():
@@ -81,14 +96,14 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.information(self, "Open a Visualiser tab",
                                         "This works in a Visualiser tab. Open one from the Start page, "
-                                        "or with File → New Visualiser tab.")
+                                        "or with File → New tab → Visualiser.")
         return run
 
     def _menus(self) -> None:
         mb = self.menuBar()
         f = mb.addMenu("&File")
         self._act(f, "Start page", self.show_start, "Ctrl+Shift+T")
-        self._act(f, "New Visualiser tab", lambda: self.open_tool("visualiser"), "Ctrl+T")
+        self._new_tab_menu(f.addMenu("New tab"), with_shortcuts=True)
         f.addSeparator()
         self._act(f, "Add bone…", self._vis("add_models"), "Ctrl+O")
         self._act(f, "Load model…", self._vis("load_full_model"), "Ctrl+M")
@@ -106,11 +121,21 @@ class MainWindow(QMainWindow):
                               ("xz", "XZ plane", "4")]:
             self._act(v, text, self._vis("set_view", key), sc)
         self._act(v, "Fit bones in view", lambda: self._vis_scene_fit(), "F")
+        self._act(v, "Show/hide camera views (2D)", lambda: self._toggle_camera_views(), "Ctrl+K")
         r = mb.addMenu("&Radiographs")
         self._act(r, "Add X-ray camera…", self._vis("add_camera"))
         self._act(r, "Import cameras from .cfg…", self._vis("import_cfg"))
         h = mb.addMenu("&Help")
         self._act(h, "About", self.about)
+
+    def _toggle_camera_views(self) -> None:
+        tab = self.current()
+        if isinstance(tab, VisualiserTab):
+            if not tab.state.cameras:
+                QMessageBox.information(self, "No X-ray cameras", "Add an X-ray camera to this tab first "
+                                        "(Radiographs → Add X-ray camera…).")
+                return
+            tab.set_camera_views(not tab.state.settings.camera_views)
 
     def _vis_scene_fit(self) -> None:
         tab = self.current()

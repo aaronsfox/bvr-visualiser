@@ -9,11 +9,16 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     os.environ.setdefault("QT_API", "pyside6")
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
     import pyvista as pv
 
     pv.global_theme.allow_empty_mesh = True
+    # The 3D views are native child windows. Without this, Qt also makes every sibling widget native
+    # when the first 3D view appears, which on some systems redraws the whole window as if it had
+    # closed and reopened.
+    QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName("BVR Motion Viewer")
     from .main_window import MainWindow

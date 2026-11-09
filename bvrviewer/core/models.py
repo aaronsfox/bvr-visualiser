@@ -164,6 +164,7 @@ class BoneModel:
     tracking_path: Path | None = None
     tracking_volume: int = 0
     tracking_overrides: dict = field(default_factory=dict)
+    tracking_offset: int = 0                  # trial frame (0-based) of the tracking file's first row
     # coordinate system: a segment of a model file from the Model Builder (.bvrmodel.json)
     axes_path: Path | None = None
     axes_segment: str | None = None
@@ -219,6 +220,14 @@ class BoneModel:
             self.mesh = mesh
             self.image_data = None
 
+    def load_tracking(self):
+        """(Re)read the tracking file with this bone's format, volume and frame offset."""
+        from .tracking import load_tracking
+
+        self.tracking = load_tracking(self.tracking_path, self.tracking_volume, self.tracking_overrides,
+                                      self.tracking_offset)
+        return self.tracking
+
     def to_dict(self) -> dict:
         return {
             "name": self.name, "path": str(self.path), "color": self.color, "opacity": self.opacity,
@@ -228,6 +237,7 @@ class BoneModel:
             "threshold": self.threshold,
             "tracking_path": str(self.tracking_path) if self.tracking_path else None,
             "tracking_volume": self.tracking_volume, "tracking_overrides": self.tracking_overrides,
+            "tracking_offset": self.tracking_offset,
             **({"axes": {"path": str(self.axes_path), "segment": self.axes_segment, "visible": self.axes_visible,
                          "reference": self.axes_reference, "zero": self.axes_zero}} if self.has_axes else {}),
         }
@@ -243,6 +253,7 @@ class BoneModel:
             threshold=d.get("threshold"),
             tracking_path=Path(d["tracking_path"]) if d.get("tracking_path") else None,
             tracking_volume=d.get("tracking_volume", 0), tracking_overrides=d.get("tracking_overrides", {}),
+            tracking_offset=int(d.get("tracking_offset", 0)),
             axes_path=Path(d["axes"]["path"]) if d.get("axes") else None,
             axes_segment=d["axes"]["segment"] if d.get("axes") else None,
             axes_visible=d.get("axes", {}).get("visible", True),

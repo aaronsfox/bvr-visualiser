@@ -78,6 +78,10 @@ class SceneSettings:
     speed: float = 1.0
     loop: bool = True
     fps: float = 30.0
+    camera_views: bool = False        # 2D camera panels beside the 3D view
+    overlay: str = "silhouette"       # bones on those panels: "silhouette", "points" or "off"
+    overlay_opacity: float = 0.5
+    curve_labels: str = "axes"        # curve legends: "axes" (Angle X/Y/Z) or "anatomical" (Flexion, ...)
 
 
 @dataclass(eq=False)

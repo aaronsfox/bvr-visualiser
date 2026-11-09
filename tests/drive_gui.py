@@ -286,14 +286,16 @@ for c in tab.state.cameras:
 tab.refresh_all()
 expected = [
     ("models", None, ["Add bone…", "Load model (bones, coordinate systems, joints)…", "Show all", "Hide all"]),
-    ("model", tab.state.models[0], ["Replace tracking…", "Tracking format…", "Detach tracking",
-                                     "Add coordinate system…", "Hold this bone still", "Hide", "Rename", "Use file name as name",
+    ("model", tab.state.models[0], ["Load new tracking file…", "Load coordinate system…", "Hold this bone still",
+                                     "Hide", "Rename", "Use file name as name",
                                      "Replace surface file…", "Voxel size / surface…", "Remove bone"]),
-    ("tracking", tab.state.models[2], ["Attach tracking…"]),
+    ("tracking", tab.state.models[0], ["Load new file…", "Refresh current file", "Tracking format and frames…",
+                                        "Hold this bone still", "Remove tracking"]),
+    ("tracking", tab.state.models[2], ["Load file…"]),
     ("cameras", None, ["Add X-ray camera…", "Import cameras from .cfg…"]),
     ("camera", tab.state.cameras[0], ["View through this camera", "Hide", "Rename",
                                        "Change calibration or images…", "Remove camera"]),
-    ("axes", tab.state.models[0], ["Add coordinate system…"]),
+    ("axes", tab.state.models[0], ["Load file…"]),
     ("joints", None, ["Add joint…", "Hide curves"]),
     ("scene", None, ["Fit bones in view", "Free 3D view"]),
 ]

@@ -816,8 +816,11 @@ class KinematicModel:
         for f in np.flatnonzero(ok):
             ang[f] = np.degrees(decompose(R0.T @ W[f, :3, :3], SEGMENT_SEQUENCE))
             tr[f] = R0.T @ (W[f, :3, 3] - o0)
-        names, short, tn, ts = SEGMENT_NAMES[s.stype.anatomical and s.axes_source != "inertial"]
+        anat = s.stype.anatomical and s.axes_source != "inertial"
+        names, short, tn, ts = SEGMENT_NAMES[anat]
         return {"angles": ang, "translations": tr, "names": names, "short": short, "t_names": tn, "t_short": ts,
+                "axes": tuple(SEGMENT_SEQUENCE) if anat else ("3", "1", "2"),
+                "t_axes": ("X", "Y", "Z") if anat else ("1", "2", "3"),
                 "title": "Bone rotation about its own axes (Z-X-Y)"}
 
     def compare_methods(self, joint: str, prox_pose: np.ndarray, dist_pose: np.ndarray) -> list[dict]:
@@ -974,4 +977,5 @@ def _kinematics(j: "Joint", side: str, A: np.ndarray, B: np.ndarray, prox_poses,
         q = np.linalg.solve(np.column_stack([e1, e2, e3]), d)  # d = q1 e1 + q2 e2 + q3 e3
         tr[f] = q * st
     return {"angles": ang, "translations": tr, "names": conv["angles"], "short": conv["short"],
-            "t_names": conv["translations"], "t_short": conv["short_t"], "title": conv["title"]}
+            "t_names": conv["translations"], "t_short": conv["short_t"], "title": conv["title"],
+            "axes": tuple(seq), "t_axes": tuple(seq)}     # the axis each value is about / along (e2 ~ the middle one)

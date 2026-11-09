@@ -780,7 +780,7 @@ class ModelBuilderTab(QWidget):
         p.combo("Method", [(mm, J.LANDMARK_METHODS[mm]) for mm in d.methods], lm["method"],
                 lambda mm: self._set_method(s, key, mm))
         if lm["method"] != "point":
-            p.slider("Brush size", self.brush, 1, 15, 1, lambda x: f"{x:.0f} mm", self._set_brush)
+            p.slider("Brush size", self.brush, 1, 15, 1, lambda x: f"{x:.0f} mm", self._set_brush, spin=(1, 0, " mm"))
         p.section("Value")
         v = self.model.landmark(s.name, key)
         n = len(lm.get("points") or [])

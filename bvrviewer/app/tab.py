@@ -20,8 +20,9 @@ from ..core.models import PALETTE, BoneModel, ModelError, is_volume_file
 from ..core.session import KinItem, TabState, XrayCamera, load_session, save_session
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError
+from .camera_views import OVERLAYS, CameraViews
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
-from .joint_panel import JointCurves, SegmentMapDialog, guess_segment_map, write_csv, zeroed
+from .joint_panel import JointCurves, SegmentMapDialog, curve_labels, guess_segment_map, write_csv, zeroed
 from .model_builder import add_triad
 from .navigator import AXES, CAMERA, CAMERAS, JOINT, JOINTS, MODEL, MODELS, SCENE, TRACKING, Navigator, PropertySheet
 from .panels import Timeline, h2, label
@@ -82,8 +83,8 @@ class EmptyState(QFrame):
             (1, "Add a bone", "Right-click Bones (or use the button below). STL surfaces or TIF partial volumes; "
                               "the file name becomes the bone's name, which you can change. Or load a model from the "
                               "Model Builder to bring in all its bones, coordinate systems and joints at once."),
-            (2, "Attach its tracking file", "Right-click the bone and choose Attach tracking. The .tra format "
-                                            "is detected automatically."),
+            (2, "Load its tracking file", "Right-click Tracking under the bone and choose Load file…. You're "
+                                          "asked how it was saved from Autoscoper (pre-filled from the file)."),
             (3, "Set how it looks", "Select the bone to change its colour, opacity and display in Properties."),
         ]:
             r = QHBoxLayout()
@@ -120,6 +121,9 @@ class EmptyState(QFrame):
         outer.addWidget(box)
 
 
+PCT = (100, 0, "%")     # slider value box for 0–1 fractions shown as percentages
+
+
 def _fmt_pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
@@ -144,6 +148,7 @@ class VisualiserTab(QWidget):
         self._kin: dict = {}                            # id(item) -> kinematics (before zeroing at a frame)
         self._joint_actors: dict = {}                   # id(item) -> [(actor list, model, acs)]
         self._kin_models: dict = {}                     # model file path -> KinematicModel
+        self.tracking_format: dict | None = None        # tracking options remembered for this tab (not saved)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -202,6 +207,13 @@ class VisualiserTab(QWidget):
         vb.addWidget(self.flip_btn)
         self.xray_btn_box = QHBoxLayout()
         vb.addLayout(self.xray_btn_box)
+        self.cam_views_btn = QPushButton("Camera views")
+        self.cam_views_btn.setObjectName("Small")
+        self.cam_views_btn.setCheckable(True)
+        self.cam_views_btn.setToolTip("Show each X-ray camera's radiograph beside the 3D view, with the bones "
+                                      "drawn over it in their colours")
+        self.cam_views_btn.clicked.connect(lambda on: self.set_camera_views(on))
+        vb.addWidget(self.cam_views_btn)
         cv.addWidget(self.view_bar)
 
         self.stack = QStackedWidget()
@@ -212,13 +224,18 @@ class VisualiserTab(QWidget):
         self.stack.addWidget(self.empty)
         self.plotter = QtInteractor(self.stack)
         self.stack.addWidget(self.plotter.interactor)
-        cv.addWidget(self.stack, 1)
+        self.view_split = QSplitter(Qt.Horizontal)       # 3D view | 2D camera panels
+        self.view_split.setChildrenCollapsible(False)
+        self.view_split.addWidget(self.stack)
+        cv.addWidget(self.view_split, 1)
         self.hint = QWidget()
         self.hint.setObjectName("Panel")
         hb = QHBoxLayout(self.hint)
         hb.setContentsMargins(10, 4, 10, 4)
         self.frame_info = label("", "Mono", wrap=False)
         hb.addWidget(self.frame_info, 1)
+        self.status_msg = label("", "Ok", wrap=False)
+        hb.addWidget(self.status_msg)
         hb.addWidget(label("Drag: rotate · Shift-drag: pan · Scroll: zoom · Right-click: select bone", wrap=False))
         cv.addWidget(self.hint)
         self.curves = JointCurves()
@@ -233,6 +250,12 @@ class VisualiserTab(QWidget):
         root.addWidget(split)
 
         self.scene = SceneController(self.plotter, self.state)
+        self.cam_views = CameraViews(self.scene)
+        self.cam_views.setVisible(False)
+        self.view_split.addWidget(self.cam_views)
+        self.view_split.setStretchFactor(0, 3)
+        self.view_split.setStretchFactor(1, 2)
+        self.scene.on_frame = self.cam_views.update_frame
         self.plotter.enable_mesh_picking(self._picked, use_actor=True, show=False, show_message=False)
 
         self.timer = QTimer(self)
@@ -240,6 +263,8 @@ class VisualiserTab(QWidget):
         self.timeline.play.toggled.connect(self._play)
         self.timeline.frameChanged.connect(self._frame_changed)
         self.curves.frameClicked.connect(lambda f: self.timeline.slider.setValue(f))
+        self.curves.set_style(self.state.settings.curve_labels)
+        self.curves.labelStyleChanged.connect(self._curve_style_changed)
         self.nav.itemSelected.connect(self._nav_selected)
         self.nav.menuRequested.connect(self._show_menu)
         self.nav.visibilityToggled.connect(self._toggle_visible)
@@ -281,6 +306,11 @@ class VisualiserTab(QWidget):
         worker.done.connect(relay.deliver, Qt.QueuedConnection)
         self._threads.append((thread, worker, relay))
         thread.start()
+
+    def _status(self, text: str, seconds: float = 5.0) -> None:
+        """A short message in the bar under the 3D view that clears itself."""
+        self.status_msg.setText(text)
+        QTimer.singleShot(int(seconds * 1000), lambda: self.status_msg.text() == text and self.status_msg.setText(""))
 
     def _error(self, title: str, text: str) -> None:
         QMessageBox.warning(self, title, text)
@@ -335,6 +365,27 @@ class VisualiserTab(QWidget):
             b.setChecked(self.scene.view_mode == f"xray:{i}")
             b.clicked.connect(lambda _=False, k=i: self.set_xray_view(k))
             self.xray_btn_box.addWidget(b)
+        self._apply_camera_views()
+
+    def set_camera_views(self, on: bool) -> None:
+        """Show or hide the 2D camera panels beside the 3D view (the through-camera 3D views stay available)."""
+        self.state.settings.camera_views = bool(on)
+        self._apply_camera_views()
+        if self.sel_kind == CAMERAS:
+            self.show_properties()
+
+    def _apply_camera_views(self) -> None:
+        has = bool(self.state.cameras) and bool(self.state.models)
+        on = has and self.state.settings.camera_views
+        self.cam_views_btn.setVisible(bool(self.state.cameras))
+        self.cam_views_btn.setChecked(on)
+        was = self.cam_views.isVisible()
+        self.cam_views.setVisible(on)
+        if on:
+            if not was:
+                total = max(self.view_split.width(), 600)
+                self.view_split.setSizes([int(total * 0.6), int(total * 0.4)])
+            self.cam_views.update_frame(self.scene.frame)
 
     def _update_frame_info(self) -> None:
         f = self.scene.frame
@@ -425,37 +476,47 @@ class VisualiserTab(QWidget):
             menu.addSeparator()
             add("Show all", lambda: self._show_all(True), enabled=bool(self.state.models))
             add("Hide all", lambda: self._show_all(False), enabled=bool(self.state.models))
-        elif kind in (MODEL, TRACKING):
+        elif kind == TRACKING:
             m: BoneModel = obj
-            add("Replace tracking…" if m.tracking else "Attach tracking…", lambda: self.attach_tracking(m))
-            if m.tracking:
-                add("Tracking format…", lambda: self.edit_format(m))
-                add("Detach tracking", lambda: self.detach_tracking(m))
-            if kind == MODEL:
-                add("Replace coordinate system…" if m.has_axes else "Add coordinate system…",
-                    lambda: self.add_axes(m))
-                if m.has_axes:
-                    add("Remove coordinate system", lambda: self.remove_axes(m))
+            if m.tracking_path is None:
+                add("Load file…", lambda: self.attach_tracking(m))
+            else:
+                add("Load new file…", lambda: self.attach_tracking(m))
+                add("Refresh current file", lambda: self.refresh_tracking(m))
                 menu.addSeparator()
+                add("Tracking format and frames…", lambda: self.edit_format(m), enabled=m.tracking is not None)
                 add("Hold this bone still", lambda: self.hold_still(m, self.state.settings.hold_still != m.name),
                     enabled=m.tracking is not None, checked=self.state.settings.hold_still == m.name)
-                add("Hide" if m.visible else "Show", lambda: self._toggle_visible(m, not m.visible))
-                add("Rename", lambda: self.nav.start_rename(MODEL, m))
-                add("Use file name as name", lambda: self._rename(m, m.path.stem))
                 menu.addSeparator()
-                add("Replace surface file…", lambda: self.replace_model(m))
-                if m.is_volume:
-                    add("Voxel size / surface…", lambda: self.edit_voxel(m))
-                elif m.tfm_path:
-                    add("Remove .tfm transform", lambda: self.clear_tfm(m))
-                else:
-                    add("Apply .tfm transform…", lambda: self.load_tfm(m))
-                menu.addSeparator()
-                add("Remove bone", lambda: self.remove_model(m))
+                add("Remove tracking", lambda: self.detach_tracking(m))
+        elif kind == MODEL:
+            m: BoneModel = obj
+            add("Load new tracking file…" if m.tracking_path else "Load tracking file…", lambda: self.attach_tracking(m))
+            add("Load new coordinate system…" if m.has_axes else "Load coordinate system…", lambda: self.add_axes(m))
+            menu.addSeparator()
+            add("Hold this bone still", lambda: self.hold_still(m, self.state.settings.hold_still != m.name),
+                enabled=m.tracking is not None, checked=self.state.settings.hold_still == m.name)
+            add("Hide" if m.visible else "Show", lambda: self._toggle_visible(m, not m.visible))
+            add("Rename", lambda: self.nav.start_rename(MODEL, m))
+            add("Use file name as name", lambda: self._rename(m, m.path.stem))
+            menu.addSeparator()
+            add("Replace surface file…", lambda: self.replace_model(m))
+            if m.is_volume:
+                add("Voxel size / surface…", lambda: self.edit_voxel(m))
+            elif m.tfm_path:
+                add("Remove .tfm transform", lambda: self.clear_tfm(m))
+            else:
+                add("Apply .tfm transform…", lambda: self.load_tfm(m))
+            menu.addSeparator()
+            add("Remove bone", lambda: self.remove_model(m))
         elif kind == AXES:
             m: BoneModel = obj
-            add("Replace coordinate system…" if m.has_axes else "Add coordinate system…", lambda: self.add_axes(m))
-            if m.has_axes:
+            if not m.has_axes:
+                add("Load file…", lambda: self.add_axes(m))
+            else:
+                add("Load new file…", lambda: self.add_axes(m))
+                add("Refresh current file", lambda: self.refresh_axes(m))
+                menu.addSeparator()
                 add("Show curves for this bone", lambda: self._set_curve_joint(m))
                 add("Hide axes" if m.axes_visible else "Show axes", lambda: self._toggle_axes(m, not m.axes_visible))
                 add("Zero at the current frame", lambda: self._set_reference(m, self.scene.frame))
@@ -551,7 +612,8 @@ class VisualiserTab(QWidget):
         p.section("Appearance")
         p.line("Name", m.name, lambda v: self._rename(m, v))
         p.color("Colour", m.color, lambda c: self._set_model(m, "color", c))
-        p.slider("Opacity", m.opacity, 0, 100, 100, _fmt_pct, lambda v: self._set_model(m, "opacity", v, nav=False))
+        p.slider("Opacity", m.opacity, 0, 100, 100, _fmt_pct, lambda v: self._set_model(m, "opacity", v, nav=False),
+                 spin=PCT)
         p.check("Visible", m.visible, lambda on: self._toggle_visible(m, on))
         p.combo("Display as", [("surface", "Surface"), ("volume", "Volume", m.image_data is not None),
                                ("both", "Surface and volume", m.image_data is not None)],
@@ -559,12 +621,13 @@ class VisualiserTab(QWidget):
                 tip=None if m.image_data is not None else "Volume display needs a TIF surface.")
         p.section("Motion")
         if m.tracking:
-            p.value("Tracking", f"{m.tracking.path.name} · {m.tracking.n_frames} frames", tip=str(m.tracking.path))
+            p.value("Tracking", f"{m.tracking.path.name} · {m.tracking.n_rows} rows", tip=str(m.tracking.path))
         else:
             p.value("Tracking", "None. Shown untracked, in its own model space.", kind="Warn")
         p.check("Hold still", self.state.settings.hold_still == m.name, lambda on: self.hold_still(m, on),
                 caption="Others move relative to it", enabled=m.tracking is not None)
-        p.buttons([("Replace tracking…" if m.tracking else "Attach tracking…", lambda: self.attach_tracking(m))])
+        p.buttons([("Load new file…" if m.tracking_path else "Load tracking file…", lambda: self.attach_tracking(m))]
+                  + ([("Refresh current file", lambda: self.refresh_tracking(m))] if m.tracking_path else []))
         p.section("Surface file")
         p.value("File", m.path.name, tip=str(m.path))
         if m.is_volume:
@@ -585,12 +648,22 @@ class VisualiserTab(QWidget):
         t = m.tracking
         p.clear(f"Tracking · {m.name}")
         if t is None:
-            p.note("No tracking file attached, so this bone stays untracked, in its own model space.", "Warn")
-            p.buttons([("Attach tracking…", lambda: self.attach_tracking(m))])
+            p.note("No tracking file loaded, so this bone stays untracked, in its own model space.", "Warn")
+            p.buttons([("Load file…", lambda: self.attach_tracking(m))])
             return
         p.section("Tracking file")
         p.value("File", t.path.name, tip=str(t.path))
-        p.value("Frames", str(t.n_frames))
+        p.value("Rows in file", str(t.n_rows))
+        first, last = t.offset + 1, t.offset + t.n_rows
+        p.value("Trial frames", f"{max(first, 1)}–{last}" + (f" (first {1 - first} rows dropped)" if first < 1 else ""),
+                tip="Rows are matched to trial frames by number (Autoscoper files have no timestamps). Change "
+                    "where the file starts with Format and frames….")
+        spans = {(o.name, o.tracking.offset, o.tracking.n_rows) for o in self.state.models
+                 if o is not m and o.tracking is not None}
+        diff = [f"{n} {a + 1}–{a + r}" for n, a, r in sorted(spans) if (a, r) != (t.offset, t.n_rows)]
+        if diff:
+            p.note("Other bones cover different frames: " + ", ".join(diff) + ". Check that their first rows are "
+                   "the same moment as this file's.", "Warn")
         gaps = t.gaps()
         if gaps:
             shown = ", ".join(f"{a + 1}–{b + 1}" if b > a else f"{a + 1}" for a, b in gaps[:6])
@@ -598,13 +671,14 @@ class VisualiserTab(QWidget):
         else:
             p.value("Untracked", "None")
         p.section("Format")
-        p.value("Detected", t.fmt.describe())
+        p.value("Read as", t.fmt.describe())
         if t.fmt.n_volumes > 1:
             p.value("Bone in file", f"Volume {t.volume_index + 1} of {t.fmt.n_volumes}")
         for w in t.warnings:
             p.note(w, "Warn")
-        p.buttons([("Format…", lambda: self.edit_format(m)), ("Replace…", lambda: self.attach_tracking(m)),
-                   ("Detach", lambda: self.detach_tracking(m))])
+        p.buttons([("Format and frames…", lambda: self.edit_format(m)),
+                   ("Refresh current file", lambda: self.refresh_tracking(m))])
+        p.buttons([("Load new file…", lambda: self.attach_tracking(m)), ("Remove", lambda: self.detach_tracking(m))])
 
     def _props_camera(self, cam: XrayCamera) -> None:
         p = self.props
@@ -648,15 +722,25 @@ class VisualiserTab(QWidget):
             return
         p.note("These settings apply to every camera. Select a camera for its own options.")
         p.section("Radiographs in the 3D scene")
-        p.slider("Image opacity", s.xray_opacity, 0, 100, 100, _fmt_pct, lambda v: self._set("xray_opacity", v))
+        p.slider("Image opacity", s.xray_opacity, 0, 100, 100, _fmt_pct, lambda v: self._set("xray_opacity", v),
+                 spin=PCT)
         p.slider("Distance behind", s.xray_distance, 0, 800, 1, lambda x: f"{x:.0f} mm",
-                 lambda v: self._set("xray_distance", v), on_release=True)
+                 lambda v: self._set("xray_distance", v), on_release=True, spin=(1, 0, " mm"))
         p.section("Through-X-ray views")
-        p.slider("Bone opacity", s.xray_bone_opacity, 0, 100, 100, _fmt_pct, lambda v: self._set("xray_bone_opacity", v))
+        p.slider("Bone opacity", s.xray_bone_opacity, 0, 100, 100, _fmt_pct, lambda v: self._set("xray_bone_opacity", v),
+                 spin=PCT)
         p.check("Wireframe bones", s.xray_outline, lambda on: self._set("xray_outline", on), caption="Draw as wireframe")
+        p.section("Camera views (2D)")
+        p.check("Show", s.camera_views, lambda on: self.set_camera_views(on), caption="Beside the 3D view",
+                tip="Each camera's radiograph in its own 2D panel, with the bones projected onto it")
+        p.combo("Bones drawn as", OVERLAYS, s.overlay, lambda v: self._set("overlay", v))
+        p.slider("Overlay opacity", s.overlay_opacity, 5, 100, 100, _fmt_pct, lambda v: self._set("overlay_opacity", v),
+                 spin=PCT)
         p.section("Image")
-        p.slider("Brightness", s.brightness, -100, 100, 100, lambda x: f"{x:+.2f}", lambda v: self._set("brightness", v))
-        p.slider("Contrast", s.contrast, 20, 300, 100, lambda x: f"{x:.1f}×", lambda v: self._set("contrast", v))
+        p.slider("Brightness", s.brightness, -100, 100, 100, lambda x: f"{x:+.2f}", lambda v: self._set("brightness", v),
+                 spin=(1, 2, ""))
+        p.slider("Contrast", s.contrast, 20, 300, 100, lambda x: f"{x:.1f}×", lambda v: self._set("contrast", v),
+                 spin=(1, 1, "×"))
         p.check("Invert", s.invert, lambda on: self._set("invert", on))
         p.buttons([("Add X-ray camera…", self.add_camera), ("Import from .cfg…", self.import_cfg)])
 
@@ -732,7 +816,7 @@ class VisualiserTab(QWidget):
                 try:
                     m.build()
                     if m.tracking_path:
-                        m.tracking = load_tracking(m.tracking_path, m.tracking_volume, m.tracking_overrides)
+                        m.load_tracking()
                     built.append(m)
                 except (ModelError, TrackingError, TransformFileError, OSError, ValueError) as e:
                     errors.append(f"{m.path.name}: {e}")
@@ -803,7 +887,7 @@ class VisualiserTab(QWidget):
             if new.tracking_path:
                 new.tracking = old.tracking if old.tracking_path == new.tracking_path and \
                     old.tracking_overrides == new.tracking_overrides and old.tracking_volume == new.tracking_volume \
-                    else load_tracking(new.tracking_path, new.tracking_volume, new.tracking_overrides)
+                    and old.tracking_offset == new.tracking_offset else new.load_tracking()
             return new
 
         def done(res, err):
@@ -860,31 +944,82 @@ class VisualiserTab(QWidget):
             self.show_properties()
 
     # ---------------------------------------------------------------- tracking
-    def attach_tracking(self, m: BoneModel) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, f"Tracking file for {m.name}", str(m.path.parent),
-                                              "Autoscoper tracking (*.tra *.csv *.txt);;All files (*)")
-        if not path:
-            return
+    def attach_tracking(self, m: BoneModel, path: str | None = None) -> None:
+        """Load a tracking file for a bone (a new one, or replacing the one it has)."""
+        if path is None:
+            start = m.tracking_path.parent if m.tracking_path else m.path.parent
+            path, _ = QFileDialog.getOpenFileName(self, f"Tracking file for {m.name}", str(start),
+                                                  "Autoscoper tracking (*.tra *.csv *.txt);;All files (*)")
+            if not path:
+                return
         try:
-            t = load_tracking(path)
-            vol = 0
-            if t.fmt.n_volumes > 1:
-                items = [f"Volume {i + 1}" for i in range(t.fmt.n_volumes)]
-                choice, ok = QInputDialog.getItem(self, "Which bone?",
-                                                  f"{Path(path).name} holds {t.fmt.n_volumes} bones side by side.\n"
-                                                  f"Which one is {m.name}?", items, 0, False)
-                if not ok:
-                    return
-                vol = items.index(choice)
-                t = load_tracking(path, vol)
+            detected = load_tracking(path)
         except (TrackingError, OSError) as e:
             self._error("Couldn't read the tracking file", str(e))
             return
-        m.tracking_path, m.tracking_volume, m.tracking_overrides, m.tracking = Path(path), vol, {}, t
+        overrides, vol, offset = self._remembered_format(m, detected)
+        if overrides is None:
+            dlg = self._format_dialog(m, path, detected, detected.fmt, 0, 0, ask_remember=True)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            (overrides, vol), offset = dlg.values(), dlg.offset
+            if dlg.remember.isChecked():
+                self.tracking_format = dict(overrides)
+        try:
+            t = load_tracking(path, vol, overrides, offset)
+        except (TrackingError, OSError) as e:
+            self._error("Couldn't read the tracking file", str(e))
+            return
+        m.tracking_path, m.tracking_volume, m.tracking_overrides, m.tracking_offset = Path(path), vol, overrides, offset
+        m.tracking = t
         self._tracking_changed(m)
         if t.warnings:
             self._error("Check the tracking format", "\n".join(t.warnings) +
-                        "\n\nRight-click the bone and choose Tracking format… to correct it.")
+                        "\n\nRight-click Tracking under the bone and choose Tracking format and frames… to correct it.")
+
+    def _other_tracking(self, m: BoneModel) -> list:
+        return [(o.name, o.tracking.offset, o.tracking.n_rows) for o in self.state.models
+                if o is not m and o.tracking is not None]
+
+    def _radiograph_frames(self) -> int | None:
+        for cam in self.state.cameras:
+            if cam.images is not None:
+                return len(cam.images) - cam.first_image
+        return None
+
+    def _format_dialog(self, m: BoneModel, path, detected, fmt, vol: int, offset: int, ask_remember=False):
+        return FormatDialog(self, fmt, vol, path=path, detected=detected.fmt, offset=offset,
+                            n_rows=detected.n_rows, others=self._other_tracking(m),
+                            n_images=self._radiograph_frames(), bone=m.name, ask_remember=ask_remember)
+
+    def _remembered_format(self, m: BoneModel, detected):
+        """The tab's remembered options, when they fit this file without asking; else (None, 0, 0)."""
+        rem = self.tracking_format
+        if not rem or detected.fmt.n_volumes != 1 or rem.get("kind") != detected.fmt.kind:
+            return None, 0, 0
+        spans = {(off, rows) for _n, off, rows in self._other_tracking(m)}
+        if spans and spans != {(0, detected.n_rows)}:
+            return None, 0, 0           # different lengths: ask, so the frames can be lined up
+        try:
+            if load_tracking(detected.path, 0, rem).warnings:
+                return None, 0, 0
+        except TrackingError:
+            return None, 0, 0
+        return dict(rem), 0, 0
+
+    def refresh_tracking(self, m: BoneModel) -> None:
+        """Re-read the bone's tracking file (e.g. after saving over it in Autoscoper), keeping its options."""
+        if m.tracking_path is None:
+            return
+        try:
+            t = m.load_tracking()
+        except (TrackingError, OSError) as e:
+            self._error("Couldn't refresh the tracking", f"{m.tracking_path}\n\n{e}")
+            return
+        self._tracking_changed(m)
+        self._status(f"Refreshed {m.tracking_path.name}: {t.n_rows} rows")
+        if t.warnings:
+            self._error("Check the tracking format", "\n".join(t.warnings))
 
     def _tracking_changed(self, m: BoneModel) -> None:
         if self.state.cameras:
@@ -906,16 +1041,21 @@ class VisualiserTab(QWidget):
     def edit_format(self, m: BoneModel) -> None:
         if not m.tracking:
             return
-        dlg = FormatDialog(self, m.tracking.fmt, m.tracking_volume)
+        try:
+            detected = load_tracking(m.tracking_path)
+        except (TrackingError, OSError) as e:
+            self._error("Couldn't read the tracking file", str(e))
+            return
+        dlg = self._format_dialog(m, m.tracking_path, detected, m.tracking.fmt, m.tracking_volume, m.tracking_offset)
         if dlg.exec() != QDialog.Accepted:
             return
-        overrides, vol = dlg.values()
+        (overrides, vol), offset = dlg.values(), dlg.offset
         try:
-            t = load_tracking(m.tracking_path, vol, overrides)
+            t = load_tracking(m.tracking_path, vol, overrides, offset)
         except TrackingError as e:
             self._error("That format doesn't fit this file", str(e))
             return
-        m.tracking, m.tracking_volume, m.tracking_overrides = t, vol, overrides
+        m.tracking, m.tracking_volume, m.tracking_overrides, m.tracking_offset = t, vol, overrides, offset
         self._tracking_changed(m)
 
     # ---------------------------------------------------------------- playback
@@ -1077,6 +1217,7 @@ class VisualiserTab(QWidget):
         for k, v in st.settings.__dict__.items():
             setattr(self.state.settings, k, v)
         self._sync_timeline_settings()
+        self.curves.set_style(self.state.settings.curve_labels)
         cams = st.cameras
 
         def add_cams():
@@ -1135,7 +1276,7 @@ class VisualiserTab(QWidget):
         return self._kin_models[key]
 
     def add_axes(self, m: BoneModel) -> None:
-        """Right-click a bone → Add coordinate system: one of the bones of a Model Builder model."""
+        """Right-click Axes under a bone → Load file…: one of the bones of a Model Builder model."""
         start = str(m.axes_path.parent) if m.axes_path else str(m.path.parent)
         path, _ = QFileDialog.getOpenFileName(self, f"Coordinate system for {m.name}", start, self.MODEL_FILE_FILTER)
         if path:
@@ -1179,6 +1320,31 @@ class VisualiserTab(QWidget):
         self.sel_kind, self.sel_obj = AXES, m
         self.refresh_all()
         return True
+
+    def refresh_axes(self, m: BoneModel) -> None:
+        """Re-read the bone's model file (e.g. after re-saving it in the Model Builder). Every bone and joint
+        in this tab that uses the same file picks up the new version."""
+        if not m.has_axes:
+            return
+        key = str(Path(m.axes_path).resolve())
+        self._kin_models.pop(key, None)
+        try:
+            km = self._kin_model(m.axes_path)
+            km.segment(m.axes_segment)
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            self._error("Couldn't refresh the coordinate system", f"{m.axes_path}\n\n{e}")
+            return
+        n = 0
+        for o in self.state.models:
+            if o.has_axes and str(Path(o.axes_path).resolve()) == key:
+                o.axes_model = km
+                n += 1
+        for jl in self.state.joints:
+            if str(Path(jl.model_path).resolve()) == key:
+                jl.model = km
+                n += 1
+        self.refresh_all()
+        self._status(f"Refreshed {Path(m.axes_path).name}" + (f" ({n} items use it)" if n > 1 else ""))
 
     def load_full_model(self, path=None) -> None:
         """Load a model: all its bones (reusing bones already here with the same surface file), each with its
@@ -1513,7 +1679,7 @@ class VisualiserTab(QWidget):
                                                   "CSV (*.csv)")
             if not path:
                 return
-        write_csv(path, k, self.state.settings.fps)
+        write_csv(path, k, self.state.settings.fps, self.state.settings.curve_labels)
 
     def _frame_values(self, p, k, missing: str = "Its bones need to be in this tab, with axes.") -> None:
         p.section(f"Frame {self.scene.frame + 1}")
@@ -1524,10 +1690,18 @@ class VisualiserTab(QWidget):
         if np.isnan(k["angles"][f]).any():
             p.value("Values", "untracked")
             return
-        for n, v in zip(k["short"], k["angles"][f]):
-            p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f}°")
-        for n, v in zip(k["t_short"], k["translations"][f]):
-            p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f} mm")
+        la, lt = curve_labels(k, self.state.settings.curve_labels)
+        for c, n, full, _col in la:
+            v = k["angles"][f][c]
+            p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f}°", tip=full)
+        for c, n, full, _col in lt:
+            v = k["translations"][f][c]
+            p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f} mm", tip=full)
+
+    def _curve_style_changed(self, style: str) -> None:
+        self.state.settings.curve_labels = style
+        if self.sel_kind in (JOINT, AXES):
+            self.show_properties()
 
     def _props_axes(self, m: BoneModel) -> None:
         p = self.props
@@ -1536,7 +1710,7 @@ class VisualiserTab(QWidget):
             p.note("No coordinate system yet. Add one from a model saved in the Model Builder: pick the file, and "
                    "the model's bone that matches this one is chosen (or you're asked). Its axes then show on the "
                    "bone, its motion about its own axes is plotted, and joints can use it.")
-            p.buttons([("Add coordinate system…", lambda: self.add_axes(m))])
+            p.buttons([("Load file…", lambda: self.add_axes(m))])
             return
         seg = m.axes_model.segment(m.axes_segment) if m.acs is not None else None
         p.value("Model", Path(m.axes_path).name, tip=str(m.axes_path))
@@ -1550,7 +1724,8 @@ class VisualiserTab(QWidget):
                 same = Path(seg.surface.path).name == Path(m.path).name
                 p.value("Defined on", Path(seg.surface.path).name, kind="Value" if same else "Warn",
                         tip=None if same else "Not this model's file: the axes only fit the same surface.")
-        p.buttons([("Replace…", lambda: self.add_axes(m)), ("Remove", lambda: self.remove_axes(m))])
+        p.buttons([("Load new file…", lambda: self.add_axes(m)), ("Refresh current file", lambda: self.refresh_axes(m))])
+        p.buttons([("Remove", lambda: self.remove_axes(m))])
         p.section("Display")
         p.check("Axes", m.axes_visible, lambda on: self._toggle_axes(m, on), "Show the axes on the bone")
         p.check("Curves", self.show_curves and self.curve_joint is m,
@@ -1614,7 +1789,7 @@ class VisualiserTab(QWidget):
         p.buttons([("Zero at this frame", lambda: self._set_reference(jl, self.scene.frame)),
                    ("Clear", lambda: self._set_reference(jl, None))])
         self._frame_values(p, self.joint_values(jl), "Joint values need both bones in this tab, each with its "
-                                                     "tracking attached (right-click a bone → Attach tracking).")
+                                                     "tracking loaded (right-click Tracking under a bone → Load file…).")
         p.buttons([("Export CSV…", lambda: self.export_joint_csv(jl)), ("Remove", lambda: self.remove_joint(jl))])
 
     def screenshot(self) -> None:

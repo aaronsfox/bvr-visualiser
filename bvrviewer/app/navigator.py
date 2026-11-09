@@ -11,7 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
     QPushButton,
     QScrollArea, QSlider, QSpinBox, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -195,30 +195,32 @@ class Navigator(QTreeWidget):
             m = obj
             if m.tracking is not None:
                 t = m.tracking
-                gaps = f" · {t.n_untracked} untracked" if t.n_untracked else ""
-                it.setText(0, f"{t.path.name} · {t.n_frames} frames{gaps}")
-                it.setForeground(0, QBrush(QColor("#8FD3A9")))
-                it.setToolTip(0, str(t.path))
+                gaps = f", {t.n_untracked} untracked" if t.n_untracked else ""
+                start = f", from frame {t.offset + 1}" if t.offset else ""
+                self._active(it, f"Tracking · {t.path.name} ({t.n_rows} rows{start}{gaps})", "#8FD3A9")
+                it.setToolTip(0, f"{t.path}\nRight-click to load a new file or refresh this one.")
+            elif m.tracking_path is not None:
+                self._active(it, f"Tracking · {Path(m.tracking_path).name} (couldn't be read)", "#F2C48D")
+                it.setToolTip(0, f"{m.tracking_path}\nRight-click to load a new file or try refreshing.")
             else:
-                it.setText(0, "No tracking (right-click to attach)")
-                it.setForeground(0, QBrush(QColor("#F2C48D")))
-                it.setToolTip(0, "This bone stays untracked (in its own model space) until a .tra file is attached.")
+                self._inactive(it, "Tracking")
+                it.setToolTip(0, "No tracking file yet: right-click → Load file…. Until then the bone stays "
+                                 "untracked, in its own model space.")
         elif kind == AXES:
             m = obj
             if m.has_axes:
                 ok = m.acs is not None
-                it.setText(0, f"Axes: {m.axes_segment} · {Path(m.axes_path).name}" + ("" if ok else " (not found)"))
+                self._active(it, f"Axes · {m.axes_segment} ({Path(m.axes_path).name})" + ("" if ok else " not found"),
+                             "#5CC8A8" if ok else "#F2C48D")
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(0, Qt.Checked if m.axes_visible else Qt.Unchecked)
-                it.setForeground(0, QBrush(QColor("#5CC8A8" if ok else "#F2C48D")))
                 it.setToolTip(0, f"Coordinate system from {m.axes_path}\nTick to show the axes. Select for this "
-                                 "bone's motion about its own axes.")
+                                 "bone's motion about its own axes. Right-click to load a new file or refresh.")
             else:
-                it.setText(0, "No coordinate system (right-click to add)")
+                self._inactive(it, "Axes")
                 it.setData(0, Qt.CheckStateRole, None)
-                it.setForeground(0, QBrush(QColor("#7A8291")))
-                it.setToolTip(0, "Optional: axes from a model give this bone's motion about its own "
-                                 "axes, and are used by joints.")
+                it.setToolTip(0, "No coordinate system yet: right-click → Load file… and pick a model from the "
+                                 "Model Builder. It gives this bone's motion about its own axes, and joints use it.")
         elif kind == CAMERA:
             cam: XrayCamera = obj
             it.setText(0, cam.name)
@@ -237,6 +239,24 @@ class Navigator(QTreeWidget):
             it.setToolTip(0, f"{what} from {jl.model_path.name}\n{bones}\nTick to show the axes.")
             it.setForeground(0, QBrush(QColor("#E6E8EC" if jl.visible else "#7A8291")))
         self._building = was
+
+    @staticmethod
+    def _active(it: QTreeWidgetItem, text: str, colour: str) -> None:
+        """A sub-item with something loaded: bold, in its colour."""
+        it.setText(0, text)
+        f = QFont()
+        f.setBold(True)
+        it.setFont(0, f)
+        it.setForeground(0, QBrush(QColor(colour)))
+
+    @staticmethod
+    def _inactive(it: QTreeWidgetItem, text: str) -> None:
+        """A sub-item with nothing loaded yet: greyed out (still right-clickable)."""
+        it.setText(0, text)
+        f = QFont()
+        f.setItalic(True)
+        it.setFont(0, f)
+        it.setForeground(0, QBrush(QColor("#5E6573")))
 
     def refresh_obj(self, kind: str, obj) -> None:
         self.refresh_item(self.item_for(kind, obj))
@@ -490,17 +510,44 @@ class PropertySheet(QWidget):
         return s
 
     def slider(self, text: str, value: float, lo: int, hi: int, scale: float, fmt, on_change,
-               on_release: bool = False) -> QSlider:
-        """A slider for value*scale in [lo, hi]. fmt(x) formats the number shown beside it."""
+               on_release: bool = False, spin: tuple | None = None) -> QSlider:
+        """A slider for value*scale in [lo, hi], with a box beside it to type the number.
+
+        spin = (display_scale, decimals, suffix): the box shows value*display_scale. Without it the
+        number is only shown, formatted by fmt(x).
+        """
         box = QWidget()
         h = QHBoxLayout(box)
         h.setContentsMargins(0, 0, 0, 0)
         sl = QSlider(Qt.Horizontal)
         sl.setRange(lo, hi)
         sl.setValue(int(round(value * scale)))
-        val = label(fmt(sl.value() / scale), "Mono", wrap=False)
-        val.setFixedWidth(58)
-        sl.valueChanged.connect(lambda x: val.setText(fmt(x / scale)))
+        if spin is None:
+            val = label(fmt(sl.value() / scale), "Mono", wrap=False)
+            val.setFixedWidth(58)
+            sl.valueChanged.connect(lambda x: val.setText(fmt(x / scale)))
+        else:
+            disp, decimals, suffix = spin
+            val = QDoubleSpinBox()
+            val.setObjectName("SliderValue")
+            val.setKeyboardTracking(False)            # apply on Enter / leaving the box, not per keystroke
+            val.setDecimals(decimals)
+            val.setRange(lo / scale * disp, hi / scale * disp)
+            val.setSingleStep(disp / scale)
+            if suffix:
+                val.setSuffix(suffix)
+            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            val.setFixedWidth(70)
+            val.setToolTip("Type a value and press Enter")
+            val.setValue(sl.value() / scale * disp)
+
+            def from_slider(x):
+                val.blockSignals(True)
+                val.setValue(x / scale * disp)
+                val.blockSignals(False)
+
+            sl.valueChanged.connect(from_slider)
+            val.valueChanged.connect(lambda v: sl.setValue(int(round(v / disp * scale))))
         if on_release:
             sl.sliderReleased.connect(lambda: on_change(sl.value() / scale))
             sl.valueChanged.connect(lambda x: None if sl.isSliderDown() else on_change(x / scale))
@@ -509,4 +556,5 @@ class PropertySheet(QWidget):
         h.addWidget(sl, 1)
         h.addWidget(val)
         self.row(text, box)
+        sl.value_box = val
         return sl

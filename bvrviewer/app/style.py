@@ -113,6 +113,11 @@ QPushButton#Danger {{ background: transparent; border: 1px solid #5A3434; color:
 QPushButton#Dashed {{ background: transparent; border: 1px dashed #4A5160; color: #C3C8D2; padding: 8px; }}
 QPushButton#Swatch {{ border: 1px solid #3A3F4B; border-radius: 6px; padding: 0; }}
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background: #121419; border: 1px solid #343946; border-radius: 6px; padding: 4px 6px; }}
+QDoubleSpinBox#SliderValue, QSpinBox#FrameBox {{ padding-right: 6px; }}
+QDoubleSpinBox#SliderValue::up-button, QDoubleSpinBox#SliderValue::down-button,
+QSpinBox#FrameBox::up-button, QSpinBox#FrameBox::down-button {{ width: 0px; border: none; }}
+QDoubleSpinBox#SliderValue::up-arrow, QDoubleSpinBox#SliderValue::down-arrow,
+QSpinBox#FrameBox::up-arrow, QSpinBox#FrameBox::down-arrow {{ image: none; width: 0px; height: 0px; }}
 QLineEdit#NameEdit {{ background: transparent; border: 1px solid transparent; font-size: 14px; font-weight: 500; }}
 QLineEdit#NameEdit:focus {{ background: #121419; border: 1px solid #3D5A80; }}
 QComboBox QAbstractItemView {{ background: #1C1F26; selection-background-color: #2A3A52; }}

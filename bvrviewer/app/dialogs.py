@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..core.calibration import CalibrationError, load_calibration
@@ -105,14 +105,33 @@ class VoxelDialog(QDialog):
 
 
 class FormatDialog(QDialog):
-    """Override what was detected in a .tra file."""
+    """How a tracking file was saved from Autoscoper, which bone in it, and where it starts in the trial.
 
-    def __init__(self, parent, fmt: TrackingFormat, volume_index: int):
+    Autoscoper's tracking files have no units, header or timestamps, so these are asked for each time a
+    file is loaded (pre-filled with what the numbers suggest) instead of being guessed silently.
+    `others` lists the tab's other tracked bones as (name, first frame 0-based, rows) to line this one up with.
+    """
+
+    def __init__(self, parent, fmt: TrackingFormat, volume_index: int, path=None, detected: TrackingFormat | None = None,
+                 offset: int = 0, n_rows: int | None = None, others=(), n_images: int | None = None,
+                 bone: str = "", ask_remember: bool = False):
         super().__init__(parent)
-        self.setWindowTitle("Tracking file format")
+        self.setWindowTitle("Tracking file" + (f": {bone}" if bone else ""))
+        self.setMinimumWidth(500)
+        self.path = Path(path) if path else None
+        self.n_rows = n_rows
+        self.others = list(others)
+        self.n_images = n_images
         v = QVBoxLayout(self)
-        v.addWidget(label("These were detected from the file. Change them if the bone moves oddly "
-                          "(units can't be detected and default to Autoscoper's mm and degrees)."))
+        head = f"<b>{self.path.name}</b>" if self.path else "Tracking file"
+        if n_rows is not None:
+            head += f" · {n_rows} rows"
+        v.addWidget(label(head, wrap=False))
+        v.addWidget(label("Choose the options it was saved with in Autoscoper (Save Tracking). They are filled in "
+                          "from what the numbers suggest, but units and timing can't be read from the file.",
+                          "Muted"))
+        if detected is not None:
+            v.addWidget(label(f"Detected: {detected.describe()}", "Muted"))
         form = QFormLayout()
         self.kind = self._combo([("matrix", "4×4 matrix"), ("xyzypr", "x y z yaw pitch roll")], fmt.kind)
         self.order = self._combo([("row", "Row order"), ("column", "Column order")], fmt.order)
@@ -121,19 +140,41 @@ class FormatDialog(QDialog):
         self.volume = QComboBox()
         for i in range(fmt.n_volumes):
             self.volume.addItem(f"Volume {i + 1}", i)
-        self.volume.setCurrentIndex(volume_index)
+        self.volume.setCurrentIndex(min(volume_index, max(fmt.n_volumes - 1, 0)))
+        self.volume.setEnabled(fmt.n_volumes > 1)
+        self.volume.setToolTip("An 'all volumes' export puts each bone's values side by side on one row")
+        self.start = QSpinBox()
+        lo = -(n_rows - 1) + 1 if n_rows else -100000
+        self.start.setRange(lo, 1000000)
+        self.start.setValue(offset + 1)
+        self.start.setToolTip("Trial frame of the file's first row. Use it when this file was exported for "
+                              "part of the trial, or starts earlier or later than the other bones' files.")
         form.addRow("Values", self.kind)
         form.addRow("Matrix order", self.order)
         form.addRow("Translation units", self.tunits)
         form.addRow("Rotation units", self.runits)
         form.addRow("Bone in file", self.volume)
+        form.addRow("First row is trial frame", self.start)
         v.addLayout(form)
+        self.check = label("", "Muted")
+        v.addWidget(self.check)
+        self.frames = label("", "Muted")
+        v.addWidget(self.frames)
+        self.remember = QCheckBox("Use these options for this tab's other tracking files without asking")
+        self.remember.setToolTip("You're still asked when a file doesn't fit them (different values per row, "
+                                 "several bones in one file, or a different number of frames).")
+        self.remember.setVisible(ask_remember)
+        v.addWidget(self.remember)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         for btn in bb.buttons():
             btn.setIcon(QIcon())
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
+        for c in (self.kind, self.order, self.tunits, self.runits, self.volume):
+            c.currentIndexChanged.connect(self._update)
+        self.start.valueChanged.connect(self._update)
+        self._update()
 
     @staticmethod
     def _combo(items, current):
@@ -143,10 +184,70 @@ class FormatDialog(QDialog):
         c.setCurrentIndex([k for k, _ in items].index(current))
         return c
 
+    def _update(self, *_):
+        matrix = self.kind.currentData() == "matrix"
+        self.order.setEnabled(matrix)
+        self.runits.setEnabled(not matrix)
+        self._check_values()
+        self._check_frames()
+
+    def _check_values(self) -> None:
+        """Try the chosen options on the file and say whether the rotations come out valid."""
+        if self.path is None:
+            self.check.setText("")
+            return
+        from ..core.tracking import TrackingError, load_tracking
+
+        overrides, vol = self.values()
+        try:
+            t = load_tracking(self.path, vol, overrides)
+        except (TrackingError, OSError) as e:
+            self._say(self.check, f"These options don't fit the file: {e}", "Warn")
+            return
+        if t.warnings:
+            self._say(self.check, " ".join(t.warnings), "Warn")
+        else:
+            n = int(t.valid.sum())
+            self._say(self.check, f"✓ Valid rotations on all {n} tracked rows"
+                                  + (f" ({t.n_untracked} untracked)." if t.n_untracked else "."), "Ok")
+
+    def _check_frames(self) -> None:
+        if self.n_rows is None:
+            self.frames.setText("")
+            return
+        first = self.start.value()
+        last = first + self.n_rows - 1
+        lines = [f"This file covers trial frames {max(first, 1)}–{last}"
+                 + (f" (its first {1 - first} rows come before the trial and are dropped)" if first < 1 else "") + "."]
+        warn = False
+        for name, off, rows in self.others:
+            a, b = off + 1, off + rows
+            same = (a, b) == (first, last)
+            warn |= not same
+            lines.append(f"{name}: frames {a}–{b}" + ("" if same else "  ← different"))
+        if self.n_images is not None and self.n_images != last:
+            lines.append(f"Radiographs: {self.n_images} images  ← different")
+            warn = True
+        if warn:
+            lines.append("Autoscoper files have no timestamps, so rows are matched by number. Check that row 1 of "
+                         "each file is the same moment, and set 'First row is trial frame' if it isn't.")
+        self._say(self.frames, "\n".join(lines), "Warn" if warn else "Muted")
+
+    @staticmethod
+    def _say(lbl, text, kind) -> None:
+        lbl.setText(text)
+        lbl.setObjectName(kind)
+        lbl.style().unpolish(lbl)
+        lbl.style().polish(lbl)
+
     def values(self):
         overrides = {"kind": self.kind.currentData(), "order": self.order.currentData(),
                      "translation_units": self.tunits.currentData(), "rotation_units": self.runits.currentData()}
-        return overrides, self.volume.currentData()
+        return overrides, self.volume.currentData() or 0
+
+    @property
+    def offset(self) -> int:
+        return self.start.value() - 1
 
 
 class AddCameraDialog(QDialog):

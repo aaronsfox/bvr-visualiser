@@ -53,6 +53,23 @@ def test_row_and_column_order_agree(tmp_path):
     np.testing.assert_allclose(b.poses, P, atol=1e-8)
 
 
+def test_frame_offset_places_rows_in_the_trial(tmp_path):
+    P = _poses(5)
+    path = _write(tmp_path, "part.tra", [m.reshape(-1) for m in P])
+    t = trk.load_tracking(path, offset=3)               # first row is trial frame 4
+    assert (t.n_rows, t.n_frames, t.offset) == (5, 8, 3)
+    assert t.pose(2) is None and t.n_untracked == 3
+    np.testing.assert_allclose(t.pose(3), P[0])
+    early = trk.load_tracking(path, offset=-2)          # first two rows come before the trial
+    assert (early.n_rows, early.n_frames) == (5, 3)
+    np.testing.assert_allclose(early.pose(0), P[2])
+    with pytest.raises(trk.TrackingError):
+        trk.load_tracking(path, offset=-5)
+    m = BoneModel(name="b", path=tmp_path / "b.stl", tracking_path=path, tracking_offset=3)
+    d = m.to_dict()
+    assert d["tracking_offset"] == 3 and BoneModel.from_dict(d).load_tracking().offset == 3
+
+
 def test_nan_rows_and_gap_filling(tmp_path):
     P = _poses(6)
     rows = [m.reshape(-1) for m in P]

@@ -235,13 +235,13 @@ pump(0.5)
 assert len(vt.state.models) == 2
 assert [a.text() for a in vt.build_menu("joints", None).actions()][0] == "Add joint…"
 femur_m, tibia_m = vt.state.models
-assert "Add coordinate system…" in [a.text() for a in vt.build_menu("model", femur_m).actions()]
-assert "Add coordinate system…" in [a.text() for a in vt.build_menu("axes", femur_m).actions()]
+assert "Load coordinate system…" in [a.text() for a in vt.build_menu("model", femur_m).actions()]
+assert "Load file…" in [a.text() for a in vt.build_menu("axes", femur_m).actions()]
 # step A: a coordinate system on one model (the segment is found from the surface file)
 assert vt.set_axes(femur_m, path)
 assert femur_m.axes_segment == "Femur" and femur_m.acs is not None and not tibia_m.has_axes
-assert vt.nav.item_for("axes", femur_m).text(0).startswith("Axes: Femur")
-assert vt.nav.item_for("axes", tibia_m).text(0).startswith("No coordinate system")
+assert vt.nav.item_for("axes", femur_m).text(0).startswith("Axes · Femur")
+assert vt.nav.item_for("axes", tibia_m).text(0) == "Axes"          # nothing loaded: greyed out
 fem_k = vt.joint_values(femur_m)
 np.testing.assert_allclose(fem_k["angles"][~np.isnan(fem_k["angles"][:, 0])], 0, atol=1e-6)   # the femur is still
 shot("vis_00_axes_on_model")
@@ -287,7 +287,11 @@ pump(0.2)
 assert "untracked" in vt.curves.readout.text()
 vt.export_joint_csv(knee_item, str(OUT / "knee.csv"))
 lines = (OUT / "knee.csv").read_text().splitlines()
-assert len(lines) == n + 1 and lines[0].startswith("frame,time_s,Flexion"), lines[0]
+assert len(lines) == n + 1 and lines[0].startswith("frame,time_s,Angle X: Adduction"), lines[0]   # X Y Z order
+vt.state.settings.curve_labels = "anatomical"
+vt.export_joint_csv(knee_item, str(OUT / "knee_anatomical.csv"))
+assert (OUT / "knee_anatomical.csv").read_text().startswith("frame,time_s,Flexion")
+vt.state.settings.curve_labels = "axes"
 # rename a model: the items follow it
 vt._rename(vt.state.models[1], "Left tibia")
 assert knee_item.model_map["Tibia"] == "Left tibia" and vt.joint_values(knee_item) is not None
