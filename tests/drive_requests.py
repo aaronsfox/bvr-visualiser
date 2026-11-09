@@ -1,4 +1,4 @@
-"""Drive the GUI through the 9 Nov 2026 requests (feature_requests/REQUESTS.md) and save screenshots.
+"""Drive the GUI through the 9 Nov 2026 requests (feature_requests/REQUESTS_VISUALISER.md) and save screenshots.
 
 Usage: BVR_SAMPLE_DATA=... xvfb-run -a -s "-screen 0 1600x1000x24" python tests/drive_requests.py OUTDIR
 

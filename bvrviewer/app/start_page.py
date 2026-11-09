@@ -38,22 +38,17 @@ class ToolIcon(QWidget):
                            QPointF(11, 29), QPointF(11, 16)])
             p.drawPolyline([QPointF(11, 16), QPointF(22, 22), QPointF(33, 16)])
             p.drawLine(QPointF(22, 22), QPointF(22, 35))
-        elif self.key == "reliability":         # two overlapping traces: repeated tracking
-            p.drawPolyline([QPointF(9, 30), QPointF(16, 20), QPointF(23, 25), QPointF(35, 12)])
-            dashed = QPen(c, 2.2, Qt.DashLine, Qt.RoundCap, Qt.RoundJoin)
-            p.setPen(dashed)
-            p.drawPolyline([QPointF(9, 33), QPointF(16, 24), QPointF(23, 28), QPointF(35, 16)])
+        elif self.key == "assessor":            # a target with two traces: raters against a criterion
+            p.drawEllipse(QPointF(22, 22), 12, 12)
+            p.drawEllipse(QPointF(22, 22), 6, 6)
+            p.setBrush(c)
+            p.drawEllipse(QPointF(22, 22), 1.8, 1.8)
         elif self.key == "model_builder":       # two segments joined at a joint, with an axis
             p.drawLine(QPointF(10, 34), QPointF(20, 22))
             p.drawLine(QPointF(24, 22), QPointF(34, 10))
             p.drawEllipse(QPointF(22, 22), 3.2, 3.2)
             p.drawLine(QPointF(10, 34), QPointF(10, 27))
             p.drawLine(QPointF(10, 34), QPointF(17, 34))
-        elif self.key == "validity":            # a target: agreement with a criterion
-            p.drawEllipse(QPointF(22, 22), 12, 12)
-            p.drawEllipse(QPointF(22, 22), 6, 6)
-            p.setBrush(c)
-            p.drawEllipse(QPointF(22, 22), 1.8, 1.8)
         else:                                   # anything added later
             p.drawEllipse(QPointF(22, 22), 9, 9)
         p.end()

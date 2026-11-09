@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from .assessor import AssessorTab
 from .model_builder import ModelBuilderTab
 from .start_page import StartPage
 from .tab import VisualiserTab
@@ -29,7 +30,7 @@ def _tab_icon(color: str) -> QIcon:
 
 class MainWindow(QMainWindow):
     # Tool key -> tab widget class. Tools without an entry show as "Coming soon" on the Start page.
-    TAB_CLASSES = {"visualiser": VisualiserTab, "model_builder": ModelBuilderTab}
+    TAB_CLASSES = {"visualiser": VisualiserTab, "model_builder": ModelBuilderTab, "assessor": AssessorTab}
 
     def __init__(self):
         super().__init__()
@@ -75,7 +76,7 @@ class MainWindow(QMainWindow):
 
     def _new_tab_menu(self, menu: QMenu, with_shortcuts: bool = False) -> QMenu:
         """One entry per tool (unavailable tools shown greyed out), then the Start page."""
-        shortcuts = {"visualiser": "Ctrl+T", "model_builder": "Ctrl+Shift+M"}
+        shortcuts = {"visualiser": "Ctrl+T", "model_builder": "Ctrl+Shift+M", "assessor": "Ctrl+Shift+A"}
         for t in TOOLS:
             ok = t.available and t.key in self.TAB_CLASSES
             a = self._act(menu, t.title if ok else f"{t.title} (coming soon)",

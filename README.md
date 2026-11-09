@@ -36,8 +36,7 @@ The app opens on a **Start** page with one box per tool. Click a box to open tha
 |---|---|---|
 | **Visualiser** | available | Watch tracked bone motion in 3D, with radiographs if you have them, and joint angle curves from a joint model (below). |
 | **Model Builder** | available (knee first) | Define axes on bone surfaces, optionally joints between them and reference poses, and save a model for the other tools. |
-| **Reliability Analysis** | coming soon | Load bones and repeated tracking of the same trial, by the same tester or different testers, and get accuracy and reliability metrics across them. |
-| **Validity Analysis** | coming soon | Load bones, criterion tracking data and testers' tracking, and get accuracy against the criterion. |
+| **Assessor Evaluation** | available | Load several raters' tracking of a trial (and, for validity, the criterion tracking) and get inter- and intra-rater reliability and validity: helical and surface errors per frame, statistics, violin plots and CSV export. |
 
 Adding a tool: describe it in `bvrviewer/app/tools.py` (it then appears on the Start page as "Coming soon"), write its tab widget, and register it in `MainWindow.TAB_CLASSES`.
 
@@ -168,6 +167,29 @@ Partial bones and landmarks: where a landmark definition needs the hip centre, t
 
 **Planned:** multi-segment foot joint definitions, the hip and upper limb (ISB), and your own joint definitions.
 
+## Assessor Evaluation
+
+How reliable is each rater's tracking, and how close is it to a criterion (e.g. bead-based tracking)? Load the tracking files, and the results update as you go.
+
+1. **Tracking files:** **Add folder…** (searched with its subfolders) or **Add files…**. Each file is one bone, in one trial, by one rater in one session, or the **criterion**. These are read from the file paths with an optional **name pattern**, relative to the folder you add: `{trial}`, `{rater}`, `{session}`, `{bone}`, `*` for anything and `/` for folders. For example `Raters/Jo/T0019_jog0001_s2_tib.tra` with `{rater}/{trial}_*_s{session}_{bone}`. Without a pattern (or where it doesn't match) the bone is a bone name in the file name, the rater is the folder name, and files or folders named *reference*, *criterion*, *gold* or *bead* are the criterion. Double-click a cell to correct it, or right-click selected rows to set a field for all of them. The format is asked once per import (as in the Visualiser) and can be changed per file with **Format and frames…**, including where a file starts in the trial. Problems (missing bone or rater, duplicates, files with different numbers of rows) are listed under the table.
+2. **Bones (optional):** surfaces add the **surface distance**: **Add surfaces…** (STL, OBJ, PLY, VTK) or **From .cfg…** (the trial's TIF partial volumes and voxel sizes). **Axes from model…** takes the bones' coordinate systems from a Model Builder model, adding errors about each bone's own axes. Both must be in the space the tracking maps (Autoscoper space for SlicerAutoscoperM).
+3. **Analysis:**
+   - **Compare:** raters vs criterion (validity), between raters (inter-rater: every pair, one session each) or within raters (intra-rater: every pair of a rater's sessions).
+   - **Measures**, per frame, from the difference transform inv(T_reference)·T_test (in the bone's frame, as Welte et al. 2022):
+     - *helical rotation* (default): the rotation about the helical axis, in degrees;
+     - *helical translation* (default): the translation along the helical axis, as reported by Welte et al. 2022 and Williams et al. 2026. It is **not** the bone's displacement: with any rotation error, translation across the axis moves the axis instead, so it can be near 0 while the bone is millimetres away;
+     - *mean surface distance* (default when surfaces are loaded) and *maximum surface distance*: how far the bone's surface is from where it should be; *centroid displacement*;
+     - *bone axes* (with a model): rotation about Z, X, Y (Z-X-Y) and translation of the axes' origin along X, Y, Z, signed.
+   - **Thresholds:** 2° and 1 mm by default (Welte et al. 2022).
+   - **Statistics:** for each trial and bone separately, or pooled over trials, or over trials and bones.
+4. **Results:**
+   - **Summary:** frames, mean, SD, median, IQR, RMS, max, Bland–Altman limits of agreement (mean ± 1.96 SD, with the half-width of their 95% CI), robust limits (median ± 1.45 IQR, Williams et al. 2026), median absolute deviation, Hampel outliers and the share of frames over the threshold. Frames are treated as independent, which they aren't, so the CIs are optimistic.
+   - **Distributions:** a violin per rater (or pair) for each bone and measure, with every frame as a point, median, IQR, mean and threshold (as Welte et al. 2022, figure 4).
+   - **Over frames:** the error at every frame for each rater, with frames above the threshold circled (as Welte et al. 2022, figure 5), to see where and how often tracking went wrong.
+   - **Limit plots to 3 × threshold** hides failed frames so the rest can be seen (the number hidden is shown).
+   - Very large, steady differences are flagged: they usually mean the files map different bone spaces (e.g. a criterion in CT space), different rows or a wrong format.
+5. **Export:** summary statistics and per-frame values (long format: trial, bone, comparison, test, reference, frame, measure, value, unit) as CSV, and the figures as PNG, SVG or PDF. **Save…** keeps everything in a `.bvrassess.json` project.
+
 ## How the files are interpreted
 
 These conventions were checked against the SlicerAutoscoperM sample data (by projecting tracked bones onto the real radiographs) and against the Autoscoper source code. The tests check them.
@@ -188,7 +210,7 @@ STAPLE_REPO=/path/to/msk-STAPLE pytest tests/test_staple.py   # the STAPLE trans
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.
 
-`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_requests.py` checks the features from `feature_requests/REQUESTS.md` (tab menus, typed slider values, curve labels, the tracking prompt, Tracking/Axes rows, frame offsets, camera views) on the wrist data. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
+`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_assessor.py` simulates three raters (two sessions each) from the ankle sample's tracking and checks the Assessor Evaluation tab in every mode, with exports and the project file. `tests/drive_requests.py` checks the features from `feature_requests/REQUESTS_VISUALISER.md` (tab menus, typed slider values, curve labels, the tracking prompt, Tracking/Axes rows, frame offsets, camera views) on the wrist data. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
 
 ## Building the app
 

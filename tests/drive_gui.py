@@ -56,15 +56,12 @@ def shot(name, tab=None):
     print("saved", name, flush=True)
 
 
-# Start page: Visualiser and Model Builder open tabs; the analysis tools are "coming soon"
+# Start page: every tool card opens a tab
 from PySide6.QtTest import QTest  # noqa: E402
 
 shot("00_start")
 assert win.tabs.count() == 1 and win.current() is win.start
-for key in ("reliability", "validity"):
-    QTest.mouseClick(win.start.cards[key], Qt.LeftButton)
-    pump(0.2)
-    assert win.tabs.count() == 1, f"{key} card should not open a tab yet"
+assert set(win.start.cards) == {"visualiser", "model_builder", "assessor"}
 QTest.mouseClick(win.start.cards["visualiser"], Qt.LeftButton)
 pump(0.3)
 assert win.tabs.count() == 2 and win.current().kind == "visualiser"

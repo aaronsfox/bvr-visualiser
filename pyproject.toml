@@ -21,6 +21,7 @@ dependencies = [
     "imageio>=2.31",
     "imageio-ffmpeg>=0.4.9",
     "openpyxl>=3.1",
+    "matplotlib>=3.7",
 ]
 
 [project.optional-dependencies]
