@@ -1,365 +1,269 @@
-"""The set-up side of the Assessor Evaluation tab: a tree of bones, the reference and the assessors.
+"""Set-up widgets of the Assessor Evaluation tab: the factors, and the grid of tracking files to fill.
 
-    Bones                       one row per bone label, with its optional Surface and Axes
-      tib
-        Surface · tib.tif
-        Axes · Tibia (knee.bvrmodel.json)
-    Reference                   the criterion (e.g. bead tracking), if added
-      tib
-        Tracking · ref_tib.tra (19 rows)
-    Assessors
-      Jo                        one assessor in one session ("Jo · session 2" for another session)
-        tib
-          Tracking · jo_tib.tra (19 rows)
-        tal
-          Tracking (none: right-click to load)
-
-Bones are matched across the reference and the assessors by their label, so each assessor's bones
-are added by picking (or typing) a label; new assessors can start with another assessor's bones.
-With several trials, each bone has one Tracking row per trial.
+1. Factors: Bones (each with an optional surface and coordinate system), Assessors, Sessions and Trials
+   (short editable lists), and whether there is a Reference (criterion).
+2. Tracking files: for each trial, a grid with one row per assessor × session (and a Reference row) and
+   one column per bone. Every cell is one tracking file; fill the gaps by double-clicking a cell, dropping
+   a file on it, or filling many at once from files whose names say which cell they belong to.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
+    QHBoxLayout,
     QHeaderView,
-    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QTableWidget,
     QTableWidgetItem,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..core import assessment as A
-from .panels import label
-
-# tree item kinds
-BONES, BONE, SURFACE, AXES = "bones", "bone", "surface", "axes"
-REFERENCE, ASSESSORS, ASSESSOR, ABONE, TRACK = "reference", "assessors", "assessor", "abone", "track"
+from .panels import label, small_button
 
 GREEN, TEAL, AMBER, GREY, RED = "#8FD3A9", "#5CC8A8", "#F2C48D", "#5E6573", "#F0A3A3"
+EMPTY_BG = "#1A1D24"
 
 
-def _bold(it: QTreeWidgetItem, colour: str | None = None, col: int = 0) -> None:
-    f = QFont()
-    f.setBold(True)
-    it.setFont(col, f)
-    if colour:
-        it.setForeground(col, QBrush(QColor(colour)))
+class FactorList(QWidget):
+    """A titled, short list of names (assessors, sessions or trials) with add / rename / remove / move."""
+
+    added = Signal()
+    renamed = Signal(str)               # the old name (the new one is asked by the tab)
+    removed = Signal(str)
+    moved = Signal(str, int)
+
+    def __init__(self, title: str, tip: str):
+        super().__init__()
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(3)
+        head = QHBoxLayout()
+        t = label(title, "PropLabel", wrap=False)
+        t.setToolTip(tip)
+        head.addWidget(t)
+        head.addStretch(1)
+        self.add_btn = small_button("+")
+        self.add_btn.setToolTip(f"Add {title.lower().rstrip('s')}")
+        self.add_btn.setFixedWidth(28)
+        self.add_btn.clicked.connect(self.added.emit)
+        head.addWidget(self.add_btn)
+        v.addLayout(head)
+        self.list = QListWidget()
+        self.list.setToolTip(tip + "\nDouble-click to rename; right-click for more.")
+        self.list.setMinimumHeight(70)
+        self.list.setMaximumHeight(120)
+        self.list.itemDoubleClicked.connect(lambda it: self.renamed.emit(it.text()))
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._menu)
+        v.addWidget(self.list)
+
+    def set_items(self, names) -> None:
+        cur = self.list.currentItem().text() if self.list.currentItem() else None
+        self.list.clear()
+        for n in names:
+            it = QListWidgetItem(n)
+            self.list.addItem(it)
+            if n == cur:
+                self.list.setCurrentItem(it)
+
+    def _menu(self, pos) -> None:
+        from PySide6.QtWidgets import QMenu
+
+        it = self.list.itemAt(pos)
+        m = QMenu(self)
+        m.addAction("Add", self.added.emit)
+        if it is not None:
+            name = it.text()
+            m.addAction("Rename…", lambda: self.renamed.emit(name))
+            m.addAction("Move up", lambda: self.moved.emit(name, -1))
+            m.addAction("Move down", lambda: self.moved.emit(name, 1))
+            m.addSeparator()
+            m.addAction("Remove", lambda: self.removed.emit(name))
+        m.exec(self.list.viewport().mapToGlobal(pos))
 
 
-def _grey(it: QTreeWidgetItem, col: int = 0) -> None:
-    f = QFont()
-    f.setItalic(True)
-    it.setFont(col, f)
-    it.setForeground(col, QBrush(QColor(GREY)))
+class TrackingGrid(QTableWidget):
+    """Rows: Reference and assessor × session; columns: bones. Each cell is one tracking file.
 
+    Files dropped on a cell fill it (several files dropped at once go to the bulk-fill dialog).
+    """
 
-class SetupTree(QTreeWidget):
-    """The tree. Each item carries (kind, assessor or None, bone label or None, trial or None)."""
+    filesDropped = Signal(int, int, list)      # row, column, paths
 
     def __init__(self):
-        super().__init__()
-        self.setColumnCount(2)
-        self.setHeaderHidden(True)
-        self.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.header().setStretchLastSection(True)
+        super().__init__(0, 0)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.setUniformRowHeights(True)
-        self.setMinimumHeight(260)
-        self._expanded: set = set()
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.horizontalHeader().setMinimumSectionSize(90)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.setWordWrap(False)
+        self.setTextElideMode(Qt.ElideMiddle)      # keep the end of the name (…_s2_tal.tra) visible
+        self.setMinimumHeight(150)
+        self.slots: list[tuple] = []       # row -> (who, session)
+        self.bones: list[str] = []         # column -> bone
+        self.trial = ""
 
-    @staticmethod
-    def data(it: QTreeWidgetItem):
-        return it.data(0, Qt.UserRole) if it is not None else None
-
-    def _item(self, parent, text: str, data: tuple, detail: str = "") -> QTreeWidgetItem:
-        it = QTreeWidgetItem([text, detail])
-        it.setData(0, Qt.UserRole, data)
-        (parent.addChild(it) if isinstance(parent, QTreeWidgetItem) else self.addTopLevelItem(it))
-        return it
-
-    def _key(self, data) -> tuple:
-        kind, a, bone, trial = data
-        return (kind, a.key() if a is not None else None, bone, trial)
-
-    def rebuild(self, p: A.AssessmentProject, select: tuple | None = None) -> None:
-        """Redraw from the project, keeping expanded items and the selection."""
-        if self.topLevelItemCount():
-            self._expanded = set()
-            stack = [self.topLevelItem(i) for i in range(self.topLevelItemCount())]
-            while stack:
-                it = stack.pop()
-                if it.isExpanded():
-                    self._expanded.add(self._key(self.data(it)))
-                stack += [it.child(i) for i in range(it.childCount())]
-            if select is None and self.currentItem() is not None:
-                select = self.data(self.currentItem())
-        self.clear()
-        trials = p.trials()
-        many_trials = len(trials) > 1
-        to_select = None
-        want = self._key(select) if select is not None else None
-
-        # ---- bones
-        names = p.bone_names()
-        top = self._item(self, "Bones", (BONES, None, None, None),
-                         f"{len(names)} bone{'s' * (len(names) != 1)}" if names else "")
-        _bold(top)
-        top.setToolTip(0, "Bone labels used by the reference and assessors. A surface adds the surface "
-                          "distance; a coordinate system from a model adds errors about the bone's own axes.")
-        for name in names:
-            info = p.bone_info_for(name)
-            users = [p.display_name(a) for a in p.assessors if name in a.bones]
-            b = self._item(top, name, (BONE, None, name, None), ", ".join(users))
-            b.setToolTip(1, "Used by: " + (", ".join(users) or "nobody yet"))
-            s = info.surface
-            si = self._item(b, "Surface", (SURFACE, None, name, None), Path(s.path).name if s is not None else "")
-            (_bold(si, GREEN) if s is not None else _grey(si))
-            si.setToolTip(0, str(s.path) if s is not None else "Optional: right-click → Load surface…")
-            ax = self._item(b, "Axes", (AXES, None, name, None),
-                            f"{info.axes_segment} ({Path(info.axes_path).name})" if info.axes_path else "")
-            if info.acs is not None:
-                _bold(ax, TEAL)
-            elif info.axes_path:
-                _bold(ax, AMBER)
-                ax.setText(1, ax.text(1) + " not found")
-            else:
-                _grey(ax)
-            ax.setToolTip(0, "Optional: right-click → Axes from model…")
-            for it in (b, si, ax):
-                if want is not None and self._key(self.data(it)) == want:
-                    to_select = it
-
-        # ---- reference and assessors
-        def assessor_items(parent, a: A.Assessor):
-            nonlocal to_select
-            for bone in a.bones:
-                bi = self._item(parent, bone, (ABONE, a, bone, None))
-                n_ok = 0
-                for trial in trials:
-                    e = p.entry(a, bone, trial)
-                    title = f"Tracking · {trial}" if many_trials else "Tracking"
-                    if e is None:
-                        ti = self._item(bi, title, (TRACK, a, bone, trial), "none: double-click to load")
-                        _grey(ti)
-                        _grey(ti, 1)
-                    elif e.tracking is None:
-                        ti = self._item(bi, title, (TRACK, a, bone, trial), f"{e.path.name}: can't read")
-                        _bold(ti, RED)
-                        ti.setToolTip(1, e.error)
-                    else:
-                        t = e.tracking
-                        extra = (f", from frame {t.offset + 1}" if t.offset else "") + \
-                                (f", {t.n_untracked} untracked" if t.n_untracked else "")
-                        ti = self._item(bi, title, (TRACK, a, bone, trial), f"{e.path.name} ({t.n_rows} rows{extra})")
-                        _bold(ti, AMBER if t.warnings else GREEN)
-                        ti.setToolTip(1, f"{e.path}\n{t.fmt.describe()}" + ("\n" + "\n".join(t.warnings)
-                                                                            if t.warnings else ""))
-                        n_ok += 1
-                    if want is not None and self._key(self.data(ti)) == want:
-                        to_select = ti
-                if not many_trials:                 # one trial: the bone row shows its file directly
-                    ti = bi.child(0)
-                    bi.setText(1, ti.text(1))
-                    bi.setToolTip(1, ti.toolTip(1))
-                    bi.setForeground(1, ti.foreground(1))
-                    bi.setFont(1, ti.font(1))
+    def fill(self, p: A.AssessmentProject, trial: str) -> None:
+        self.trial = trial
+        self.slots, self.bones = p.rows(), p.bone_names()
+        self.setRowCount(len(self.slots))
+        self.setColumnCount(len(self.bones))
+        self.setHorizontalHeaderLabels(self.bones)
+        self.setVerticalHeaderLabels([p.row_label(w, s) for w, s in self.slots])
+        if p.has_reference and self.slots:
+            h = self.verticalHeaderItem(0)
+            f = QFont()
+            f.setBold(True)
+            h.setFont(f)
+            h.setForeground(QBrush(QColor(GREEN)))
+            h.setToolTip("The reference (criterion) tracking, e.g. bead-based")
+        for r, (who, ses) in enumerate(self.slots):
+            for c, bone in enumerate(self.bones):
+                e = p.entry(trial, bone, who, ses)
+                it = QTableWidgetItem()
+                it.setTextAlignment(Qt.AlignCenter)
+                where = f"{p.row_label(who, ses)} · {bone}" + (f" · {trial}" if len(p.trials()) > 1 else "")
+                if e is None:
+                    it.setText("+")
+                    it.setForeground(QBrush(QColor(GREY)))
+                    it.setBackground(QBrush(QColor(EMPTY_BG)))
+                    it.setToolTip(f"{where}\nNo file yet: double-click to choose one, or drop a file here")
+                elif e.tracking is None:
+                    it.setText(f"⚠ {e.path.name}")
+                    it.setForeground(QBrush(QColor(RED)))
+                    it.setToolTip(f"{where}\n{e.path}\n{e.error}")
                 else:
-                    bi.setText(1, f"{n_ok} of {len(trials)} trials" if n_ok < len(trials) else
-                               f"{len(trials)} trials")
-                    if n_ok < len(trials):
-                        bi.setForeground(1, QBrush(QColor(GREY)))
-                bi.setToolTip(0, "Right-click to load or change its tracking, change its label or remove it. "
-                                 "Expand for its tracking " + ("rows per trial" if many_trials else "row") + ".")
-                if want is not None and self._key(self.data(bi)) == want:
-                    to_select = bi
+                    t = e.tracking
+                    it.setText(e.path.name)
+                    it.setForeground(QBrush(QColor(AMBER if t.warnings else GREEN)))
+                    extra = (f", first row = frame {t.offset + 1}" if t.offset else "") + \
+                            (f", {t.n_untracked} untracked" if t.n_untracked else "")
+                    it.setToolTip(f"{where}\n{e.path}\n{t.n_rows} rows{extra}\n{t.fmt.describe()}"
+                                  + ("\n" + "\n".join(t.warnings) if t.warnings else "")
+                                  + "\nDouble-click to change the format or frames; right-click for more")
+                self.setItem(r, c, it)
 
-        ref = p.reference
-        if ref is not None:
-            r = self._item(self, "Reference", (REFERENCE, ref, None, None), "criterion")
-            _bold(r, GREEN)
-            r.setToolTip(0, "The criterion (gold standard) tracking, e.g. bead-based. Raters are compared with "
-                            "it for validity.")
-            assessor_items(r, ref)
-            if want is not None and self._key(self.data(r)) == want:
-                to_select = r
-        raters = p.raters_list()
-        top = self._item(self, "Assessors", (ASSESSORS, None, None, None),
-                         f"{len(raters)} assessor{'s' * (len(raters) != 1)}" if raters else "right-click to add")
-        _bold(top)
-        for a in raters:
-            ai = self._item(top, p.display_name(a), (ASSESSOR, a, None, None),
-                            f"{len(a.bones)} bone{'s' * (len(a.bones) != 1)}")
-            _bold(ai)
-            assessor_items(ai, a)
-            if want is not None and self._key(self.data(ai)) == want:
-                to_select = ai
+    # ---- drops
+    def dragEnterEvent(self, ev):
+        if ev.mimeData().hasUrls():
+            ev.acceptProposedAction()
+        else:
+            super().dragEnterEvent(ev)
 
-        # expand: remembered, or everything down to bones on first show
-        stack = [self.topLevelItem(i) for i in range(self.topLevelItemCount())]
-        while stack:
-            it = stack.pop()
-            kind = self.data(it)[0]
-            k = self._key(self.data(it))
-            first_time = not self._expanded
-            it.setExpanded(k in self._expanded or (first_time and kind in (BONES, REFERENCE, ASSESSORS, ASSESSOR)))
-            stack += [it.child(i) for i in range(it.childCount())]
-        if to_select is not None:
-            self.setCurrentItem(to_select)
-            self.scrollToItem(to_select)
+    def dragMoveEvent(self, ev):
+        if ev.mimeData().hasUrls():
+            ev.acceptProposedAction()
+        else:
+            super().dragMoveEvent(ev)
+
+    def dropEvent(self, ev):
+        if not ev.mimeData().hasUrls():
+            return super().dropEvent(ev)
+        paths = [u.toLocalFile() for u in ev.mimeData().urls() if u.isLocalFile()]
+        idx = self.indexAt(ev.position().toPoint())
+        self.filesDropped.emit(idx.row(), idx.column(), paths)
+        ev.acceptProposedAction()
 
 
-class AssessorDialog(QDialog):
-    """Add an assessor (name, session) or the reference, optionally starting with another one's bones."""
+class FillDialog(QDialog):
+    """Fill many cells at once: each file is matched to a cell from its name; check and correct."""
 
-    def __init__(self, parent, p: A.AssessmentProject, reference: bool = False, name: str = "",
-                 session: str = "1", copy_default: A.Assessor | None = None):
+    def __init__(self, parent, p: A.AssessmentProject, paths, root: Path | None = None, pattern: str = "",
+                 trial: str | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Add reference" if reference else "Add assessor")
-        self.setMinimumWidth(420)
+        self.setWindowTitle("Fill from files")
+        self.setMinimumWidth(820)
+        self.setMinimumHeight(420)
+        self.p = p
         v = QVBoxLayout(self)
-        if reference:
-            v.addWidget(label("The reference is the criterion (gold-standard) tracking that assessors are compared "
-                              "with for validity, e.g. bead-based tracking.", "Muted"))
-        form = QFormLayout()
-        self.name = QLineEdit(name)
-        self.session = QComboBox()
-        self.session.setEditable(True)
-        for s in A._unique(["1", "2", "3"] + p.sessions()):
-            self.session.addItem(s)
-        self.session.setCurrentText(session)
-        self.session.setToolTip("Sessions are repeats by the same assessor (for intra-rater reliability)")
-        if not reference:
-            form.addRow("Name", self.name)
-            form.addRow("Session", self.session)
-        self.copy = QComboBox()
-        self.copy.addItem("No bones yet", None)
-        for a in p.assessors:
-            if a.bones:
-                self.copy.addItem(f"Same bones as {p.display_name(a)} ({', '.join(a.bones)})", a)
-        if copy_default is not None:
-            self.copy.setCurrentIndex(max(self.copy.findData(copy_default), 0))
-        elif self.copy.count() > 1:
-            self.copy.setCurrentIndex(self.copy.count() - 1)
-        form.addRow("Bones", self.copy)
-        v.addLayout(form)
+        v.addWidget(label("Each file's cell is worked out from the names in its folder and file name (bones, "
+                          "assessors, trials, a session like s2 or session_2, and reference/criterion/gold/bead "
+                          "for the reference). Check them, correct any that are wrong, and leave a file's bone "
+                          "empty to skip it. A name that isn't in the lists adds it.", "Muted"))
+        self.table = QTableWidget(len(paths), 5)
+        self.table.setHorizontalHeaderLabels(["File", "Assessor", "Session", "Bone", "Trial"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.paths = [Path(x) for x in paths]
+        who_items = ["Reference"] + p.raters()
+        for r, path in enumerate(self.paths):
+            m = A.match_file(path, p, root, pattern)
+            it = QTableWidgetItem(path.name)
+            it.setFlags(Qt.ItemIsEnabled)
+            it.setToolTip(str(path))
+            self.table.setItem(r, 0, it)
+            who = m.get("who")
+            cells = [(1, who_items, "Reference" if who == A.CRITERION else (who or "")),
+                     (2, p.sessions(), m.get("session", "")),
+                     (3, p.bone_names(), m.get("bone", "")),
+                     (4, p.trials(), m.get("trial", trial or ""))]
+            for col, items, value in cells:
+                cb = QComboBox()
+                cb.setEditable(True)
+                cb.addItems(items)
+                cb.setCurrentText(value)
+                cb.currentTextChanged.connect(self._check)
+                self.table.setCellWidget(r, col, cb)
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        v.addWidget(self.table, 1)
         self.note = label("", "Warn")
         v.addWidget(self.note)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
-        self.p, self.reference = p, reference
-        self.name.textChanged.connect(self._check)
-        self.session.currentTextChanged.connect(self._check)
-        self._ok = bb.button(QDialogButtonBox.Ok)
         self._check()
 
+    def _row(self, r: int):
+        get = lambda c: self.table.cellWidget(r, c).currentText().strip()
+        who = get(1)
+        who = A.CRITERION if who == "Reference" else who
+        return self.paths[r], get(4), get(3), who, ("" if who == A.CRITERION else get(2))
+
     def _check(self, *_):
-        if self.reference:
-            return
-        n, s = self.name.text().strip(), self.session.currentText().strip()
-        clash = self.p.find_assessor(n, s) is not None
-        self.note.setText(f"There is already an assessor {n}, session {s}." if clash else
-                          ("" if n else "Give the assessor a name."))
-        self._ok.setEnabled(bool(n) and bool(s) and not clash)
-
-    def values(self):
-        return self.name.text().strip(), self.session.currentText().strip(), self.copy.currentData()
-
-
-class BoneDialog(QDialog):
-    """Pick a bone label for an assessor: one already used elsewhere, or a new one."""
-
-    def __init__(self, parent, p: A.AssessmentProject, a: A.Assessor, current: str = "", title: str = "Add bone",
-                 ask_file: bool = True):
-        super().__init__(parent)
-        self.setWindowTitle(f"{title}: {p.display_name(a)}")
-        self.setMinimumWidth(380)
-        v = QVBoxLayout(self)
-        v.addWidget(label("Bones are matched across the reference and assessors by label, so pick the label the "
-                          "others use for this bone, or type a new one.", "Muted"))
-        self.combo = QComboBox()
-        self.combo.setEditable(True)
-        others = [b for b in p.bone_names() if b not in a.bones or b == current]
-        for b in others:
-            users = [p.display_name(o) for o in p.assessors if b in o.bones and o is not a]
-            self.combo.addItem(b + (f"   (used by {', '.join(users)})" if users else ""), b)
-        self.combo.setCurrentIndex(max(self.combo.findData(current), 0) if current else 0)
-        if not others:
-            self.combo.setCurrentText("")
-        self.combo.lineEdit().setPlaceholderText("e.g. tib")
-        f = QFormLayout()
-        f.addRow("Bone", self.combo)
-        v.addLayout(f)
-        self.file_now = QCheckBox("Choose its tracking file now")
-        self.file_now.setChecked(True)
-        self.file_now.setVisible(ask_file)
-        v.addWidget(self.file_now)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        v.addWidget(bb)
-
-    def value(self) -> str:
-        text = self.combo.currentText().strip()
-        i = self.combo.currentIndex()
-        if i >= 0 and text == self.combo.itemText(i):
-            return self.combo.itemData(i)
-        return text.split("   (used by")[0].strip()
-
-
-class MatchDialog(QDialog):
-    """Several tracking files for one assessor: which bone (and trial) each one is."""
-
-    def __init__(self, parent, p: A.AssessmentProject, a: A.Assessor, paths):
-        super().__init__(parent)
-        self.setWindowTitle(f"Tracking files: {p.display_name(a)}")
-        self.setMinimumWidth(620)
-        v = QVBoxLayout(self)
-        v.addWidget(label("Each file's bone is guessed from its name (the labels this assessor and the others "
-                          "use). Change any that are wrong; a new label adds a bone.", "Muted"))
-        self.table = QTableWidget(len(paths), 3)
-        self.table.setHorizontalHeaderLabels(["File", "Bone", "Trial"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        labels = A._unique(list(a.bones) + p.bone_names())
-        trials = p.trials()
-        self.paths = [Path(x) for x in paths]
-        for r, path in enumerate(self.paths):
-            it = QTableWidgetItem(path.name)
-            it.setFlags(Qt.ItemIsEnabled)
-            it.setToolTip(str(path))
-            self.table.setItem(r, 0, it)
-            bone = QComboBox()
-            bone.setEditable(True)
-            bone.addItems(labels)
-            guess = A.guess_fields(path, None, labels).get("bone") or path.stem.split("_")[-1]
-            bone.setCurrentText(guess)
-            self.table.setCellWidget(r, 1, bone)
-            trial = QComboBox()
-            trial.setEditable(True)
-            trial.addItems(trials)
-            self.table.setCellWidget(r, 2, trial)
-        v.addWidget(self.table)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        v.addWidget(bb)
+        seen, problems = {}, []
+        skipped = 0
+        for r in range(len(self.paths)):
+            path, trial, bone, who, ses = self._row(r)
+            if not bone:
+                skipped += 1
+                continue
+            if not who or (who != A.CRITERION and not ses) or not trial:
+                problems.append(f"{path.name}: choose the assessor, session and trial")
+                continue
+            key = (trial, bone, who, ses)
+            if key in seen:
+                problems.append(f"{path.name} and {seen[key]} are for the same cell")
+            seen[key] = path.name
+            if self.p.entry(trial, bone, who, ses) is not None:
+                problems.append(f"{path.name} replaces the file already in "
+                                f"{self.p.row_label(who, ses)} · {bone}")
+        if skipped:
+            problems.append(f"{skipped} file{'s' * (skipped != 1)} without a bone will be skipped")
+        self.note.setText("\n".join(problems[:6]) + (f"\n… and {len(problems) - 6} more" if len(problems) > 6 else ""))
 
     def values(self) -> list[tuple]:
-        return [(path, self.table.cellWidget(r, 1).currentText().strip(), self.table.cellWidget(r, 2).currentText()
-                 .strip() or "Trial 1") for r, path in enumerate(self.paths)]
+        """(path, trial, bone, who, session) for each file to load (files without a bone are skipped)."""
+        out = []
+        for r in range(len(self.paths)):
+            path, trial, bone, who, ses = self._row(r)
+            if bone and who and trial and (who == A.CRITERION or ses):
+                out.append((path, trial, bone, who, ses))
+        return out

@@ -46,6 +46,7 @@ from .joints import decompose
 from .tracking import Tracking, TrackingError, load_tracking
 
 CRITERION = "Criterion"
+_FIELDS = {"bone": "bone", "assessor": "rater", "session": "session", "trial": "trial"}
 
 
 # ---------------------------------------------------------------- measures
@@ -274,253 +275,235 @@ class BoneInfo:
                 "axes_path": self.axes_path, "axes_segment": self.axes_segment}
 
 
-@dataclass(eq=False)
-class Assessor:
-    """An assessor (one rater in one session) or the reference (criterion), and the bones it has.
-
-    Bones are matched across assessors by their label, so 'tib' under each assessor is the same bone.
-    Each bone can have one tracking file per trial (TrackingEntry with this assessor's name, session and
-    criterion flag).
-    """
-    name: str
-    session: str = "1"
-    criterion: bool = False
-    bones: list = field(default_factory=list)       # bone labels, in order
-
-    def key(self) -> tuple:
-        return (True, "", "") if self.criterion else (False, self.name, self.session)
-
-    def to_dict(self) -> dict:
-        return {"name": self.name, "session": self.session, "criterion": self.criterion, "bones": list(self.bones)}
-
-    @classmethod
-    def from_dict(cls, d: dict) -> Assessor:
-        return cls(name=d.get("name", ""), session=str(d.get("session", "1")),
-                   criterion=bool(d.get("criterion", False)), bones=list(d.get("bones", [])))
-
-
-def _entry_key(e: TrackingEntry) -> tuple:
-    return (True, "", "") if e.criterion else (False, e.rater, e.session)
-
-
 @dataclass
 class AnalysisSettings:
     mode: str = "validity"                  # "validity", "inter" or "intra"
     measures: tuple = DEFAULT_MEASURES
     rotation_threshold: float = 2.0         # deg (Welte 2022)
     translation_threshold: float = 1.0      # mm
-    inter_session: str = ""                 # inter-rater: which session ("" = each rater's first)
+    inter_session: str = ""                 # inter-rater: which session ("" = the first)
     pool: str = "none"                      # "none", "trials" (pool a bone's trials) or "all" (pool bones too)
 
     def threshold(self, m: Measure) -> float:
         return self.rotation_threshold if m.kind == "rotation" else self.translation_threshold
 
 
-MODES = [("validity", "Raters vs criterion (validity)"), ("inter", "Between raters (inter-rater)"),
-         ("intra", "Within raters, between sessions (intra-rater)")]
+MODES = [("validity", "Assessors vs reference (validity)"), ("inter", "Between assessors (inter-rater)"),
+         ("intra", "Between sessions (intra-rater)")]
 
 
 @dataclass(eq=False)
 class Comparison:
-    """Per-frame values of one test tracking against one reference tracking."""
+    """Per-frame values of one test tracking against one reference tracking, or why it can't be made."""
     mode: str
     trial: str
     bone: str
-    test: str               # label of the test tracking (rater, maybe with session)
+    test: str               # label of the test tracking (assessor, maybe with session)
     ref: str                # label of the reference tracking
     frames: np.ndarray      # trial frames (0-based) tracked in both
     values: dict            # measure key -> (n,) array, aligned with frames
     n_test: int = 0         # frames tracked in the test tracking
     n_ref: int = 0
+    missing: str = ""       # why there are no values (a file not loaded, unreadable, no common frames)
 
     @property
     def label(self) -> str:
         return self.test if self.mode == "validity" else f"{self.test} vs {self.ref}"
 
+    @property
+    def ok(self) -> bool:
+        return not self.missing and len(self.frames) > 0
+
 
 @dataclass(eq=False)
 class AssessmentProject:
+    """The factors of an evaluation and the tracking file in each of their combinations.
+
+    Factors: bones (with optional surface/axes), assessors, sessions, trials, and whether there is a
+    reference (criterion). Every combination trial × bone × (reference, or assessor × session) is a slot
+    for one tracking file; slots can be left empty, and comparisons that need an empty slot are N/A.
+    """
     name: str = "Assessor evaluation"
-    entries: list = field(default_factory=list)       # TrackingEntry
-    bones: list = field(default_factory=list)         # BoneInfo (surface / axes per bone label)
+    entries: list = field(default_factory=list)          # TrackingEntry, one per filled slot
+    bones: list = field(default_factory=list)            # BoneInfo, in order: the bone factor
     settings: AnalysisSettings = field(default_factory=AnalysisSettings)
     pattern: str = ""
-    assessors: list = field(default_factory=list)     # Assessor, the reference (if any) first
+    assessor_names: list = field(default_factory=list)
+    session_names: list = field(default_factory=lambda: ["1"])
+    trial_names: list = field(default_factory=lambda: ["Trial 1"])
+    has_reference: bool = False
 
-    # ---- lookups
+    # ---- factors
     def trials(self) -> list[str]:
-        return _unique(e.trial for e in self.entries) or ["Trial 1"]
+        return list(self.trial_names)
 
     def bone_names(self) -> list[str]:
-        return _unique([b.name for b in self.bones] + [x for a in self.assessors for x in a.bones]
-                       + [e.bone for e in self.entries if e.bone])
+        return [b.name for b in self.bones]
 
-    # ---- assessors and their bones
-    @property
-    def reference(self) -> Assessor | None:
-        return next((a for a in self.assessors if a.criterion), None)
+    def raters(self) -> list[str]:
+        return list(self.assessor_names)
 
-    def raters_list(self) -> list[Assessor]:
-        return [a for a in self.assessors if not a.criterion]
-
-    def display_name(self, a: Assessor) -> str:
-        if a.criterion:
-            return "Reference"
-        multi = sum(o.name == a.name for o in self.raters_list()) > 1 or a.session != "1"
-        return f"{a.name} · session {a.session}" if multi else a.name
-
-    def assessor_of(self, e: TrackingEntry) -> Assessor | None:
-        k = _entry_key(e)
-        return next((a for a in self.assessors if a.key() == k), None)
-
-    def entries_of(self, a: Assessor, bone: str | None = None) -> list[TrackingEntry]:
-        k = a.key()
-        return [e for e in self.entries if _entry_key(e) == k and (bone is None or e.bone == bone)]
-
-    def entry(self, a: Assessor, bone: str, trial: str) -> TrackingEntry | None:
-        return next((e for e in self.entries_of(a, bone) if e.trial == trial), None)
-
-    def find_assessor(self, name: str, session: str = "1") -> Assessor | None:
-        return next((a for a in self.raters_list() if a.name == name and a.session == session), None)
+    def sessions(self) -> list[str]:
+        return list(self.session_names)
 
     def bone_info_for(self, name: str) -> BoneInfo:
-        """The bone's surface/axes record (made if missing)."""
         for b in self.bones:
-            if b.name == name and not b.trial:
+            if b.name == name:
                 return b
         b = BoneInfo(name=name)
         self.bones.append(b)
         return b
 
-    def add_assessor(self, name: str, session: str = "1", copy_bones_from: Assessor | None = None) -> Assessor:
-        if self.find_assessor(name, session) is not None:
-            raise ValueError(f"There is already an assessor {name}, session {session}.")
-        a = Assessor(name=name, session=session, bones=list(copy_bones_from.bones) if copy_bones_from else [])
-        self.assessors.append(a)
-        return a
+    def bone_info(self, trial: str, bone: str) -> BoneInfo | None:
+        return next((b for b in self.bones if b.name == bone), None)
 
-    def add_reference(self, copy_bones_from: Assessor | None = None) -> Assessor:
-        if self.reference is not None:
-            return self.reference
-        a = Assessor(name=CRITERION, criterion=True, bones=list(copy_bones_from.bones) if copy_bones_from else [])
-        self.assessors.insert(0, a)
-        return a
+    def _add(self, names: list, name: str, what: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError(f"The {what} needs a name.")
+        if name in names:
+            raise ValueError(f"There is already a{'n' * (what[0] in 'aeiou')} {what} '{name}'.")
+        names.append(name)
+        return name
 
-    def add_bone(self, a: Assessor, label: str) -> None:
-        label = label.strip()
-        if not label:
-            raise ValueError("A bone needs a label.")
-        if label in a.bones:
-            raise ValueError(f"{self.display_name(a)} already has a bone '{label}'.")
-        a.bones.append(label)
-        self.bone_info_for(label)
+    def add_bone(self, name: str) -> str:
+        name = self._add(self.bone_names(), name, "bone")
+        self.bones.append(BoneInfo(name=name))
+        return name
 
-    def remove_bone(self, a: Assessor, label: str) -> None:
-        if label in a.bones:
-            a.bones.remove(label)
-        self.entries = [e for e in self.entries if not (_entry_key(e) == a.key() and e.bone == label)]
-        self._drop_unused_bones()
+    def add_assessor(self, name: str) -> str:
+        return self._add(self.assessor_names, name, "assessor")
 
-    def remove_assessor(self, a: Assessor) -> None:
-        k = a.key()
-        self.entries = [e for e in self.entries if _entry_key(e) != k]
-        self.assessors.remove(a)
-        self._drop_unused_bones()
+    def add_session(self, name: str | None = None) -> str:
+        if name is None:
+            name = next(str(i) for i in range(1, 1000) if str(i) not in self.session_names)
+        return self._add(self.session_names, name, "session")
 
-    def rename_assessor(self, a: Assessor, name: str, session: str | None = None) -> None:
-        if a.criterion:
-            return
-        session = a.session if session is None else session
-        other = self.find_assessor(name, session)
-        if other is not None and other is not a:
-            raise ValueError(f"There is already an assessor {name}, session {session}.")
-        for e in self.entries_of(a):
-            e.rater, e.session = name, session
-        a.name, a.session = name, session
+    def add_trial(self, name: str | None = None) -> str:
+        if name is None:
+            name = next(f"Trial {i}" for i in range(1, 1000) if f"Trial {i}" not in self.trial_names)
+        return self._add(self.trial_names, name, "trial")
 
-    def relabel_bone(self, a: Assessor, old: str, new: str) -> None:
-        """Change the label of one assessor's bone (e.g. to match the other assessors')."""
+    def next_assessor_name(self) -> str:
+        return next(f"Assessor {i}" for i in range(1, 1000) if f"Assessor {i}" not in self.assessor_names)
+
+    def _names(self, factor: str) -> list:
+        return {"bone": self.bone_names(), "assessor": self.assessor_names, "session": self.session_names,
+                "trial": self.trial_names}[factor]
+
+    def rename(self, factor: str, old: str, new: str) -> None:
+        """Rename a bone, assessor, session or trial; its tracking files follow."""
         new = new.strip()
         if new == old:
             return
-        if new in a.bones:
-            raise ValueError(f"{self.display_name(a)} already has a bone '{new}'.")
-        a.bones[a.bones.index(old)] = new
-        for e in self.entries_of(a, old):
-            e.bone = new
-        self.bone_info_for(new)
-        self._drop_unused_bones()
-
-    def rename_bone(self, old: str, new: str) -> None:
-        """Rename a bone label everywhere (every assessor, the reference and the bone's surface/axes)."""
-        new = new.strip()
-        if new == old:
-            return
-        if new in self.bone_names():
-            raise ValueError(f"There is already a bone '{new}'.")
-        for a in self.assessors:
-            a.bones = [new if x == old else x for x in a.bones]
+        names = self._names(factor)
+        if not new:
+            raise ValueError(f"The {factor} needs a name.")
+        if new in names:
+            raise ValueError(f"There is already a{'n' * (factor[0] in 'aeiou')} {factor} '{new}'.")
+        attr = _FIELDS[factor]
         for e in self.entries:
-            if e.bone == old:
-                e.bone = new
-        for b in self.bones:
-            if b.name == old:
-                b.name = new
+            if getattr(e, attr) == old and not (e.criterion and factor in ("assessor", "session")):
+                setattr(e, attr, new)
+        if factor == "bone":
+            self.bone_info_for(old).name = new
+        else:
+            names[names.index(old)] = new
 
-    def set_tracking(self, a: Assessor, bone: str, trial: str, path, overrides=None, volume: int = 0,
-                     offset: int = 0) -> TrackingEntry:
-        """Attach (or replace) the tracking file of an assessor's bone in a trial, and read it."""
-        if bone not in a.bones:
-            self.add_bone(a, bone)
-        old = self.entry(a, bone, trial)
+    def remove(self, factor: str, name: str) -> None:
+        """Remove a bone, assessor, session or trial and the tracking files in its slots."""
+        attr = _FIELDS[factor]
+        self.entries = [e for e in self.entries if not (getattr(e, attr) == name and
+                                                         not (e.criterion and factor in ("assessor", "session")))]
+        if factor == "bone":
+            self.bones = [b for b in self.bones if b.name != name]
+        else:
+            self._names(factor).remove(name)
+            if factor in ("session", "trial") and not self._names(factor):
+                self._names(factor).append("1" if factor == "session" else "Trial 1")
+
+    def set_reference(self, on: bool) -> None:
+        self.has_reference = bool(on)
+        if not on:
+            self.entries = [e for e in self.entries if not e.criterion]
+
+    def move(self, factor: str, name: str, step: int) -> None:
+        lst = self.bones if factor == "bone" else self._names(factor)
+        i = next(k for k, x in enumerate(lst) if (x.name if factor == "bone" else x) == name)
+        j = max(0, min(len(lst) - 1, i + step))
+        lst.insert(j, lst.pop(i))
+
+    # ---- slots and their tracking
+    def rows(self) -> list[tuple]:
+        """The grid's rows: (who, session); who is CRITERION for the reference."""
+        out = [(CRITERION, "")] if self.has_reference else []
+        return out + [(a, s) for a in self.assessor_names for s in self.session_names]
+
+    def row_label(self, who: str, session: str) -> str:
+        if who == CRITERION:
+            return "Reference"
+        return who if len(self.session_names) == 1 else f"{who} · session {session}"
+
+    def entry(self, trial: str, bone: str, who: str, session: str = "") -> TrackingEntry | None:
+        crit = who == CRITERION
+        for e in self.entries:
+            if e.trial == trial and e.bone == bone and e.criterion == crit and \
+                    (crit or (e.rater == who and e.session == session)):
+                return e
+        return None
+
+    def set_entry(self, trial: str, bone: str, who: str, session: str, path, overrides=None, volume: int = 0,
+                  offset: int = 0) -> TrackingEntry:
+        """Put a tracking file in a slot (replacing any there), adding factors it names, and read it."""
+        if trial not in self.trial_names:
+            self.add_trial(trial)
+        if bone not in self.bone_names():
+            self.add_bone(bone)
+        crit = who == CRITERION
+        if crit:
+            self.has_reference = True
+        else:
+            if who not in self.assessor_names:
+                self.add_assessor(who)
+            if session not in self.session_names:
+                self.add_session(session)
+        old = self.entry(trial, bone, who, session)
         if old is not None:
             self.entries.remove(old)
-        e = TrackingEntry(path=Path(path), trial=trial, bone=bone, rater="" if a.criterion else a.name,
-                          session="1" if a.criterion else a.session, criterion=a.criterion,
-                          overrides=dict(overrides or {}), volume=volume, offset=offset)
+        e = TrackingEntry(path=Path(path), trial=trial, bone=bone, rater="" if crit else who,
+                          session="" if crit else session, criterion=crit, overrides=dict(overrides or {}),
+                          volume=volume, offset=offset)
         e.load()
         self.entries.append(e)
         return e
 
-    def sync_assessors(self) -> None:
-        """Make sure every tracking entry has its assessor and bone (e.g. after a folder import)."""
+    def filled(self) -> tuple[int, int]:
+        """(slots with a file, all slots)."""
+        n = len(self.trial_names) * len(self.bones) * len(self.rows())
+        have = sum(self.entry(t, b, w, s) is not None for t in self.trial_names for b in self.bone_names()
+                   for w, s in self.rows())
+        return have, n
+
+    def sync_factors(self) -> None:
+        """Add any bone, assessor, session or trial that tracking entries name (e.g. older project files)."""
         for e in self.entries:
-            a = self.assessor_of(e)
-            if a is None:
-                if e.criterion:
-                    a = self.add_reference()
-                elif e.rater:
-                    a = Assessor(name=e.rater, session=e.session)
-                    self.assessors.append(a)
-                else:
-                    continue
-            if e.bone and e.bone not in a.bones:
-                a.bones.append(e.bone)
-            if e.bone:
-                self.bone_info_for(e.bone)
-
-    def _drop_unused_bones(self) -> None:
-        used = set(self.bone_names_in_use())
-        self.bones = [b for b in self.bones if b.name in used or b.surface is not None or b.axes_path]
-
-    def bone_names_in_use(self) -> list[str]:
-        return _unique([x for a in self.assessors for x in a.bones] + [e.bone for e in self.entries if e.bone])
-
-    def raters(self) -> list[str]:
-        return _unique([a.name for a in self.raters_list()]
-                       + [e.rater for e in self.entries if not e.criterion and e.rater])
-
-    def sessions(self) -> list[str]:
-        return _unique([a.session for a in self.raters_list()] + [e.session for e in self.entries if not e.criterion])
-
-    def bone_info(self, trial: str, bone: str) -> BoneInfo | None:
-        for b in self.bones:
-            if b.name == bone and b.trial == trial:
-                return b
-        for b in self.bones:
-            if b.name == bone and not b.trial:
-                return b
-        return None
+            if e.trial and e.trial not in self.trial_names:
+                self.trial_names.append(e.trial)
+            if e.bone and e.bone not in self.bone_names():
+                self.bones.append(BoneInfo(name=e.bone))
+            if e.criterion:
+                self.has_reference = True
+                e.session = ""
+            else:
+                if e.rater and e.rater not in self.assessor_names:
+                    self.assessor_names.append(e.rater)
+                if e.session and e.session not in self.session_names:
+                    self.session_names.append(e.session)
+        for lst, used in ((self.trial_names, {e.trial for e in self.entries}),
+                          (self.session_names, {e.session for e in self.entries if not e.criterion})):
+            default = "Trial 1" if lst is self.trial_names else "1"
+            if default in lst and default not in used and len(lst) > 1:
+                lst.remove(default)
 
     def available_measures(self) -> list[str]:
         has_surface = any(b.surface is not None for b in self.bones)
@@ -530,28 +513,12 @@ class AssessmentProject:
 
     # ---- checks
     def problems(self) -> list[str]:
-        """Things that stop entries being compared or look suspicious."""
+        """Files that can't be read, and files of one bone and trial with different numbers of rows."""
         out = []
         for e in self.entries:
             if e.error:
-                out.append(f"{e.path.name} ({e.bone}): {e.error}")
-            elif not e.bone:
-                out.append(f"{e.path.name}: no bone set")
-            elif not e.criterion and not e.rater:
-                out.append(f"{e.path.name}: no rater set")
-        keys = {}
-        for e in self.entries:
-            k = (e.trial, e.bone, e.who, "" if e.criterion else e.session)
-            if k in keys:
-                out.append(f"{e.path.name} and {keys[k].path.name} are both {e.who}"
-                           + ("" if e.criterion else f", session {e.session}") + f", {e.bone}, {e.trial}")
-            keys[k] = e
-        if len(self.assessors) > 1:
-            for bone in self.bone_names_in_use():
-                having = [a for a in self.assessors if bone in a.bones]
-                if len(having) == 1:
-                    out.append(f"Only {self.display_name(having[0])} has a bone '{bone}', so it can't be compared: "
-                               "give it the same label as the others' bone")
+                out.append(f"{e.path.name} ({self.row_label(e.who if not e.criterion else CRITERION, e.session)}, "
+                           f"{e.bone}): {e.error}")
         for group in _groupby(self.entries, lambda e: (e.trial, e.bone)).values():
             spans = {(e.tracking.offset, e.tracking.n_rows) for e in group if e.tracking is not None}
             if len(spans) > 1:
@@ -560,46 +527,61 @@ class AssessmentProject:
         return out
 
     # ---- comparisons
+    def test_label(self, who: str, session: str) -> str:
+        return who if len(self.session_names) == 1 else f"{who} s{session}"
+
     def comparisons(self, settings: AnalysisSettings | None = None) -> list[Comparison]:
+        """Every comparison the factors call for, in order: computed where both files are there, otherwise
+        with `missing` saying which file is missing."""
         s = settings or self.settings
         out = []
-        for (trial, bone), group in _groupby(self.entries, lambda e: (e.trial, e.bone)).items():
-            group = [e for e in group if e.tracking is not None and e.bone]
-            crit = [e for e in group if e.criterion]
-            raters = [e for e in group if not e.criterion and e.rater]
-            multi_session = len({e.session for e in raters}) > 1
-            pairs = []
-            if s.mode == "validity":
-                for c in crit[:1]:
-                    pairs += [(e, c, _label(e, multi_session), CRITERION) for e in raters]
-            elif s.mode == "inter":
-                chosen = {}
-                for e in sorted(raters, key=lambda e: _session_key(e.session)):
-                    if s.inter_session and e.session != s.inter_session:
-                        continue
-                    chosen.setdefault(e.rater, e)
-                for a, b in itertools.combinations(chosen.values(), 2):
-                    pairs.append((a, b, a.rater, b.rater))
-            elif s.mode == "intra":
-                for mine in _groupby(raters, lambda e: e.rater).values():
-                    mine = sorted(mine, key=lambda e: _session_key(e.session))
-                    for a, b in itertools.combinations(mine, 2):
-                        pairs.append((b, a, f"{b.rater} s{b.session}", f"{a.rater} s{a.session}"))
-            info = self.bone_info(trial, bone)
-            pts = info.points() if info is not None else None
-            acs = info.acs if info is not None else None
-            for test, ref, tl, rl in pairs:
-                out.append(compare(test.tracking, ref.tracking, s.mode, trial, bone, tl, rl, pts, acs))
-        order = {b: i for i, b in enumerate(self.bone_names())}
-        trials = {t: i for i, t in enumerate(self.trials())}
-        out.sort(key=lambda c: (trials.get(c.trial, 0), order.get(c.bone, 0)))
+        for trial in self.trial_names:
+            for bone in self.bone_names():
+                info = self.bone_info_for(bone)
+                pts, acs = info.points(), info.acs
+                for test, ref, tl, rl in self._pairs(s, trial, bone):
+                    out.append(self._compare(s.mode, trial, bone, test, ref, tl, rl, pts, acs))
         return out
+
+    def _pairs(self, s: AnalysisSettings, trial: str, bone: str):
+        """(test slot, reference slot, test label, reference label); slots are (who, session)."""
+        if s.mode == "validity":
+            if self.has_reference:
+                for a in self.assessor_names:
+                    for ses in self.session_names:
+                        yield (a, ses), (CRITERION, ""), self.test_label(a, ses), CRITERION
+        elif s.mode == "inter":
+            ses = s.inter_session if s.inter_session in self.session_names else self.session_names[0]
+            for a, b in itertools.combinations(self.assessor_names, 2):
+                yield (a, ses), (b, ses), a, b
+        elif s.mode == "intra":
+            for a in self.assessor_names:
+                for s1, s2 in itertools.combinations(self.session_names, 2):
+                    yield (a, s2), (a, s1), f"{a} s{s2}", f"{a} s{s1}"
+
+    def _compare(self, mode, trial, bone, test, ref, tl, rl, pts, acs) -> Comparison:
+        et, er = self.entry(trial, bone, *test), self.entry(trial, bone, *ref)
+        missing = []
+        for e, slot in ((et, test), (er, ref)):
+            name = self.row_label(*slot)
+            if e is None:
+                missing.append(f"no file for {name}")
+            elif e.tracking is None:
+                missing.append(f"{name}'s file can't be read")
+        if missing:
+            return Comparison(mode, trial, bone, tl, rl, np.zeros(0, int), {}, missing="; ".join(missing))
+        c = compare(et.tracking, er.tracking, mode, trial, bone, tl, rl, pts, acs)
+        if not len(c.frames):
+            c.missing = "no frames tracked in both"
+        return c
 
     # ---- file
     def to_dict(self) -> dict:
         st = self.settings
-        return {"tool": "assessor", "version": 2, "name": self.name, "pattern": self.pattern,
-                "assessors": [a.to_dict() for a in self.assessors],
+        return {"tool": "assessor", "version": 3, "name": self.name, "pattern": self.pattern,
+                "factors": {"bones": self.bone_names(), "assessors": self.assessor_names,
+                            "sessions": self.session_names, "trials": self.trial_names,
+                            "reference": self.has_reference},
                 "entries": [e.to_dict() for e in self.entries], "bones": [b.to_dict() for b in self.bones],
                 "settings": {"mode": st.mode, "measures": list(st.measures),
                              "rotation_threshold": st.rotation_threshold,
@@ -611,7 +593,7 @@ class AssessmentProject:
 
     @classmethod
     def load(cls, path, build_surfaces: bool = True) -> AssessmentProject:
-        """Read a project file. Tracking files are read; surfaces are built when build_surfaces."""
+        """Read a project file (any version). Tracking files are read; surfaces built when build_surfaces."""
         from .models import BoneModel
 
         d = json.loads(Path(path).read_text())
@@ -624,7 +606,24 @@ class AssessmentProject:
                                           rotation_threshold=float(st.get("rotation_threshold", 2.0)),
                                           translation_threshold=float(st.get("translation_threshold", 1.0)),
                                           inter_session=st.get("inter_session", ""), pool=st.get("pool", "none")))
-        p.assessors = [Assessor.from_dict(a) for a in d.get("assessors", [])]
+        f = d.get("factors")
+        if f:
+            p.assessor_names = list(f.get("assessors", []))
+            p.session_names = list(f.get("sessions", ["1"])) or ["1"]
+            p.trial_names = list(f.get("trials", ["Trial 1"])) or ["Trial 1"]
+            p.has_reference = bool(f.get("reference", False))
+            p.bones = [BoneInfo(name=b) for b in f.get("bones", [])]
+        for a in d.get("assessors", []):                  # version 2: assessors with their bones
+            if a.get("criterion"):
+                p.has_reference = True
+            else:
+                if a["name"] not in p.assessor_names:
+                    p.assessor_names.append(a["name"])
+                if str(a.get("session", "1")) not in p.session_names:
+                    p.session_names.append(str(a.get("session", "1")))
+            for b in a.get("bones", []):
+                if b not in p.bone_names():
+                    p.bones.append(BoneInfo(name=b))
         for ed in d.get("entries", []):
             e = TrackingEntry.from_dict(ed)
             e.load()
@@ -636,11 +635,10 @@ class AssessmentProject:
                     surf.build()
                 except Exception:  # noqa: BLE001 - reported as a bone without a surface
                     surf = None
-            b = BoneInfo(name=bd["name"], trial=bd.get("trial", ""), surface=surf,
-                         axes_path=bd.get("axes_path"), axes_segment=bd.get("axes_segment"))
+            b = p.bone_info_for(bd["name"])
+            b.surface, b.axes_path, b.axes_segment = surf, bd.get("axes_path"), bd.get("axes_segment")
             load_bone_axes(b)
-            p.bones.append(b)
-        p.sync_assessors()                  # version 1 files had no assessors
+        p.sync_factors()
         return p
 
 
@@ -666,10 +664,6 @@ def compare(test: Tracking, ref: Tracking, mode: str, trial: str, bone: str, tes
     vals = measure_values(test.poses[frames], ref.poses[frames], points, acs) if len(frames) else {}
     return Comparison(mode, trial, bone, test_label, ref_label, frames, vals,
                       int(test.valid.sum()), int(ref.valid.sum()))
-
-
-def _label(e: TrackingEntry, multi_session: bool) -> str:
-    return f"{e.rater} s{e.session}" if multi_session else e.rater
 
 
 def _session_key(s: str):
@@ -700,15 +694,21 @@ def _groupby(items, key) -> dict:
 class SummaryRow:
     trial: str
     bone: str
-    label: str              # comparison label (rater, or "A vs B")
+    label: str              # comparison label (assessor, or "A vs B")
     measure: str
-    stats: dict
+    stats: dict             # {"n": 0} when N/A
     frames_test: int = 0
     frames_ref: int = 0
+    note: str = ""          # why it's N/A, or how many of the pooled comparisons are missing
+
+    @property
+    def na(self) -> bool:
+        return self.stats.get("n", 0) == 0
 
 
 def summarise(comps: list[Comparison], settings: AnalysisSettings) -> list[SummaryRow]:
-    """Statistics per comparison and measure, pooled over trials (and bones) if the settings say so."""
+    """Statistics per comparison and measure (pooled over trials, and bones, if the settings say so).
+    Comparisons without values give N/A rows that say why."""
     def group_key(c: Comparison):
         if settings.pool == "all":
             return ("All trials", "All bones", c.label)
@@ -718,14 +718,22 @@ def summarise(comps: list[Comparison], settings: AnalysisSettings) -> list[Summa
 
     rows = []
     for (trial, bone, label), group in _groupby(comps, group_key).items():
+        ok = [c for c in group if c.ok]
+        missing = [c for c in group if not c.ok]
+        if not ok:
+            note = "; ".join(_unique(c.missing for c in missing))
+        elif missing:
+            note = f"{len(missing)} of {len(group)} comparisons missing"
+        else:
+            note = ""
         for key in settings.measures:
             m = MEASURES[key]
-            arrays = [c.values[key] for c in group if key in c.values]
-            if not arrays:
-                continue
-            x = np.concatenate(arrays)
-            rows.append(SummaryRow(trial, bone, label, key, statistics(x, settings.threshold(m), m.signed),
-                                   sum(c.n_test for c in group), sum(c.n_ref for c in group)))
+            arrays = [c.values[key] for c in ok if key in c.values]
+            if ok and not arrays:
+                continue                    # measure not available for this bone (no surface / axes)
+            stats = statistics(np.concatenate(arrays), settings.threshold(m), m.signed) if arrays else {"n": 0}
+            rows.append(SummaryRow(trial, bone, label, key, stats, sum(c.n_test for c in ok),
+                                   sum(c.n_ref for c in ok), note))
     return rows
 
 
@@ -735,6 +743,8 @@ def write_frames_csv(path, comps: list[Comparison], measures) -> None:
         w = csv.writer(fh)
         w.writerow(["trial", "bone", "comparison", "test", "reference", "frame", "measure", "value", "unit"])
         for c in comps:
+            if not c.ok:
+                continue
             for key in measures:
                 if key not in c.values:
                     continue
@@ -746,11 +756,12 @@ def write_frames_csv(path, comps: list[Comparison], measures) -> None:
 def write_summary_csv(path, rows: list[SummaryRow]) -> None:
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["trial", "bone", "comparison", "measure", "unit"] + [k for k, _ in STAT_COLUMNS])
+        w.writerow(["trial", "bone", "comparison", "measure", "unit"] + [k for k, _ in STAT_COLUMNS] + ["note"])
         for r in rows:
             m = MEASURES[r.measure]
-            w.writerow([r.trial, r.bone, r.label, r.measure, m.unit]
-                       + [_fmt_csv(r.stats.get(k)) for k, _ in STAT_COLUMNS])
+            vals = ["0"] + ["NA"] * (len(STAT_COLUMNS) - 1) if r.na else [_fmt_csv(r.stats.get(k))
+                                                                         for k, _ in STAT_COLUMNS]
+            w.writerow([r.trial, r.bone, r.label, r.measure, m.unit] + vals + [r.note])
 
 
 def _fmt_csv(v) -> str:
@@ -806,4 +817,62 @@ def guess_fields(path: Path, root: Path | None, bone_names, pattern: str = "") -
     out["criterion"] = any(w in low for w in CRITERION_WORDS) and "rater" not in out
     if "rater" not in out and not out["criterion"]:
         out["rater"] = path.parent.name
+    return out
+
+
+_SESSION = re.compile(r"(?:^|[^a-z0-9])(?:s|ses|sess|session)[ _-]?(\d+)(?![0-9])", re.IGNORECASE)
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.split(r"[^a-z0-9]+", text.lower()) if t]
+
+
+def match_file(path: Path, project: AssessmentProject, root: Path | None = None, pattern: str = "") -> dict:
+    """Which slot a tracking file is for: bone, who (an assessor or CRITERION), session and trial.
+
+    Taken from the name pattern where it matches; otherwise matched against the project's own bone,
+    assessor and trial names appearing in the path (folders and file name), a session written like
+    s2 / ses2 / session_2, and reference/criterion/gold/bead for the reference. Missing items are omitted.
+    """
+    path = Path(path)
+    out: dict = {}
+    if pattern:
+        f = guess_fields(path, root, project.bone_names(), pattern)
+        for k_in, k_out in (("bone", "bone"), ("rater", "who"), ("session", "session"), ("trial", "trial")):
+            if f.get(k_in):
+                out[k_out] = f[k_in]
+    rel = path.relative_to(root) if root is not None and path.is_relative_to(root) else Path(*path.parts[-3:])
+    text = rel.with_suffix("").as_posix()
+    toks = _tokens(text)
+    stem_toks = _tokens(path.stem)
+    if "bone" not in out:
+        for b in sorted(project.bone_names(), key=len, reverse=True):
+            bt = _tokens(b)
+            if bt and any(stem_toks[i:i + len(bt)] == bt for i in range(len(stem_toks))):
+                out["bone"] = b
+                break
+    if "who" not in out:
+        if any(w in text.lower() for w in CRITERION_WORDS):
+            out["who"] = CRITERION
+        else:
+            for a in sorted(project.raters(), key=len, reverse=True):
+                at = _tokens(a)
+                if at and any(toks[i:i + len(at)] == at for i in range(len(toks))):
+                    out["who"] = a
+                    break
+    if "session" not in out and out.get("who") != CRITERION:
+        m = _SESSION.search(text)
+        if m and str(int(m.group(1))) in project.sessions():
+            out["session"] = str(int(m.group(1)))
+        elif len(project.sessions()) == 1:
+            out["session"] = project.sessions()[0]
+    if "trial" not in out:
+        for t in sorted(project.trials(), key=len, reverse=True):
+            tt = _tokens(t)
+            if tt and any(toks[i:i + len(tt)] == tt for i in range(len(toks))):
+                out["trial"] = t
+                break
+        else:
+            if len(project.trials()) == 1:
+                out["trial"] = project.trials()[0]
     return out

@@ -81,7 +81,7 @@ def draw_distributions(fig: Figure, comps: list[Comparison], settings: AnalysisS
     """Violins: rows = bones, columns = measures; x = raters (or pairs)."""
     fig.clear()
     measures = [k for k in settings.measures if any(k in c.values for c in comps)]
-    if not comps or not measures:
+    if not any(c.ok for c in comps) or not measures:
         fig.text(0.5, 0.5, "No comparisons yet", ha="center", va="center", color="#666")
         return
     bones = _bones(comps, settings.pool)
@@ -99,7 +99,9 @@ def draw_distributions(fig: Figure, comps: list[Comparison], settings: AnalysisS
             top = 3 * thr if cap else None
             hidden = 0
             for i, (lab, x) in enumerate(zip(labels, data)):
-                if len(x) == 0:
+                if len(x) == 0:             # a comparison the factors call for, but a file is missing
+                    ax.text(i, 0.04, "N/A", transform=ax.get_xaxis_transform(), ha="center", va="bottom",
+                            fontsize=7, color="#999")
                     continue
                 shown = x if top is None else x[np.abs(x) <= top]
                 hidden += len(x) - len(shown)

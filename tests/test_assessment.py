@@ -1,5 +1,7 @@
 """Assessor evaluation core: pose differences, measures, statistics, comparisons and files."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
@@ -85,28 +87,31 @@ def test_statistics():
 
 
 def _project():
+    """Reference + raters A (0.5 deg) and B (2 deg), sessions 1 and 2, bone tib; frame 1 untracked by raters."""
     rng = np.random.default_rng(3)
     n = 20
     truth = np.array([_T(rng.normal(size=3) * 20, rng.normal(size=3) * 50) for _ in range(n)])
     p = A.AssessmentProject()
-    crit = A.TrackingEntry(path=__import__("pathlib").Path("crit.tra"), bone="tib", criterion=True)
+    crit = A.TrackingEntry(path=Path("crit.tra"), bone="tib", criterion=True)
     crit.tracking = _track(truth)
     p.entries.append(crit)
     for rater, err in [("A", 0.5), ("B", 2.0)]:
         for session in ("1", "2"):
             poses = np.array([t @ _T((err, 0, 0)) for t in truth])
             poses[0] = np.nan                                         # untracked frame
-            e = A.TrackingEntry(path=__import__("pathlib").Path(f"{rater}{session}.tra"), bone="tib",
-                                rater=rater, session=session)
+            e = A.TrackingEntry(path=Path(f"{rater}{session}.tra"), bone="tib", rater=rater, session=session)
             e.tracking = _track(poses)
             p.entries.append(e)
+    p.sync_factors()
     return p
 
 
 def test_validity_inter_and_intra_comparisons():
     p = _project()
+    assert (p.bone_names(), p.raters(), p.sessions(), p.trials(), p.has_reference) == \
+        (["tib"], ["A", "B"], ["1", "2"], ["Trial 1"], True)
     comps = p.comparisons(A.AnalysisSettings(mode="validity"))
-    assert [c.label for c in comps] == ["A s1", "A s2", "B s1", "B s2"]
+    assert [c.label for c in comps] == ["A s1", "A s2", "B s1", "B s2"] and all(c.ok for c in comps)
     assert all(len(c.frames) == 19 for c in comps)                   # frame 1 untracked by raters
     np.testing.assert_allclose(comps[0].values["helical_rotation"], 0.5, atol=1e-9)
     np.testing.assert_allclose(comps[2].values["helical_rotation"], 2.0, atol=1e-9)
@@ -121,14 +126,48 @@ def test_validity_inter_and_intra_comparisons():
     assert not p.problems()
 
 
+def test_gaps_give_na_with_reasons(tmp_path):
+    p = _project()
+    p.add_assessor("C")                                              # an assessor with no files at all
+    p.add_bone("tal")                                                # a bone nobody has tracked
+    # B didn't do session 2
+    p.entries = [e for e in p.entries if not (e.rater == "B" and e.session == "2")]
+    assert p.filled() == (4, 2 * (1 + 3 * 2))
+    st = A.AnalysisSettings(mode="validity", measures=("helical_rotation",))
+    comps = p.comparisons(st)
+    assert len(comps) == 2 * 3 * 2                                  # bones x assessors x sessions
+    by = {(c.bone, c.label): c for c in comps}
+    assert by[("tib", "A s1")].ok and by[("tib", "B s1")].ok
+    assert by[("tib", "B s2")].missing == "no file for B · session 2"
+    assert by[("tal", "A s1")].missing == "no file for A · session 1; no file for Reference"
+    rows = {(r.bone, r.label): r for r in A.summarise(comps, st)}
+    assert rows[("tib", "B s2")].na and "B · session 2" in rows[("tib", "B s2")].note
+    assert not rows[("tib", "A s1")].na and rows[("tib", "A s1")].note == ""
+    intra = {c.label: c for c in p.comparisons(A.AnalysisSettings(mode="intra")) if c.bone == "tib"}
+    assert intra["A s2 vs A s1"].ok and not intra["B s2 vs B s1"].ok and not intra["C s2 vs C s1"].ok
+    inter = [c.label for c in p.comparisons(A.AnalysisSettings(mode="inter")) if c.bone == "tib"]
+    assert inter == ["A vs B", "A vs C", "B vs C"]
+    # pooled over bones: tib values count, tal's missing ones are noted
+    pooled = A.summarise(comps, A.AnalysisSettings(mode="validity", measures=("helical_rotation",), pool="all"))
+    a1 = next(r for r in pooled if r.label == "A s1")
+    assert a1.stats["n"] == 19 and a1.note == "1 of 2 comparisons missing"
+    A.write_summary_csv(tmp_path / "s.csv", A.summarise(comps, st))
+    text = (tmp_path / "s.csv").read_text()
+    assert "Trial 1,tib,B s2,helical_rotation,deg,0,NA" in text and "no file for B · session 2" in text
+    # no reference: validity has nothing to compare
+    p.set_reference(False)
+    assert p.comparisons(st) == [] and not any(e.criterion for e in p.entries)
+
+
 def test_pooling_and_csv(tmp_path):
     p = _project()
-    for e in p.entries:                                             # a second trial, same data
-        if e.trial == "Trial 1":
-            f = A.TrackingEntry(path=e.path, trial="Trial 2", bone=e.bone, rater=e.rater, session=e.session,
-                                criterion=e.criterion)
-            f.tracking = e.tracking
-            p.entries.append(f)
+    for e in list(p.entries):                                       # a second trial, same data
+        f = A.TrackingEntry(path=e.path, trial="Trial 2", bone=e.bone, rater=e.rater, session=e.session,
+                            criterion=e.criterion)
+        f.tracking = e.tracking
+        p.entries.append(f)
+    p.sync_factors()
+    assert p.trials() == ["Trial 1", "Trial 2"]
     st = A.AnalysisSettings(mode="validity", measures=("helical_rotation",), pool="trials")
     comps = p.comparisons(st)
     rows = A.summarise(comps, st)
@@ -140,13 +179,10 @@ def test_pooling_and_csv(tmp_path):
     assert (tmp_path / "s.csv").read_text().splitlines()[1].startswith("All trials,tib,A s1,helical_rotation,deg,38")
 
 
-def test_duplicates_and_mismatched_lengths_are_reported():
+def test_mismatched_lengths_are_reported():
     p = _project()
-    p.entries[1].session = "2"
     p.entries[3].tracking = _track(p.entries[3].tracking.poses[:15])
-    probs = p.problems()
-    assert any("both A, session 2" in s for s in probs)
-    assert any("different numbers of rows" in s for s in probs)
+    assert any("different numbers of rows" in s for s in p.problems())
 
 
 def test_file_patterns(tmp_path):
@@ -156,90 +192,101 @@ def test_file_patterns(tmp_path):
     assert fields == {"rater": "RaterA", "trial": "T0019", "session": "2", "bone": "tib", "criterion": False}
     g = A.guess_fields(root / "Reference" / "T0019_jog0001_cal.tra", root, ["tib", "tal", "cal"])
     assert g["bone"] == "cal" and g["criterion"]
-    h = A.guess_fields(root / "Jo" / "jog_tal.tra", root, ["tib", "tal", "cal"])
-    assert h["bone"] == "tal" and h["rater"] == "Jo" and not h["criterion"]
     with pytest.raises(ValueError):
         A.pattern_regex("{nope}")
+
+
+def test_matching_files_to_slots(tmp_path):
+    p = A.AssessmentProject()
+    for b in ("tib", "tal", "cal"):
+        p.add_bone(b)
+    for a in ("Expert", "Novice A"):
+        p.add_assessor(a)
+    p.add_session()
+    p.set_reference(True)
+    m = A.match_file(tmp_path / "Expert" / "T0019_jog0001_s2_tal.tra", p)
+    assert m == {"bone": "tal", "who": "Expert", "session": "2", "trial": "Trial 1"}
+    m = A.match_file(tmp_path / "raters" / "novice_a_session1_cal.tra", p)
+    assert m == {"bone": "cal", "who": "Novice A", "session": "1", "trial": "Trial 1"}
+    m = A.match_file(tmp_path / "Reference" / "T0019_jog0001_tib.tra", p)
+    assert m == {"bone": "tib", "who": A.CRITERION, "trial": "Trial 1"}
+    m = A.match_file(tmp_path / "x" / "unknown.tra", p)
+    assert "bone" not in m and "who" not in m and "session" not in m      # two sessions: can't guess
+
+
+def test_factors_rename_remove_and_slots(tmp_path):
+    rng = np.random.default_rng(5)
+    truth = np.array([_T(rng.normal(size=3) * 20, rng.normal(size=3) * 50) for _ in range(10)])
+    tra = tmp_path / "x.tra"
+    tra.write_text("\n".join(",".join(f"{v:.10f}" for v in T.reshape(-1)) for T in truth))
+    p = A.AssessmentProject()
+    p.add_bone("tib")
+    p.add_assessor("Jo")
+    with pytest.raises(ValueError):
+        p.add_assessor("Jo")
+    assert p.rows() == [("Jo", "1")]
+    p.set_reference(True)
+    assert p.rows() == [(A.CRITERION, ""), ("Jo", "1")] and p.row_label(A.CRITERION, "") == "Reference"
+    p.set_entry("Trial 1", "tib", A.CRITERION, "", tra)
+    e = p.set_entry("Trial 1", "tib", "Jo", "1", tra)
+    assert e.tracking.n_rows == 10 and p.filled() == (2, 2)
+    p.set_entry("Trial 1", "tib", "Jo", "1", tra)                     # replacing keeps one entry per slot
+    assert len(p.entries) == 2
+    # a file for a new combination adds its factors
+    p.set_entry("Trial 2", "tal", "Sam", "2", tra)
+    assert (p.trials(), p.bone_names(), p.raters(), p.sessions()) == \
+        (["Trial 1", "Trial 2"], ["tib", "tal"], ["Jo", "Sam"], ["1", "2"])
+    # renames carry the files; the reference's file isn't touched by assessor/session renames
+    p.rename("assessor", "Jo", "Joanne")
+    p.rename("session", "1", "pre")
+    p.rename("bone", "tib", "tibia")
+    p.rename("trial", "Trial 1", "jog")
+    assert p.entry("jog", "tibia", "Joanne", "pre") is not None and p.entry("jog", "tibia", A.CRITERION) is not None
+    with pytest.raises(ValueError):
+        p.rename("bone", "tibia", "tal")
+    p.move("assessor", "Sam", -1)
+    assert p.raters() == ["Sam", "Joanne"]
+    # removing a factor removes the files in its slots
+    p.remove("assessor", "Sam")
+    assert all(e.rater != "Sam" for e in p.entries) and p.raters() == ["Joanne"]
+    p.remove("session", "pre")
+    assert p.sessions() == ["2"] and all(e.criterion for e in p.entries)
+    # the project file keeps the factors, including combinations without files
+    p.add_assessor("Kim")
+    p.save(tmp_path / "p.bvrassess.json")
+    q = A.AssessmentProject.load(tmp_path / "p.bvrassess.json")
+    assert (q.bone_names(), q.raters(), q.sessions(), q.trials(), q.has_reference) == \
+        (p.bone_names(), p.raters(), p.sessions(), p.trials(), p.has_reference)
+    assert len(q.entries) == len(p.entries)
+
+
+def test_older_project_files_get_factors(tmp_path):
+    tra = tmp_path / "a.tra"
+    tra.write_text("\n".join(",".join(f"{v:.6f}" for v in np.eye(4).reshape(-1)) for _ in range(3)))
+    d = {"tool": "assessor", "version": 1, "entries": [
+        {"path": str(tra), "bone": "tib", "criterion": True},
+        {"path": str(tra), "bone": "tib", "rater": "A", "session": "1"},
+        {"path": str(tra), "bone": "tal", "rater": "A", "session": "2", "trial": "jog"}]}
+    (tmp_path / "v1.json").write_text(__import__("json").dumps(d))
+    q = A.AssessmentProject.load(tmp_path / "v1.json")
+    assert (q.bone_names(), q.raters(), q.sessions(), q.has_reference) == (["tib", "tal"], ["A"], ["1", "2"], True)
+    assert q.trials() == ["Trial 1", "jog"]
+    d2 = {"tool": "assessor", "version": 2, "assessors": [
+        {"name": "Criterion", "criterion": True, "bones": ["tib"]},
+        {"name": "Jo", "session": "1", "bones": ["tib", "cal"]}], "entries": []}
+    (tmp_path / "v2.json").write_text(__import__("json").dumps(d2))
+    q = A.AssessmentProject.load(tmp_path / "v2.json")
+    assert (q.bone_names(), q.raters(), q.sessions(), q.has_reference) == (["tib", "cal"], ["Jo"], ["1"], True)
 
 
 def test_project_round_trip(tmp_path):
     tra = tmp_path / "a.tra"
     tra.write_text("\n".join(",".join(f"{v:.6f}" for v in np.eye(4).reshape(-1)) for _ in range(3)))
     p = A.AssessmentProject(pattern="{rater}/{bone}")
-    p.entries.append(A.TrackingEntry(path=tra, bone="tib", rater="A", session="2", offset=1))
+    p.set_entry("Trial 1", "tib", "A", "2", tra, offset=1)
     p.settings.mode = "inter"
     p.save(tmp_path / "x.bvrassess.json")
     q = A.AssessmentProject.load(tmp_path / "x.bvrassess.json")
     assert q.settings.mode == "inter" and q.pattern == "{rater}/{bone}"
     e = q.entries[0]
     assert (e.rater, e.session, e.offset) == ("A", "2", 1) and e.tracking.n_frames == 4
-
-
-def _tra(path, poses):
-    path.write_text("\n".join(",".join(f"{v:.10f}" for v in T.reshape(-1)) for T in poses))
-    return path
-
-
-def test_assessors_bones_and_tracking(tmp_path):
-    rng = np.random.default_rng(5)
-    truth = np.array([_T(rng.normal(size=3) * 20, rng.normal(size=3) * 50) for _ in range(10)])
-    p = A.AssessmentProject()
-    ref = p.add_reference()
-    for b in ("tib", "tal"):
-        p.add_bone(ref, b)
-        p.set_tracking(ref, b, "Trial 1", _tra(tmp_path / f"ref_{b}.tra", truth))
-    jo = p.add_assessor("Jo", copy_bones_from=ref)                   # same bones as the reference
-    assert jo.bones == ["tib", "tal"] and not p.entries_of(jo)
-    with pytest.raises(ValueError):
-        p.add_assessor("Jo")
-    with pytest.raises(ValueError):
-        p.add_bone(jo, "tib")
-    p.set_tracking(jo, "tib", "Trial 1", _tra(tmp_path / "jo_tib.tra", [t @ _T((1, 0, 0)) for t in truth]))
-    comps = p.comparisons(A.AnalysisSettings(mode="validity"))
-    assert [(c.bone, c.label) for c in comps] == [("tib", "Jo")]
-    np.testing.assert_allclose(comps[0].values["helical_rotation"], 1.0, atol=1e-6)
-    # a second session copies the bones; display names then show the sessions
-    assert p.display_name(jo) == "Jo"
-    jo2 = p.add_assessor("Jo", "2", copy_bones_from=jo)
-    assert p.display_name(jo) == "Jo · session 1" and p.display_name(jo2) == "Jo · session 2"
-    assert p.sessions() == ["1", "2"]
-    # an assessor's bone with another label can't be matched until it's relabelled
-    sam = p.add_assessor("Sam")
-    p.set_tracking(sam, "tibia", "Trial 1", _tra(tmp_path / "sam.tra", [t @ _T((0, 2, 0)) for t in truth]))
-    assert any("Only Sam has a bone 'tibia'" in s for s in p.problems())
-    p.relabel_bone(sam, "tibia", "tib")
-    assert sam.bones == ["tib"] and p.entry(sam, "tib", "Trial 1").bone == "tib"
-    assert not any("Only Sam" in s for s in p.problems())
-    assert {c.label for c in p.comparisons(A.AnalysisSettings(mode="inter"))} == {"Jo vs Sam"}
-    # rename an assessor (its tracking follows) and a bone everywhere
-    p.rename_assessor(sam, "Samira")
-    assert p.entry(sam, "tib", "Trial 1").rater == "Samira"
-    p.rename_bone("tib", "tibia")
-    assert ref.bones[0] == "tibia" and all(e.bone != "tib" for e in p.entries)
-    assert p.bone_info_for("tibia") in p.bones
-    # replacing a file keeps one entry per bone and trial; another trial adds one
-    p.set_tracking(jo, "tibia", "Trial 1", tmp_path / "jo_tib.tra")
-    p.set_tracking(jo, "tibia", "Trial 2", tmp_path / "jo_tib.tra")
-    assert len(p.entries_of(jo, "tibia")) == 2 and p.trials() == ["Trial 1", "Trial 2"]
-    # removing
-    p.remove_bone(jo, "tibia")
-    assert "tibia" not in jo.bones and not p.entries_of(jo, "tibia")
-    p.remove_assessor(sam)
-    assert sam not in p.assessors and all(e.rater != "Samira" for e in p.entries)
-    # the project file keeps assessors, including bones without tracking
-    p.save(tmp_path / "p.bvrassess.json")
-    q = A.AssessmentProject.load(tmp_path / "p.bvrassess.json")
-    assert [(a.name, a.session, a.criterion, a.bones) for a in q.assessors] == \
-        [(a.name, a.session, a.criterion, a.bones) for a in p.assessors]
-
-
-def test_version_1_files_get_assessors(tmp_path):
-    tra = _tra(tmp_path / "a.tra", [np.eye(4)] * 3)
-    d = {"tool": "assessor", "version": 1, "entries": [
-        {"path": str(tra), "bone": "tib", "criterion": True},
-        {"path": str(tra), "bone": "tib", "rater": "A", "session": "1"},
-        {"path": str(tra), "bone": "tal", "rater": "A", "session": "2"}]}
-    (tmp_path / "v1.json").write_text(__import__("json").dumps(d))
-    q = A.AssessmentProject.load(tmp_path / "v1.json")
-    assert [(q.display_name(a), a.bones) for a in q.assessors] == \
-        [("Reference", ["tib"]), ("A · session 1", ["tib"]), ("A · session 2", ["tal"])]

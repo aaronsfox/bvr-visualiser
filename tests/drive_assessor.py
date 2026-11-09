@@ -86,7 +86,7 @@ print("simulated raters written", flush=True)
 app = QApplication(sys.argv)
 apply_theme(app)
 win = MainWindow()
-win.resize(1600, 960)
+win.resize(1600, 980)
 win.show()
 
 
@@ -123,136 +123,129 @@ def accept(self):
 
 
 dialogs.FormatDialog.exec = accept
-p = tab.project
 setup = sys.modules["bvrviewer.app.assessor_setup"]
+p = tab.project
 
-# 1. the reference: add it, add its bones one by one with their tracking files
-ref = tab.add_reference(ask=False)
-assert ref is p.reference and ref.criterion
+# 1. the factors: bones, assessors, sessions and the reference
 for b in BONES:
-    tab.add_bone(ref, b, path=sim / "Reference" / f"{TRIAL}_{b}.tra")
-assert ref.bones == list(BONES) and len(p.entries_of(ref)) == 3
+    tab.add_bone(b)
+for r in RATERS:
+    tab.add_factor("assessor", r)
+tab.add_factor("session", "2")
+tab.reference.setChecked(True)
+assert (p.bone_names(), p.raters(), p.sessions(), p.trials(), p.has_reference) == \
+    (list(BONES), list(RATERS), ["1", "2"], ["Trial 1"], True)
+g = tab.grid
+assert (g.rowCount(), g.columnCount()) == (1 + 3 * 2, 3)
+assert [g.verticalHeaderItem(r).text() for r in range(3)] == ["Reference", "Expert · session 1",
+                                                               "Expert · session 2"]
+assert g.item(0, 0).text() == "+" and tab.coverage.text() == "0 of 21 cells filled"
+shot("a01_factors_empty_grid")
+
+# 2. fill the reference cells one by one
+for c, b in enumerate(BONES):
+    assert tab.load_cell("Trial 1", b, A.CRITERION, "", sim / "Reference" / f"{TRIAL}_{b}.tra")
 assert asked == [f"{TRIAL}_tib.tra"], asked          # asked once, then remembered for the tab
-assert p.trials() == ["Trial 1"]
+assert g.item(0, 0).text() == f"{TRIAL}_tib.tra"
 
-# 2. the first assessor starts with the reference's bones; its files are matched to bones by name
-expert = tab.add_assessor("Expert", "1", copy_from=ref, ask=False)
-assert expert.bones == list(BONES) and not p.entries_of(expert)
-item = tab.tree.currentItem()
-assert setup.SetupTree.data(item)[1] is expert and item.text(0) == "Expert"
-assert [item.child(i).text(0) for i in range(item.childCount())] == list(BONES)
-assert item.child(0).child(0).text(1).startswith("none")          # tracking not loaded yet: grey row
-assert item.child(0).text(1).startswith("none")                  # shown on the bone row too (one trial)
-menu = [a.text() for a in tab.build_menu(setup.SetupTree.data(item)).actions() if a.text()]
-assert menu[:2] == ["Add bone…", "Load tracking files…"] and "Add another session" in menu, menu
-files = [sim / "Expert" / f"{TRIAL}_s1_{b}.tra" for b in BONES]
-md = setup.MatchDialog(tab, p, expert, files)
-assert [r[1] for r in md.values()] == list(BONES) and {r[2] for r in md.values()} == {"Trial 1"}
-setup.MatchDialog.exec = lambda self: QDialog.Accepted
-tab.load_tracking_files(expert, files)
-assert all(p.entry(expert, b, "Trial 1") is not None for b in BONES)
-
-# 3. more assessors and sessions copy the bones of an earlier one
-expert2 = tab.add_session(expert)
-assert (expert2.name, expert2.session, expert2.bones) == ("Expert", "2", list(BONES))
-assert p.display_name(expert) == "Expert · session 1" and p.display_name(expert2) == "Expert · session 2"
-tab.load_tracking_files(expert2, [sim / "Expert" / f"{TRIAL}_s2_{b}.tra" for b in BONES])
-for rater in ("NoviceA", "NoviceB"):
-    a1 = tab.add_assessor(rater, "1", copy_from=expert, ask=False)
-    tab.load_tracking_files(a1, [sim / rater / f"{TRIAL}_s1_{b}.tra" for b in BONES])
-    a2 = tab.add_session(a1)
-    tab.load_tracking_files(a2, [sim / rater / f"{TRIAL}_s2_{b}.tra" for b in BONES])
-assert p.raters() == ["Expert", "NoviceA", "NoviceB"] and p.sessions() == ["1", "2"]
-assert len(p.entries) == 3 + 3 * 2 * 3 and not p.problems(), p.problems()
-
-# a bone under another label isn't compared until it matches the others
-nb = p.find_assessor("NoviceB", "1")
-p.relabel_bone(nb, "cal", "calcaneus")
-tab.refresh_tables()
-assert any("Only NoviceB · session 1 has a bone 'calcaneus'" in s for s in p.problems()), p.problems()
-bd = setup.BoneDialog(tab, p, nb, current="calcaneus", title="Change bone label", ask_file=False)
-assert bd.combo.findData("cal") >= 0                  # the label the others use is offered
-p.relabel_bone(nb, "calcaneus", "cal")
-tab.refresh_tables()
-assert not p.problems()
+# 3. fill the rest from files, matched to cells by the names in their paths; leave one gap
+paths = sorted(str(x) for x in sim.rglob("*_s*_*.tra") if x.parent.name != "Reference")
+gap = str(sim / "NoviceB" / f"{TRIAL}_s2_cal.tra")
+paths.remove(gap)
+fd = setup.FillDialog(tab, p, paths, sim)
+got = {(Path(x).parent.name, Path(x).name): (t, b, w, s_) for x, t, b, w, s_ in fd.values()}
+assert len(got) == 17 and got[("NoviceA", f"{TRIAL}_s2_tal.tra")] == ("Trial 1", "tal", "NoviceA", "2")
+setup.FillDialog.exec = lambda self: QDialog.Accepted
+assert tab.fill_from_files(paths) == 17
+assert tab.coverage.text() == "20 of 21 cells filled" and not p.problems(), p.problems()
+r_gap = g.slots.index(("NoviceB", "2"))
+assert g.item(r_gap, 2).text() == "+" and g.item(r_gap, 0).text().endswith("_s2_tib.tra")
 tab.recompute()
 pump()
 
-# validity: the errors come out in the order and size simulated
+# validity: the errors come out in the order and size simulated; the gap is N/A
 st = p.settings
 assert st.mode == "validity" and st.measures == ("helical_rotation", "helical_translation")
-rows = {(r.bone, r.label, r.measure): r.stats for r in tab.rows}
+assert len(tab.all_comps) == 18 and len(tab.comps) == 17
+assert "17 of 18 comparisons available (1 N/A" in tab.headline.text(), tab.headline.text()
+rows = {(r.bone, r.label, r.measure): r for r in tab.rows}
 for b in BONES:
-    m = [rows[(b, f"{r} s1", "helical_rotation")]["median"] for r in RATERS]
+    m = [rows[(b, f"{r} s1", "helical_rotation")].stats["median"] for r in RATERS]
     assert m[0] < m[1] < m[2], (b, m)
     assert 0.2 < m[0] < 0.7 and 0.7 < m[1] < 2.0, (b, m)
-assert rows[("cal", "NoviceA s1", "helical_rotation")]["n"] == 17      # two untracked frames dropped
-assert rows[("tib", "NoviceB s1", "helical_rotation")]["outliers"] >= 1 or \
-    rows[("tib", "NoviceB s1", "helical_rotation")]["over"] >= 3
-shot("a01_files_and_summary")
+na = rows[("cal", "NoviceB s2", "helical_rotation")]
+assert na.na and na.note == "no file for NoviceB · session 2", na.note
+assert rows[("cal", "NoviceA s1", "helical_rotation")].stats["n"] == 17      # two untracked frames dropped
+r_na = next(i for i, r in enumerate(tab.rows) if r is na)
+assert tab.summary.item(r_na, 5).text() == "N/A" and "no file" in tab.summary.item(r_na, tab.summary.columnCount() - 1).text()
+shot("a02_grid_and_summary")
 
 # surfaces from the .cfg (TIF partial volumes) add the surface distance
 tab.add_cfg(str(ANK / "2025-01-12-Ankle.cfg"))
 pump()
 assert all(b.surface is not None for b in p.bones) and len(p.bones) == 3
-assert tab.measure_checks["surface_mean"].isEnabled()
-tab.measure_checks["surface_mean"].setChecked(True)
+assert tab.bones_table.item(0, 1).text() == "tib.tif"
+assert tab.measure_checks["surface_mean"].isEnabled() and tab.measure_checks["surface_mean"].isChecked()
 tab.recompute()
 rows = {(r.bone, r.label, r.measure): r.stats for r in tab.rows}
 sd = rows[("tib", "Expert s1", "surface_mean")]["median"]
 assert 0.1 < sd < 2.0, sd
 tab.tabs.setCurrentWidget(tab.dist)
 pump()
-shot("a02_distributions_validity")
-tab.dist.fig.savefig(OUT / "a02_distributions_validity_figure.png", dpi=150)
+shot("a03_distributions_validity")
+tab.dist.fig.savefig(OUT / "a03_distributions_validity_figure.png", dpi=150)
 tab.cap.setChecked(True)
 pump()
-tab.dist.fig.savefig(OUT / "a03_distributions_capped_figure.png", dpi=150)
+tab.dist.fig.savefig(OUT / "a04_distributions_capped_figure.png", dpi=150)
 tab.cap.setChecked(False)
 tab.tabs.setCurrentWidget(tab.frames_fig)
 pump()
-shot("a04_over_frames")
-tab.frames_fig.fig.savefig(OUT / "a04_over_frames_figure.png", dpi=150)
+tab.frames_fig.fig.savefig(OUT / "a05_over_frames_figure.png", dpi=150)
 
-# inter-rater (session 1 of each rater): 3 pairs per bone
+# inter-rater (one session): 3 pairs per bone; session 2 has the gap
 tab.mode.setCurrentIndex(tab.mode.findData("inter"))
 tab.recompute()
-labels = sorted({c.label for c in tab.comps})
-assert labels == ["Expert vs NoviceA", "Expert vs NoviceB", "NoviceA vs NoviceB"], labels
+assert sorted({c.label for c in tab.all_comps}) == ["Expert vs NoviceA", "Expert vs NoviceB", "NoviceA vs NoviceB"]
+assert len(tab.comps) == 9
 tab.session.setCurrentIndex(tab.session.findData("2"))
 tab.recompute()
-assert p.settings.inter_session == "2" and len(tab.comps) == 9
+assert p.settings.inter_session == "2" and len(tab.all_comps) == 9 and len(tab.comps) == 7
 tab.tabs.setCurrentWidget(tab.dist)
 pump()
-tab.dist.fig.savefig(OUT / "a05_distributions_inter_figure.png", dpi=150)
+tab.dist.fig.savefig(OUT / "a06_distributions_inter_s2_figure.png", dpi=150)
 
-# intra-rater: session 2 vs session 1 for each rater
+# intra-rater: session 2 vs session 1; NoviceB's calcaneus is N/A
 tab.mode.setCurrentIndex(tab.mode.findData("intra"))
 tab.recompute()
-assert sorted({c.label for c in tab.comps}) == ["Expert s2 vs Expert s1", "NoviceA s2 vs NoviceA s1",
-                                                 "NoviceB s2 vs NoviceB s1"]
+assert len(tab.all_comps) == 9 and len(tab.comps) == 8
+assert [r.note for r in tab.rows if r.bone == "cal" and r.label == "NoviceB s2 vs NoviceB s1"][0] == \
+    "no file for NoviceB · session 2"
 tab.tabs.setCurrentWidget(tab.summary)
-shot("a06_summary_intra")
+shot("a07_summary_intra")
 
 # pooled statistics
 tab.mode.setCurrentIndex(tab.mode.findData("validity"))
 tab.pool.setCurrentIndex(tab.pool.findData("all"))
 tab.recompute()
-assert {r.bone for r in tab.rows} == {"All bones"} and len({r.label for r in tab.rows}) == 6
-tab.tabs.setCurrentWidget(tab.dist)
-pump()
-tab.dist.fig.savefig(OUT / "a07_distributions_pooled_figure.png", dpi=150)
+pooled = {r.label: r for r in tab.rows if r.measure == "helical_rotation"}
+assert set(pooled) == {f"{r} s{s}" for r in RATERS for s in ("1", "2")}
+assert pooled["NoviceB s2"].note == "1 of 3 comparisons missing" and not pooled["NoviceB s2"].na
 tab.pool.setCurrentIndex(tab.pool.findData("none"))
 tab.recompute()
 
-# a criterion in the wrong space is flagged
-far = [e for e in p.entries if e.criterion and e.bone == "tal"][0]
+# a reference in the wrong space is flagged
+far = p.entry("Trial 1", "tal", A.CRITERION)
 far.tracking.poses[:, :3, 3] += 200.0
 tab.recompute()
 assert tab.space_warn.isVisibleTo(tab) and "same bone space" in tab.space_warn.text()
 far.load()
 tab.recompute()
 assert not tab.space_warn.isVisibleTo(tab)
+
+# renaming and removing factors keeps the files in their cells
+tab.rename_factor("assessor", "NoviceA", "Novice A")
+assert p.entry("Trial 1", "tib", "Novice A", "1") is not None
+tab.rename_factor("assessor", "Novice A", "NoviceA")
 
 # exports and the project file
 tab.export_summary(str(OUT / "summary.csv"))
@@ -261,33 +254,30 @@ tab.export_figures(str(OUT / "fig.png"))
 assert (OUT / "fig_distributions.png").exists() and (OUT / "fig_frames_helical_rotation.png").exists()
 head = (OUT / "summary.csv").read_text().splitlines()
 assert head[0].startswith("trial,bone,comparison,measure,unit,n,mean") and len(head) == 1 + len(tab.rows)
+assert any(",NA," in line and "no file for NoviceB" in line for line in head)
 frames = (OUT / "frames.csv").read_text().splitlines()
 assert frames[1].startswith("Trial 1,tib,validity,Expert s1,Criterion,1,helical_rotation"), frames[1]
 tab.save_project(str(OUT / "project.bvrassess.json"))
-before = [(r.label, r.measure, round(r.stats["mean"], 9)) for r in tab.rows]
+before = [(r.label, r.measure, r.note, round(r.stats.get("mean", -1), 9)) for r in tab.rows]
 next(a for a in new_tab.actions() if a.text() == "Assessor Evaluation").trigger()
 pump()
 tab2 = win.current()
 tab2.open_project(str(OUT / "project.bvrassess.json"))
 tab2.recompute()
-after = [(r.label, r.measure, round(r.stats["mean"], 9)) for r in tab2.rows]
+after = [(r.label, r.measure, r.note, round(r.stats.get("mean", -1), 9)) for r in tab2.rows]
 assert before == after
-assert win.tabs.tabText(2) == tab.state.name
+assert tab2.coverage.text() == "20 of 21 cells filled"
 
-# the folder import makes the same assessors, bones and tracking from file names
+# filling from a folder with a name pattern adds assessors and sessions it names
 next(a for a in new_tab.actions() if a.text() == "Assessor Evaluation").trigger()
 pump()
 tab3 = win.current()
 tab3._format = dict(p.entries[0].overrides)
-tab3.import_folder(str(sim), "{rater}/*_s{session}_{bone}")
+for b in BONES:
+    tab3.add_bone(b)
+assert tab3.fill_from_folder(str(sim), "{rater}/*_s{session}_{bone}") == 21
 q = tab3.project
-assert [q.display_name(a) for a in q.assessors] == ["Reference"] + [f"{r} · session {s}" for r in RATERS
-                                                                    for s in ("1", "2")], \
-    [q.display_name(a) for a in q.assessors]
-assert all(a.bones == list(BONES) or sorted(a.bones) == sorted(BONES) for a in q.assessors)
-assert len(q.entries) == len(p.entries) and not q.problems(), q.problems()
-tab3.recompute()
-assert sorted((r.bone, r.label, round(r.stats["mean"], 9)) for r in tab3.rows if r.measure == "helical_rotation") \
-    == sorted((r.bone, r.label, round(r.stats["mean"], 9)) for r in tab.rows if r.measure == "helical_rotation")
+assert (q.raters(), q.sessions(), q.has_reference) == (list(RATERS), ["1", "2"], True), (q.raters(), q.sessions())
+assert tab3.coverage.text() == "21 of 21 cells filled"
 print("ASSESSOR OK", flush=True)
 assert asmod  # module imported for the record
