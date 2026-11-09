@@ -112,29 +112,69 @@ tab = win.current()
 assert tab.kind == "assessor" and win.tabs.tabText(1) == "Assessor 1"
 shot("a00_empty")
 
-# Format dialog: accept what was detected, remember for the rest of the import
+# Format dialog: accept what was detected; remember it for the tab after the first file
 asked = []
 
 
 def accept(self):
     asked.append(self.path.name)
+    self.remember.setChecked(True)
     return QDialog.Accepted
 
 
 dialogs.FormatDialog.exec = accept
-tab.pattern.setText("{rater}/{trial}_s{session}_{bone}")
-tab._pattern_changed()
-tab.add_folder(str(sim))
-pump()
 p = tab.project
-assert len(p.entries) == 3 + 3 * 2 * 3, len(p.entries)
-assert len(asked) == 1, asked                    # one question for the whole import
-crit = [e for e in p.entries if e.criterion]
-assert len(crit) == 3 and {e.bone for e in crit} == set(BONES), [(e.path, e.bone) for e in crit]
-for e in crit:                                    # the reference files don't match the pattern: guessed,
-    assert e.trial == TRIAL                       # with the trial already in use
+setup = sys.modules["bvrviewer.app.assessor_setup"]
+
+# 1. the reference: add it, add its bones one by one with their tracking files
+ref = tab.add_reference(ask=False)
+assert ref is p.reference and ref.criterion
+for b in BONES:
+    tab.add_bone(ref, b, path=sim / "Reference" / f"{TRIAL}_{b}.tra")
+assert ref.bones == list(BONES) and len(p.entries_of(ref)) == 3
+assert asked == [f"{TRIAL}_tib.tra"], asked          # asked once, then remembered for the tab
+assert p.trials() == ["Trial 1"]
+
+# 2. the first assessor starts with the reference's bones; its files are matched to bones by name
+expert = tab.add_assessor("Expert", "1", copy_from=ref, ask=False)
+assert expert.bones == list(BONES) and not p.entries_of(expert)
+item = tab.tree.currentItem()
+assert setup.SetupTree.data(item)[1] is expert and item.text(0) == "Expert"
+assert [item.child(i).text(0) for i in range(item.childCount())] == list(BONES)
+assert item.child(0).child(0).text(1).startswith("none")          # tracking not loaded yet: grey row
+assert item.child(0).text(1).startswith("none")                  # shown on the bone row too (one trial)
+menu = [a.text() for a in tab.build_menu(setup.SetupTree.data(item)).actions() if a.text()]
+assert menu[:2] == ["Add bone…", "Load tracking files…"] and "Add another session" in menu, menu
+files = [sim / "Expert" / f"{TRIAL}_s1_{b}.tra" for b in BONES]
+md = setup.MatchDialog(tab, p, expert, files)
+assert [r[1] for r in md.values()] == list(BONES) and {r[2] for r in md.values()} == {"Trial 1"}
+setup.MatchDialog.exec = lambda self: QDialog.Accepted
+tab.load_tracking_files(expert, files)
+assert all(p.entry(expert, b, "Trial 1") is not None for b in BONES)
+
+# 3. more assessors and sessions copy the bones of an earlier one
+expert2 = tab.add_session(expert)
+assert (expert2.name, expert2.session, expert2.bones) == ("Expert", "2", list(BONES))
+assert p.display_name(expert) == "Expert · session 1" and p.display_name(expert2) == "Expert · session 2"
+tab.load_tracking_files(expert2, [sim / "Expert" / f"{TRIAL}_s2_{b}.tra" for b in BONES])
+for rater in ("NoviceA", "NoviceB"):
+    a1 = tab.add_assessor(rater, "1", copy_from=expert, ask=False)
+    tab.load_tracking_files(a1, [sim / rater / f"{TRIAL}_s1_{b}.tra" for b in BONES])
+    a2 = tab.add_session(a1)
+    tab.load_tracking_files(a2, [sim / rater / f"{TRIAL}_s2_{b}.tra" for b in BONES])
 assert p.raters() == ["Expert", "NoviceA", "NoviceB"] and p.sessions() == ["1", "2"]
-assert {e.trial for e in p.entries} == {TRIAL} and not p.problems(), p.problems()
+assert len(p.entries) == 3 + 3 * 2 * 3 and not p.problems(), p.problems()
+
+# a bone under another label isn't compared until it matches the others
+nb = p.find_assessor("NoviceB", "1")
+p.relabel_bone(nb, "cal", "calcaneus")
+tab.refresh_tables()
+assert any("Only NoviceB · session 1 has a bone 'calcaneus'" in s for s in p.problems()), p.problems()
+bd = setup.BoneDialog(tab, p, nb, current="calcaneus", title="Change bone label", ask_file=False)
+assert bd.combo.findData("cal") >= 0                  # the label the others use is offered
+p.relabel_bone(nb, "calcaneus", "cal")
+tab.refresh_tables()
+assert not p.problems()
 tab.recompute()
 pump()
 
@@ -222,7 +262,7 @@ assert (OUT / "fig_distributions.png").exists() and (OUT / "fig_frames_helical_r
 head = (OUT / "summary.csv").read_text().splitlines()
 assert head[0].startswith("trial,bone,comparison,measure,unit,n,mean") and len(head) == 1 + len(tab.rows)
 frames = (OUT / "frames.csv").read_text().splitlines()
-assert frames[1].startswith(f"{TRIAL},cal,validity,Expert s1,Criterion,1,helical_rotation"), frames[1]
+assert frames[1].startswith("Trial 1,tib,validity,Expert s1,Criterion,1,helical_rotation"), frames[1]
 tab.save_project(str(OUT / "project.bvrassess.json"))
 before = [(r.label, r.measure, round(r.stats["mean"], 9)) for r in tab.rows]
 next(a for a in new_tab.actions() if a.text() == "Assessor Evaluation").trigger()
@@ -233,5 +273,21 @@ tab2.recompute()
 after = [(r.label, r.measure, round(r.stats["mean"], 9)) for r in tab2.rows]
 assert before == after
 assert win.tabs.tabText(2) == tab.state.name
+
+# the folder import makes the same assessors, bones and tracking from file names
+next(a for a in new_tab.actions() if a.text() == "Assessor Evaluation").trigger()
+pump()
+tab3 = win.current()
+tab3._format = dict(p.entries[0].overrides)
+tab3.import_folder(str(sim), "{rater}/*_s{session}_{bone}")
+q = tab3.project
+assert [q.display_name(a) for a in q.assessors] == ["Reference"] + [f"{r} · session {s}" for r in RATERS
+                                                                    for s in ("1", "2")], \
+    [q.display_name(a) for a in q.assessors]
+assert all(a.bones == list(BONES) or sorted(a.bones) == sorted(BONES) for a in q.assessors)
+assert len(q.entries) == len(p.entries) and not q.problems(), q.problems()
+tab3.recompute()
+assert sorted((r.bone, r.label, round(r.stats["mean"], 9)) for r in tab3.rows if r.measure == "helical_rotation") \
+    == sorted((r.bone, r.label, round(r.stats["mean"], 9)) for r in tab.rows if r.measure == "helical_rotation")
 print("ASSESSOR OK", flush=True)
 assert asmod  # module imported for the record

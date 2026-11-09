@@ -173,3 +173,73 @@ def test_project_round_trip(tmp_path):
     assert q.settings.mode == "inter" and q.pattern == "{rater}/{bone}"
     e = q.entries[0]
     assert (e.rater, e.session, e.offset) == ("A", "2", 1) and e.tracking.n_frames == 4
+
+
+def _tra(path, poses):
+    path.write_text("\n".join(",".join(f"{v:.10f}" for v in T.reshape(-1)) for T in poses))
+    return path
+
+
+def test_assessors_bones_and_tracking(tmp_path):
+    rng = np.random.default_rng(5)
+    truth = np.array([_T(rng.normal(size=3) * 20, rng.normal(size=3) * 50) for _ in range(10)])
+    p = A.AssessmentProject()
+    ref = p.add_reference()
+    for b in ("tib", "tal"):
+        p.add_bone(ref, b)
+        p.set_tracking(ref, b, "Trial 1", _tra(tmp_path / f"ref_{b}.tra", truth))
+    jo = p.add_assessor("Jo", copy_bones_from=ref)                   # same bones as the reference
+    assert jo.bones == ["tib", "tal"] and not p.entries_of(jo)
+    with pytest.raises(ValueError):
+        p.add_assessor("Jo")
+    with pytest.raises(ValueError):
+        p.add_bone(jo, "tib")
+    p.set_tracking(jo, "tib", "Trial 1", _tra(tmp_path / "jo_tib.tra", [t @ _T((1, 0, 0)) for t in truth]))
+    comps = p.comparisons(A.AnalysisSettings(mode="validity"))
+    assert [(c.bone, c.label) for c in comps] == [("tib", "Jo")]
+    np.testing.assert_allclose(comps[0].values["helical_rotation"], 1.0, atol=1e-6)
+    # a second session copies the bones; display names then show the sessions
+    assert p.display_name(jo) == "Jo"
+    jo2 = p.add_assessor("Jo", "2", copy_bones_from=jo)
+    assert p.display_name(jo) == "Jo · session 1" and p.display_name(jo2) == "Jo · session 2"
+    assert p.sessions() == ["1", "2"]
+    # an assessor's bone with another label can't be matched until it's relabelled
+    sam = p.add_assessor("Sam")
+    p.set_tracking(sam, "tibia", "Trial 1", _tra(tmp_path / "sam.tra", [t @ _T((0, 2, 0)) for t in truth]))
+    assert any("Only Sam has a bone 'tibia'" in s for s in p.problems())
+    p.relabel_bone(sam, "tibia", "tib")
+    assert sam.bones == ["tib"] and p.entry(sam, "tib", "Trial 1").bone == "tib"
+    assert not any("Only Sam" in s for s in p.problems())
+    assert {c.label for c in p.comparisons(A.AnalysisSettings(mode="inter"))} == {"Jo vs Sam"}
+    # rename an assessor (its tracking follows) and a bone everywhere
+    p.rename_assessor(sam, "Samira")
+    assert p.entry(sam, "tib", "Trial 1").rater == "Samira"
+    p.rename_bone("tib", "tibia")
+    assert ref.bones[0] == "tibia" and all(e.bone != "tib" for e in p.entries)
+    assert p.bone_info_for("tibia") in p.bones
+    # replacing a file keeps one entry per bone and trial; another trial adds one
+    p.set_tracking(jo, "tibia", "Trial 1", tmp_path / "jo_tib.tra")
+    p.set_tracking(jo, "tibia", "Trial 2", tmp_path / "jo_tib.tra")
+    assert len(p.entries_of(jo, "tibia")) == 2 and p.trials() == ["Trial 1", "Trial 2"]
+    # removing
+    p.remove_bone(jo, "tibia")
+    assert "tibia" not in jo.bones and not p.entries_of(jo, "tibia")
+    p.remove_assessor(sam)
+    assert sam not in p.assessors and all(e.rater != "Samira" for e in p.entries)
+    # the project file keeps assessors, including bones without tracking
+    p.save(tmp_path / "p.bvrassess.json")
+    q = A.AssessmentProject.load(tmp_path / "p.bvrassess.json")
+    assert [(a.name, a.session, a.criterion, a.bones) for a in q.assessors] == \
+        [(a.name, a.session, a.criterion, a.bones) for a in p.assessors]
+
+
+def test_version_1_files_get_assessors(tmp_path):
+    tra = _tra(tmp_path / "a.tra", [np.eye(4)] * 3)
+    d = {"tool": "assessor", "version": 1, "entries": [
+        {"path": str(tra), "bone": "tib", "criterion": True},
+        {"path": str(tra), "bone": "tib", "rater": "A", "session": "1"},
+        {"path": str(tra), "bone": "tal", "rater": "A", "session": "2"}]}
+    (tmp_path / "v1.json").write_text(__import__("json").dumps(d))
+    q = A.AssessmentProject.load(tmp_path / "v1.json")
+    assert [(q.display_name(a), a.bones) for a in q.assessors] == \
+        [("Reference", ["tib"]), ("A · session 1", ["tib"]), ("A · session 2", ["tal"])]

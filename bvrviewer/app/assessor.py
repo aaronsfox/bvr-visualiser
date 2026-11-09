@@ -1,9 +1,9 @@
 """Assessor Evaluation tab: reliability of raters' tracking, and validity against a criterion.
 
-Left: the set-up. Bones (optional surfaces for surface distance, optional coordinate systems from a model
-for bone-axes errors), the tracking files (trial, bone, rater, session, criterion; read from file and
-folder names with a pattern), and the analysis (validity / inter-rater / intra-rater, measures,
-thresholds, pooling). Right: the results, recomputed whenever the set-up changes: a summary table,
+Left: the set-up (app/assessor_setup.py): a tree of the bones (optional surfaces for surface distance,
+optional coordinate systems from a model for bone-axes errors), the reference (criterion) and the
+assessors, each with their bones and each bone's tracking file; and the analysis (validity / inter-rater /
+intra-rater, measures, thresholds, pooling). Right: the results, recomputed whenever the set-up changes: a summary table,
 violin plots of the errors (Welte et al. 2022, figure 4) and the error at every frame (figure 5).
 
 The calculations are in core/assessment.py; see the notes there on what each measure means.
@@ -11,7 +11,6 @@ The calculations are in core/assessment.py; see the notes there on what each mea
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -25,11 +24,12 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QInputDialog,
     QLineEdit,
     QMenu,
@@ -49,6 +49,21 @@ from ..core.config import read_cfg
 from ..core.models import BoneModel, is_volume_file
 from ..core.tracking import TrackingError, load_tracking
 from .assess_plots import draw_distributions, draw_over_frames
+from .assessor_setup import (
+    ABONE,
+    ASSESSOR,
+    ASSESSORS,
+    AXES,
+    BONE,
+    BONES,
+    REFERENCE,
+    SURFACE,
+    TRACK,
+    AssessorDialog,
+    BoneDialog,
+    MatchDialog,
+    SetupTree,
+)
 from .dialogs import FormatDialog
 from .panels import label, small_button
 
@@ -105,7 +120,8 @@ class AssessorTab(QWidget):
         self.project = A.AssessmentProject()
         self.comps: list = []
         self.rows: list = []
-        self._format: dict | None = None          # tracking options remembered while importing
+        self._format: dict | None = None          # tracking options remembered for this tab (when ticked)
+        self._last_dir = ""
         self._busy = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -142,73 +158,39 @@ class AssessorTab(QWidget):
             b.clicked.connect(lambda _=False, f=fn: f())
             top.addWidget(b)
         v.addLayout(top)
-        v.addWidget(label("Load each rater's Autoscoper tracking of the same trial (and, for validity, the "
-                          "criterion tracking, e.g. from beads). Results update as you go."))
+        v.addWidget(label("Add each assessor, then their bones, then each bone's tracking file. Bones are matched "
+                          "across assessors by label. Add the reference (criterion) tracking for validity."))
 
-        # ---- tracking files
-        v.addWidget(label("1  Tracking files", "H2", wrap=False))
-        pr = QHBoxLayout()
-        pr.addWidget(label("Name pattern", wrap=False))
-        self.pattern = QLineEdit()
-        self.pattern.setPlaceholderText("e.g. {rater}/{trial}_*_{bone}   (optional)")
-        self.pattern.setToolTip(
-            "How trial, rater, session and bone appear in the file paths, relative to the folder you add.\n"
-            "Fields: {trial} {rater} {session} {bone}; * matches anything; / separates folders.\n"
-            "Example: Raters/Jo/T0019_jog0001_s2_tib.tra with pattern {rater}/{trial}_*_s{session}_{bone}.\n"
-            "Without a pattern: bone = a bone name in the file name, rater = the folder name, and folders "
-            "or files named 'reference', 'criterion', 'gold' or 'bead' are the criterion.\n"
-            "Anything can be corrected in the table (double-click a cell).")
-        self.pattern.editingFinished.connect(self._pattern_changed)
-        pr.addWidget(self.pattern, 1)
-        v.addLayout(pr)
-        self.files = QTableWidget(0, 7)
-        self.files.setHorizontalHeaderLabels(["Trial", "Bone", "Rater", "Session", "Criterion", "Frames", "File"])
-        self.files.verticalHeader().setVisible(False)
-        self.files.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.files.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.files.horizontalHeader().setStretchLastSection(True)
-        self.files.setMinimumHeight(220)
-        self.files.itemChanged.connect(self._file_cell_changed)
-        self.files.itemDoubleClicked.connect(self._file_double_clicked)
-        self.files.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.files.customContextMenuRequested.connect(self._files_menu)
-        v.addWidget(self.files, 1)
-        fb = QHBoxLayout()
-        for text, fn in [("Add folder…", self.add_folder), ("Add files…", self.add_files),
-                         ("Format and frames…", self.edit_format), ("Remove", self.remove_files)]:
+        bar = QHBoxLayout()
+        for text, fn, tip in [("+ Add assessor", self.add_assessor, "An assessor (rater) in one session"),
+                              ("+ Add reference", self.add_reference,
+                               "The criterion (gold-standard) tracking, e.g. bead-based")]:
             b = small_button(text)
+            b.setToolTip(tip)
             b.clicked.connect(lambda _=False, f=fn: f())
-            fb.addWidget(b)
-        fb.addStretch(1)
-        v.addLayout(fb)
+            bar.addWidget(b)
+        more = QPushButton("More ▾")
+        more.setObjectName("Small")
+        m = QMenu(more)
+        m.addAction("Import a folder of tracking files…", self.import_folder)
+        m.addSeparator()
+        m.addAction("Bone surfaces…", self.add_surfaces)
+        m.addAction("Bone surfaces from an Autoscoper .cfg…", self.add_cfg)
+        m.addAction("Bone coordinate systems from a model…", self.add_axes)
+        more.setMenu(m)
+        bar.addWidget(more)
+        bar.addStretch(1)
+        v.addLayout(bar)
+
+        self.tree = SetupTree()
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
+        self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
+        v.addWidget(self.tree, 1)
         self.problems = label("", "Warn")
         v.addWidget(self.problems)
 
-        # ---- bones
-        v.addWidget(label("2  Bones (optional)", "H2", wrap=False))
-        v.addWidget(label("A surface per bone adds the surface distance (how far the bone's surface is from "
-                          "where it should be). A coordinate system from a Model Builder model adds errors "
-                          "about the bone's own axes. Both must be in the space the tracking maps (Autoscoper "
-                          "space for SlicerAutoscoperM)."))
-        self.bones = QTableWidget(0, 4)
-        self.bones.setHorizontalHeaderLabels(["Bone", "Trial", "Surface", "Axes"])
-        self.bones.verticalHeader().setVisible(False)
-        self.bones.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.bones.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.bones.horizontalHeader().setStretchLastSection(True)
-        self.bones.setMinimumHeight(110)
-        v.addWidget(self.bones)
-        bb = QHBoxLayout()
-        for text, fn in [("Add surfaces…", self.add_surfaces), ("From .cfg…", self.add_cfg),
-                         ("Axes from model…", self.add_axes), ("Remove", self.remove_bones)]:
-            b = small_button(text)
-            b.clicked.connect(lambda _=False, f=fn: f())
-            bb.addWidget(b)
-        bb.addStretch(1)
-        v.addLayout(bb)
-
         # ---- analysis
-        v.addWidget(label("3  Analysis", "H2", wrap=False))
+        v.addWidget(label("Analysis", "H2", wrap=False))
         form = QFormLayout()
         self.mode = QComboBox()
         for k, t in A.MODES:
@@ -216,19 +198,31 @@ class AssessorTab(QWidget):
         self.mode.currentIndexChanged.connect(self._settings_changed)
         form.addRow("Compare", self.mode)
         self.session = QComboBox()
-        self.session.setToolTip("Inter-rater: which session of each rater to compare")
+        self.session.setToolTip("Inter-rater: which session of each assessor to compare")
         self.session.currentIndexChanged.connect(self._settings_changed)
         form.addRow("Session", self.session)
         self.measure_box = QWidget()
-        mv = QVBoxLayout(self.measure_box)
-        mv.setContentsMargins(0, 0, 0, 0)
-        mv.setSpacing(2)
+        mg = QGridLayout(self.measure_box)
+        mg.setContentsMargins(0, 0, 0, 0)
+        mg.setHorizontalSpacing(14)
+        mg.setVerticalSpacing(2)
         self.measure_checks = {}
-        for key, m in A.MEASURES.items():
-            c = QCheckBox(m.label + {"surface": "  (needs surfaces)", "axes": "  (needs axes)"}.get(m.needs, ""))
+        boxes = [("helical_rotation", "Helical rotation", "Rotation about the helical axis (Welte et al. 2022)"),
+                 ("helical_translation", "Helical translation",
+                  ("Translation along the helical axis (Welte et al. 2022). Not the bone's displacement: "
+                   "translation across the axis isn't counted")),
+                 ("surface_mean", "Surface distance (mean)", ("Needs bone surfaces: how far the surface is from "
+                                                               "where it should be, on average")),
+                 ("surface_max", "Surface distance (max)", "Needs bone surfaces: the largest distance"),
+                 ("centroid", "Centroid displacement", "Needs bone surfaces: how far the surface's centroid moved"),
+                 ("axes", "Bone axes (6 components)", ("Needs coordinate systems from a model: rotation about Z, X, "
+                                                        "Y and translation along X, Y, Z of the bone's own axes"))]
+        for i, (key, text, tip) in enumerate(boxes):
+            c = QCheckBox(text)
+            c.setToolTip(tip)
             c.setChecked(key in A.DEFAULT_MEASURES)
             c.toggled.connect(self._settings_changed)
-            mv.addWidget(c)
+            mg.addWidget(c, i // 2, i % 2)
             self.measure_checks[key] = c
         form.addRow("Measures", self.measure_box)
         self.rot_thr = self._spin(2.0, " °", "Rotation threshold (Welte et al. 2022 used 2°)")
@@ -245,7 +239,6 @@ class AssessorTab(QWidget):
         self.pool.currentIndexChanged.connect(self._settings_changed)
         form.addRow("Statistics", self.pool)
         v.addLayout(form)
-        v.addStretch(1)
         return scroll
 
     def _spin(self, value: float, suffix: str, tip: str) -> QDoubleSpinBox:
@@ -314,248 +307,305 @@ class AssessorTab(QWidget):
         self.tabs.currentChanged.connect(self.redraw)
         return w
 
-    # ================================================================ tracking files
-    def add_folder(self, folder: str | None = None) -> None:
-        if folder is None:
-            folder = QFileDialog.getExistingDirectory(self, "Folder with the tracking files (searched with its "
-                                                            "subfolders)")
-            if not folder:
-                return
-        root = Path(folder)
-        paths = sorted(p for p in root.rglob("*") if p.suffix.lower() in (".tra", ".csv", ".txt") and p.is_file())
-        if not paths:
-            QMessageBox.information(self, "No tracking files", f"No .tra files in {root}.")
-            return
-        self._add(paths, root)
+    # ================================================================ assessors and the reference
+    def _changed(self, select: tuple | None = None) -> None:
+        self.refresh_tables(select)
+        self.schedule()
 
-    def add_files(self, paths=None) -> None:
+    def add_assessor(self, name: str | None = None, session: str = "1", copy_from=None, ask: bool = True):
+        """Add an assessor (one rater in one session), optionally starting with another one's bones."""
+        p = self.project
+        if ask:
+            n = len(p.raters_list()) + 1
+            default = name or next(f"Assessor {i}" for i in range(n, n + 100)
+                                   if p.find_assessor(f"Assessor {i}", session) is None)
+            dlg = AssessorDialog(self, p, name=default, session=session, copy_default=copy_from)
+            if dlg.exec() != QDialog.Accepted:
+                return None
+            name, session, copy_from = dlg.values()
+        try:
+            a = p.add_assessor(name, session, copy_from)
+        except ValueError as e:
+            QMessageBox.warning(self, "Add assessor", str(e))
+            return None
+        self._changed((ASSESSOR, a, None, None))
+        return a
+
+    def add_session(self, a: A.Assessor):
+        """Another session of the same assessor, with the same bones (for intra-rater reliability)."""
+        sessions = [o.session for o in self.project.raters_list() if o.name == a.name]
+        nxt = next(str(i) for i in range(2, 100) if str(i) not in sessions)
+        return self.add_assessor(a.name, nxt, a, ask=False)
+
+    def add_reference(self, copy_from=None, ask: bool = True):
+        p = self.project
+        if p.reference is not None:
+            QMessageBox.information(self, "Reference", "There is already a reference. Add bones or tracking to it, "
+                                                       "or remove it first.")
+            return p.reference
+        if ask:
+            dlg = AssessorDialog(self, p, reference=True, copy_default=copy_from)
+            if dlg.exec() != QDialog.Accepted:
+                return None
+            copy_from = dlg.values()[2]
+        a = p.add_reference(copy_from)
+        self._changed((REFERENCE, a, None, None))
+        return a
+
+    def rename_assessor(self, a: A.Assessor) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Rename assessor")
+        f = QFormLayout(dlg)
+        name = QLineEdit(a.name)
+        sess = QLineEdit(a.session)
+        f.addRow("Name", name)
+        f.addRow("Session", sess)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        f.addRow(bb)
+        if dlg.exec() != QDialog.Accepted or not name.text().strip() or not sess.text().strip():
+            return
+        try:
+            self.project.rename_assessor(a, name.text().strip(), sess.text().strip())
+        except ValueError as e:
+            QMessageBox.warning(self, "Rename assessor", str(e))
+            return
+        self._changed((ASSESSOR, a, None, None))
+
+    def remove_assessor(self, a: A.Assessor) -> None:
+        p = self.project
+        n = len(p.entries_of(a))
+        if n and QMessageBox.question(self, "Remove", f"Remove {p.display_name(a)} and its {n} tracking "
+                                                      f"file{'s' * (n != 1)}? (The files themselves are kept.)"
+                                      ) != QMessageBox.Yes:
+            return
+        p.remove_assessor(a)
+        self._changed()
+
+    # ================================================================ an assessor's bones and tracking
+    def add_bone(self, a: A.Assessor, label_text: str | None = None, path=None, trial: str | None = None):
+        """Add a bone to an assessor (picking a label others use, or a new one), then its tracking file."""
+        p = self.project
+        want_file = path is not None
+        if label_text is None:
+            dlg = BoneDialog(self, p, a)
+            if dlg.exec() != QDialog.Accepted or not dlg.value():
+                return
+            label_text, want_file = dlg.value(), dlg.file_now.isChecked()
+        try:
+            p.add_bone(a, label_text)
+        except ValueError as e:
+            QMessageBox.warning(self, "Add bone", str(e))
+            return
+        self._changed((ABONE, a, label_text, None))
+        if want_file:
+            self.load_tracking(a, label_text, trial or p.trials()[0], path)
+
+    def relabel_bone(self, a: A.Assessor, bone: str) -> None:
+        dlg = BoneDialog(self, self.project, a, current=bone, title="Change bone label", ask_file=False)
+        if dlg.exec() != QDialog.Accepted or not dlg.value():
+            return
+        try:
+            self.project.relabel_bone(a, bone, dlg.value())
+        except ValueError as e:
+            QMessageBox.warning(self, "Change bone label", str(e))
+            return
+        self._changed((ABONE, a, dlg.value(), None))
+
+    def remove_bone(self, a: A.Assessor, bone: str) -> None:
+        self.project.remove_bone(a, bone)
+        self._changed((ASSESSOR if not a.criterion else REFERENCE, a, None, None))
+
+    def load_tracking(self, a: A.Assessor, bone: str, trial: str, path=None, more: int = 0) -> bool:
+        """Choose (or replace) the tracking file of an assessor's bone in a trial."""
+        p = self.project
+        if path is None:
+            old = p.entry(a, bone, trial)
+            start = str(old.path.parent) if old is not None else self._last_dir
+            path, _ = QFileDialog.getOpenFileName(self, f"Tracking file: {p.display_name(a)} · {bone}", start,
+                                                  "Autoscoper tracking (*.tra *.csv *.txt);;All files (*)")
+            if not path:
+                return False
+        path = Path(path)
+        self._last_dir = str(path.parent)
+        fmt = self._choose_format(path, f"{p.display_name(a)} · {bone}", more)
+        if fmt is None:
+            return False
+        overrides, volume, offset = fmt
+        p.set_tracking(a, bone, trial, path, overrides, volume, offset)
+        self._changed((TRACK, a, bone, trial) if len(p.trials()) > 1 else (ABONE, a, bone, None))
+        return True
+
+    def load_tracking_files(self, a: A.Assessor, paths=None) -> None:
+        """Several files for one assessor at once: each matched to a bone (by label in its name) and a trial."""
         if paths is None:
-            paths, _ = QFileDialog.getOpenFileNames(self, "Tracking files", "",
+            paths, _ = QFileDialog.getOpenFileNames(self, f"Tracking files: {self.project.display_name(a)}",
+                                                    self._last_dir,
                                                     "Autoscoper tracking (*.tra *.csv *.txt);;All files (*)")
             if not paths:
                 return
-        paths = [Path(p) for p in paths]
-        root = Path(os.path.commonpath([str(p.parent) for p in paths])).parent
-        self._add(paths, root)
+        dlg = MatchDialog(self, self.project, a, paths)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        rows = [r for r in dlg.values() if r[1]]
+        for i, (path, bone, trial) in enumerate(rows):
+            if bone not in a.bones:
+                self.project.add_bone(a, bone)
+            if not self.load_tracking(a, bone, trial, path, more=len(rows) - i - 1):
+                break
 
-    def _add(self, paths, root: Path) -> None:
-        known = {e.path.resolve() for e in self.project.entries}
-        new = [p for p in paths if p.resolve() not in known]
-        names = self.project.bone_names()
-        self._format = None
-        added = []
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            for i, p in enumerate(new):
-                f = A.guess_fields(p, root, self.project.bone_names() or names, self.project.pattern)
-                e = A.TrackingEntry(path=p, trial=f.get("trial", "Trial 1"), bone=f.get("bone", ""),
-                                    rater=f.get("rater", ""), session=f.get("session", "1"),
-                                    criterion=f.get("criterion", False))
-                if f.get("trial") is None and self.project.trials():
-                    e.trial = self.project.trials()[0]
-                QApplication.restoreOverrideCursor()
-                ok = self._choose_format(e, more=len(new) - i - 1)
-                QApplication.setOverrideCursor(Qt.WaitCursor)
-                if ok is None:          # cancelled: stop importing
-                    break
-                e.load()
-                self.project.entries.append(e)
-                added.append(e)
-        finally:
-            QApplication.restoreOverrideCursor()
-        # bones learnt from other files (e.g. through the pattern) help name the rest
-        names = self.project.bone_names()
-        for e in added:
-            if not e.bone:
-                e.bone = A.guess_fields(e.path, root, names).get("bone", "")
-        self.refresh_tables()
-        self.schedule()
+    def add_trial_tracking(self, a: A.Assessor, bone: str) -> None:
+        trials = self.project.trials()
+        trial, ok = QInputDialog.getItem(self, "Another trial", "Trial name (a new name adds a trial):",
+                                         trials + [f"Trial {len(trials) + 1}"], len(trials), True)
+        if ok and trial.strip():
+            self.load_tracking(a, bone, trial.strip())
 
-    def _choose_format(self, e: A.TrackingEntry, more: int = 0):
-        """Format options for a file: the ones remembered during this import if they fit, else ask."""
+    def refresh_tracking(self, e: A.TrackingEntry) -> None:
+        e.load()
+        self._changed()
+
+    def remove_tracking(self, e: A.TrackingEntry) -> None:
+        self.project.entries.remove(e)
+        self._changed()
+
+    def _choose_format(self, path: Path, what: str, more: int = 0):
+        """(overrides, volume, offset) for a file: the remembered options if they fit, else ask."""
         try:
-            detected = load_tracking(e.path)
+            detected = load_tracking(path)
         except (TrackingError, OSError) as err:
-            e.error = str(err)
-            return True
+            QMessageBox.warning(self, "Couldn't read the tracking file", f"{path}\n\n{err}")
+            return None
         rem = self._format
         if rem and detected.fmt.n_volumes == 1 and rem.get("kind") == detected.fmt.kind:
             try:
-                if not load_tracking(e.path, 0, rem).warnings:
-                    e.overrides = dict(rem)
-                    return True
+                if not load_tracking(path, 0, rem).warnings:
+                    return dict(rem), 0, 0
             except TrackingError:
                 pass
-        dlg = FormatDialog(self, detected.fmt, 0, path=e.path, detected=detected.fmt, offset=e.offset,
-                           n_rows=detected.n_rows, bone=e.bone or e.path.stem, ask_remember=more > 0)
-        dlg.remember.setText(f"Use these options for the other {more} files being added (you're asked again "
-                             "for any file they don't fit)")
+        dlg = FormatDialog(self, detected.fmt, 0, path=path, detected=detected.fmt, offset=0,
+                           n_rows=detected.n_rows, bone=what, ask_remember=True)
+        dlg.remember.setText("Use these options for the other tracking files in this tab without asking"
+                             + (f" (the other {more} being added now, too)" if more else ""))
         dlg.remember.setChecked(more > 0)
         if dlg.exec() != QDialog.Accepted:
             return None
-        (e.overrides, e.volume), e.offset = dlg.values(), dlg.offset
+        (overrides, volume), offset = dlg.values(), dlg.offset
         if dlg.remember.isChecked():
-            self._format = dict(e.overrides)
-        return True
+            self._format = dict(overrides)
+        return overrides, volume, offset
 
-    def edit_format(self) -> None:
-        rows = sorted({i.row() for i in self.files.selectedIndexes()})
-        if not rows:
-            QMessageBox.information(self, "Format and frames", "Select a tracking file in the table first.")
-            return
-        e = self.project.entries[rows[0]]
+    def edit_format(self, e: A.TrackingEntry) -> None:
+        p = self.project
         try:
             detected = load_tracking(e.path)
         except (TrackingError, OSError) as err:
             QMessageBox.warning(self, "Couldn't read the file", str(err))
             return
         fmt = e.tracking.fmt if e.tracking is not None else detected.fmt
-        others = [(f"{o.who} {o.bone}", o.tracking.offset, o.tracking.n_rows) for o in self.project.entries
+        others = [(f"{p.display_name(p.assessor_of(o)) if p.assessor_of(o) else o.who}", o.tracking.offset,
+                   o.tracking.n_rows) for o in p.entries
                   if o is not e and o.tracking is not None and o.trial == e.trial and o.bone == e.bone]
+        a = p.assessor_of(e)
         dlg = FormatDialog(self, fmt, e.volume, path=e.path, detected=detected.fmt, offset=e.offset,
-                           n_rows=detected.n_rows, others=others, bone=f"{e.who} · {e.bone}",
-                           ask_remember=len(rows) > 1)
-        if len(rows) > 1:
-            dlg.remember.setText(f"Apply to all {len(rows)} selected files")
-            dlg.remember.setChecked(True)
+                           n_rows=detected.n_rows, others=others,
+                           bone=f"{p.display_name(a) if a else e.who} · {e.bone}")
         if dlg.exec() != QDialog.Accepted:
             return
-        (ov, vol), off = dlg.values(), dlg.offset
-        targets = [self.project.entries[r] for r in rows] if dlg.remember.isChecked() else [e]
-        for t in targets:
-            t.overrides, t.volume, t.offset = dict(ov), vol, off
-            t.load()
-        self.refresh_tables()
-        self.schedule()
+        (e.overrides, e.volume), e.offset = dlg.values(), dlg.offset
+        e.load()
+        self._changed()
 
-    def remove_files(self) -> None:
-        rows = sorted({i.row() for i in self.files.selectedIndexes()}, reverse=True)
-        for r in rows:
-            del self.project.entries[r]
-        self.refresh_tables()
-        self.schedule()
-
-    def _files_menu(self, pos) -> None:
-        rows = sorted({i.row() for i in self.files.selectedIndexes()})
-        if not rows:
-            return
-        m = QMenu(self)
-        m.addAction("Set as criterion", lambda: self._set_field(rows, "criterion", True))
-        m.addAction("Set as rater's tracking", lambda: self._set_field(rows, "criterion", False))
-        for f, title in [("trial", "Trial"), ("bone", "Bone"), ("rater", "Rater"), ("session", "Session")]:
-            m.addAction(f"Set {title.lower()} of selected…", lambda f=f, t=title: self._ask_field(rows, f, t))
-        m.addSeparator()
-        m.addAction("Format and frames…", self.edit_format)
-        m.addAction("Refresh from file", lambda: self._reload(rows))
-        m.addAction("Remove", self.remove_files)
-        m.exec(self.files.viewport().mapToGlobal(pos))
-
-    def _ask_field(self, rows, field_name, title) -> None:
-        cur = getattr(self.project.entries[rows[0]], field_name)
-        text, ok = QInputDialog.getText(self, title, f"{title} for the {len(rows)} selected files:", text=cur)
-        if ok and text.strip():
-            self._set_field(rows, field_name, text.strip())
-
-    def _set_field(self, rows, field_name, value) -> None:
-        for r in rows:
-            setattr(self.project.entries[r], field_name, value)
-        self.refresh_tables()
-        self.schedule()
-
-    def _reload(self, rows) -> None:
-        for r in rows:
-            self.project.entries[r].load()
-        self.refresh_tables()
-        self.schedule()
-
-    def _pattern_changed(self) -> None:
-        text = self.pattern.text().strip()
-        if text == self.project.pattern:
-            return
+    # ================================================================ folder import (optional shortcut)
+    def import_folder(self, folder: str | None = None, pattern: str | None = None) -> None:
+        """Make assessors, bones and tracking from a folder of files, using a name pattern."""
+        if folder is None:
+            folder = QFileDialog.getExistingDirectory(self, "Folder with the tracking files (and subfolders)")
+            if not folder:
+                return
+        if pattern is None:
+            pattern, ok = QInputDialog.getText(
+                self, "Name pattern",
+                "How assessor, session, trial and bone appear in the paths (relative to the folder):\n"
+                "{rater} {session} {trial} {bone}, * for anything, / between folders.\n"
+                "Example: {rater}/{trial}_s{session}_{bone}  for  Jo/T0019_jog_s2_tib.tra\n\n"
+                "Leave empty to guess: rater = folder name, bone = a known bone label in the file name,\n"
+                "folders or files named reference/criterion/gold/bead = the reference.",
+                text=self.project.pattern)
+            if not ok:
+                return
         try:
-            A.pattern_regex(text)
+            A.pattern_regex(pattern)
         except ValueError as e:
             QMessageBox.warning(self, "Name pattern", str(e))
             return
-        self.project.pattern = text
-        if text and self.project.entries and QMessageBox.question(
-                self, "Name pattern", "Re-read trial, rater, session and bone of the files already added "
-                                      "with this pattern?") == QMessageBox.Yes:
-            root = Path(os.path.commonpath([str(e.path.parent) for e in self.project.entries]))
-            for _ in range(4):                      # try a few folder levels up for the pattern's root
-                hits = 0
-                for e in self.project.entries:
-                    rel = e.path.relative_to(root).with_suffix("").as_posix()
-                    hits += bool(A.pattern_regex(text).match(rel))
-                if hits == len(self.project.entries) or root.parent == root:
-                    break
-                root = root.parent
-            names = self.project.bone_names()
-            for e in self.project.entries:
-                f = A.guess_fields(e.path, root, names, text)
-                for k in ("trial", "rater", "session", "bone"):
-                    if k in f:
-                        setattr(e, k, f[k])
-            self.refresh_tables()
-            self.schedule()
-
-    def _file_cell_changed(self, it: QTableWidgetItem) -> None:
-        if self._busy:
+        self.project.pattern = pattern
+        root = Path(folder)
+        paths = sorted(x for x in root.rglob("*") if x.suffix.lower() in (".tra", ".csv", ".txt") and x.is_file())
+        if not paths:
+            QMessageBox.information(self, "No tracking files", f"No .tra files in {root}.")
             return
-        e = self.project.entries[it.row()]
-        col = it.column()
-        if col == 4:
-            e.criterion = it.checkState() == Qt.Checked
-        elif col in (0, 1, 2, 3):
-            setattr(e, ("trial", "bone", "rater", "session")[col], it.text().strip())
-        self.refresh_tables()
-        self.schedule()
+        p = self.project
+        guessed = [(x, A.guess_fields(x, root, p.bone_names(), pattern)) for x in paths]
+        names = A._unique(p.bone_names() + [f["bone"] for _x, f in guessed if f.get("bone")])
+        default_trial = p.trials()[0]
+        skipped = []
+        for i, (x, f) in enumerate(guessed):
+            if not f.get("bone"):
+                f = {**f, **{k: v for k, v in A.guess_fields(x, root, names).items() if k == "bone"}}
+            if not f.get("bone"):
+                skipped.append(x.name)
+                continue
+            if f.get("criterion"):
+                a = p.reference or p.add_reference()
+            else:
+                rater, session = f.get("rater") or x.parent.name, f.get("session", "1")
+                a = p.find_assessor(rater, session) or p.add_assessor(rater, session)
+            if f["bone"] not in a.bones:
+                p.add_bone(a, f["bone"])
+            fmt = self._choose_format(x, f"{p.display_name(a)} · {f['bone']}", more=len(guessed) - i - 1)
+            if fmt is None:
+                break
+            p.set_tracking(a, f["bone"], f.get("trial", default_trial), x, *fmt)
+        self._changed()
+        if skipped:
+            QMessageBox.information(self, "Some files weren't added",
+                                    "No bone could be found in these file names (use the pattern's {bone}, or add "
+                                    "them under an assessor):\n" + "\n".join(skipped[:20]))
 
-    def _file_double_clicked(self, it: QTableWidgetItem) -> None:
-        if it.column() in (5, 6):
-            self.files.selectRow(it.row())
-            self.edit_format()
-
-    # ================================================================ bones
-    def _bone(self, name: str, trial: str = "") -> A.BoneInfo:
-        for b in self.project.bones:
-            if b.name == name and b.trial == trial:
-                return b
-        b = A.BoneInfo(name=name, trial=trial)
-        self.project.bones.append(b)
-        return b
-
+    # ================================================================ bones: surfaces and axes
     def _match_bone(self, stem: str) -> str | None:
-        parts = [p for p in stem.lower().replace("-", "_").split("_") if p]
+        parts = [x for x in stem.lower().replace("-", "_").split("_") if x]
         for name in sorted(self.project.bone_names(), key=len, reverse=True):
             if name.lower() in parts or stem.lower() == name.lower():
                 return name
         return None
 
-    def add_surfaces(self, paths=None) -> None:
+    def add_surfaces(self, paths=None, bone: str | None = None) -> None:
         if paths is None:
             paths, _ = QFileDialog.getOpenFileNames(self, "Bone surfaces (in the space the tracking maps)", "",
                                                     SURFACES)
             if not paths:
                 return
-        for p in map(Path, paths):
-            name = self._match_bone(p.stem)
+        for x in map(Path, paths):
+            name = bone or self._match_bone(x.stem)
             if name is None:
-                name, ok = QInputDialog.getText(self, "Which bone?", f"Bone name for {p.name}:", text=p.stem)
+                name, ok = QInputDialog.getItem(self, "Which bone?", f"Bone label for {x.name}:",
+                                                self.project.bone_names() or [x.stem], 0, True)
                 if not ok or not name.strip():
                     continue
                 name = name.strip()
-            surf = BoneModel(name=name, path=p)
-            if is_volume_file(p):
-                QMessageBox.information(self, "TIF volume", "For TIF volumes use From .cfg…, which reads "
-                                                            "their voxel size.")
+            if is_volume_file(x):
+                QMessageBox.information(self, "TIF volume", "For TIF volumes use 'Bone surfaces from an "
+                                                            "Autoscoper .cfg…', which reads their voxel size.")
                 continue
+            surf = BoneModel(name=name, path=x)
             if not self._build(surf):
                 continue
-            b = self._bone(name)
+            b = self.project.bone_info_for(name)
             b.surface, b._points = surf, None
-        self.refresh_tables()
-        self.schedule()
+        self._changed()
 
     def add_cfg(self, path=None) -> None:
         if path is None:
@@ -573,10 +623,9 @@ class AssessorTab(QWidget):
             surf = BoneModel(name=name, path=vol.path, voxel_size=vol.voxel_size, flip=vol.flip)
             if not vol.voxel_size or not self._build(surf):
                 continue
-            b = self._bone(name)
+            b = self.project.bone_info_for(name)
             b.surface, b._points = surf, None
-        self.refresh_tables()
-        self.schedule()
+        self._changed()
 
     def _build(self, surf: BoneModel) -> bool:
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -590,7 +639,7 @@ class AssessorTab(QWidget):
             QApplication.restoreOverrideCursor()
 
     def add_axes(self, path=None) -> None:
-        """Coordinate systems from a Model Builder model, matched to bones by name or surface file."""
+        """Coordinate systems from a Model Builder model, matched to bones by label or surface file."""
         if path is None:
             path, _ = QFileDialog.getOpenFileName(self, "Model with the bones' coordinate systems", "",
                                                   "BVR model (*.bvrmodel.json *.json);;All files (*)")
@@ -614,91 +663,144 @@ class AssessorTab(QWidget):
             if seg is None:
                 missing.append(name)
                 continue
-            b = self._bone(name)
+            b = self.project.bone_info_for(name)
             b.axes_path, b.axes_segment = str(path), seg.name
             A.load_bone_axes(b)
             matched.append(f"{name} → {seg.name}")
-        self.refresh_tables()
-        self.schedule()
+        self._changed()
         QMessageBox.information(self, "Coordinate systems",
                                 ("Matched: " + ", ".join(matched) if matched else "No bones matched.")
                                 + (f"\nNo coordinate system for: {', '.join(missing)}" if missing else ""))
 
-    def remove_bones(self) -> None:
-        rows = sorted({i.row() for i in self.bones.selectedIndexes()}, reverse=True)
-        shown = self._bone_rows()
-        for r in rows:
-            b = shown[r]
-            if b in self.project.bones:
-                self.project.bones.remove(b)
-        self.refresh_tables()
-        self.schedule()
+    def rename_bone_everywhere(self, bone: str) -> None:
+        new, ok = QInputDialog.getText(self, "Rename bone", f"New label for '{bone}' (for every assessor and the "
+                                                            "reference):", text=bone)
+        if not ok or not new.strip():
+            return
+        try:
+            self.project.rename_bone(bone, new.strip())
+        except ValueError as e:
+            QMessageBox.warning(self, "Rename bone", str(e))
+            return
+        self._changed((BONE, None, new.strip(), None))
 
-    def _bone_rows(self) -> list:
-        """BoneInfo rows to show: those with something set, plus a placeholder for other bones in the files."""
-        rows = list(self.project.bones)
-        have = {b.name for b in rows}
-        for name in self.project.bone_names():
-            if name not in have:
-                rows.append(A.BoneInfo(name=name))
-        return rows
+    def remove_surface(self, bone: str) -> None:
+        b = self.project.bone_info_for(bone)
+        b.surface, b._points = None, None
+        self._changed()
 
-    # ================================================================ tables
-    def refresh_tables(self) -> None:
+    def remove_axes(self, bone: str) -> None:
+        b = self.project.bone_info_for(bone)
+        b.axes_path = b.axes_segment = None
+        b.acs = None
+        self._changed()
+
+    # ================================================================ the tree's menus
+    def _selected(self) -> list:
+        return [SetupTree.data(it) for it in self.tree.selectedItems()]
+
+    def build_menu(self, data) -> QMenu:
+        """The right-click menu for a tree item (also used by tests)."""
+        kind, a, bone, trial = data
+        p = self.project
+        m = QMenu(self)
+
+        def add(text, fn, enabled=True):
+            act = m.addAction(text, fn)
+            act.setEnabled(enabled)
+            return act
+
+        if kind == ASSESSORS:
+            add("Add assessor…", self.add_assessor)
+            add("Import a folder of tracking files…", self.import_folder)
+        elif kind == ASSESSOR or kind == REFERENCE:
+            add("Add bone…", lambda: self.add_bone(a))
+            add("Load tracking files…", lambda: self.load_tracking_files(a))
+            m.addSeparator()
+            if kind == ASSESSOR:
+                add("Add another session", lambda: self.add_session(a))
+                add("Add assessor with the same bones…", lambda: self.add_assessor(copy_from=a))
+                add("Rename…", lambda: self.rename_assessor(a))
+                m.addSeparator()
+                add("Remove assessor", lambda: self.remove_assessor(a))
+            else:
+                add("Remove reference", lambda: self.remove_assessor(a))
+        elif kind == ABONE:
+            e = p.entry(a, bone, p.trials()[0])
+            add("Load new tracking file…" if e else "Load tracking file…",
+                lambda: self.load_tracking(a, bone, p.trials()[0]))
+            add("Tracking for another trial…", lambda: self.add_trial_tracking(a, bone))
+            m.addSeparator()
+            add("Change label…", lambda: self.relabel_bone(a, bone))
+            add("Remove bone from " + p.display_name(a), lambda: self.remove_bone(a, bone))
+        elif kind == TRACK:
+            e = p.entry(a, bone, trial)
+            add("Load new file…" if e else "Load file…", lambda: self.load_tracking(a, bone, trial))
+            if e is not None:
+                add("Refresh current file", lambda: self.refresh_tracking(e))
+                add("Format and frames…", lambda: self.edit_format(e))
+                m.addSeparator()
+                add("Remove tracking", lambda: self.remove_tracking(e))
+        elif kind == BONES:
+            add("Bone surfaces…", self.add_surfaces)
+            add("Bone surfaces from an Autoscoper .cfg…", self.add_cfg)
+            add("Bone coordinate systems from a model…", self.add_axes)
+        elif kind == BONE:
+            add("Rename everywhere…", lambda: self.rename_bone_everywhere(bone))
+            add("Load surface…", lambda: self.add_surfaces(bone=bone))
+            add("Coordinate systems from a model…", self.add_axes)
+        elif kind == SURFACE:
+            info = p.bone_info_for(bone)
+            add("Load new surface…" if info.surface else "Load surface…", lambda: self.add_surfaces(bone=bone))
+            add("Remove surface", lambda: self.remove_surface(bone), enabled=info.surface is not None)
+        elif kind == AXES:
+            info = p.bone_info_for(bone)
+            add("Coordinate systems from a model…", self.add_axes)
+            add("Remove coordinate system", lambda: self.remove_axes(bone), enabled=bool(info.axes_path))
+        return m
+
+    def _tree_menu(self, pos) -> None:
+        it = self.tree.itemAt(pos)
+        if it is None:
+            m = QMenu(self)
+            m.addAction("Add assessor…", self.add_assessor)
+            m.addAction("Add reference…", self.add_reference)
+        else:
+            m = self.build_menu(SetupTree.data(it))
+        m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _tree_double_clicked(self, it, _col) -> None:
+        kind, a, bone, trial = SetupTree.data(it)
+        p = self.project
+        if kind == TRACK:
+            e = p.entry(a, bone, trial)
+            (self.edit_format(e) if e is not None else self.load_tracking(a, bone, trial))
+        elif kind == ABONE and p.entry(a, bone, p.trials()[0]) is None:
+            self.load_tracking(a, bone, p.trials()[0])
+        elif kind == ASSESSOR:
+            self.rename_assessor(a)
+        elif kind == SURFACE:
+            self.add_surfaces(bone=bone)
+        elif kind == AXES:
+            self.add_axes()
+
+    # ================================================================ refresh
+    def refresh_tables(self, select: tuple | None = None) -> None:
         self._busy = True
         p = self.project
-        self.pattern.setText(p.pattern)
-        self.files.setRowCount(len(p.entries))
-        for r, e in enumerate(p.entries):
-            self.files.setItem(r, 0, _item(e.trial, True))
-            self.files.setItem(r, 1, _item(e.bone, True))
-            self.files.setItem(r, 2, _item("" if e.criterion else e.rater, not e.criterion))
-            self.files.setItem(r, 3, _item("" if e.criterion else e.session, not e.criterion))
-            c = _item("")
-            c.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            c.setCheckState(Qt.Checked if e.criterion else Qt.Unchecked)
-            c.setToolTip("The criterion (gold standard) tracking that raters are compared with")
-            self.files.setItem(r, 4, c)
-            if e.tracking is not None:
-                t = e.tracking
-                first, last = t.offset + 1, t.offset + t.n_rows
-                text = f"{max(first, 1)}–{last}" + (f" · {t.n_untracked} untracked" if t.n_untracked else "")
-                fr = _item(text, tip=f"{t.fmt.describe()}\nDouble-click to change the format or frames")
-                if t.warnings:
-                    fr.setForeground(QColor("#F2C48D"))
-                    fr.setToolTip("\n".join(t.warnings))
-            else:
-                fr = _item("can't read", tip=e.error)
-                fr.setForeground(QColor("#F0A3A3"))
-            self.files.setItem(r, 5, fr)
-            self.files.setItem(r, 6, _item(e.path.name, tip=str(e.path)))
-            if e.criterion:
-                for col in range(4):
-                    self.files.item(r, col).setForeground(QColor("#8FD3A9"))
-        bones = self._bone_rows()
-        self.bones.setRowCount(len(bones))
-        for r, b in enumerate(bones):
-            self.bones.setItem(r, 0, _item(b.name))
-            self.bones.setItem(r, 1, _item(b.trial or "all"))
-            s = b.surface
-            self.bones.setItem(r, 2, _item(Path(s.path).name if s is not None else "none",
-                                           tip=str(s.path) if s is not None else "Add surfaces… or From .cfg…"))
-            ax = f"{b.axes_segment} ({Path(b.axes_path).name})" if b.acs is not None else (
-                "not found" if b.axes_path else "none")
-            self.bones.setItem(r, 3, _item(ax, tip=b.axes_path or "Axes from model…"))
+        self.tree.rebuild(p, select)
         probs = p.problems()
         self.problems.setText("\n".join("⚠ " + s for s in probs[:8]) + (f"\n… and {len(probs) - 8} more"
                                                                          if len(probs) > 8 else ""))
         self.problems.setVisible(bool(probs))
-        # analysis options that depend on the files
         avail = set(p.available_measures())
         for key, c in self.measure_checks.items():
-            c.setEnabled(key in avail)
+            c.setEnabled(key in avail or (key == "axes" and "axes_rz" in avail))
         sessions = p.sessions()
         cur = self.session.currentData()
         self.session.blockSignals(True)
         self.session.clear()
-        self.session.addItem("Each rater's first session", "")
+        self.session.addItem("Each assessor's first session", "")
         for s in sessions:
             self.session.addItem(f"Session {s}", s)
         i = self.session.findData(cur if cur is not None else p.settings.inter_session)
@@ -718,11 +820,17 @@ class AssessorTab(QWidget):
         self._sync_settings_widgets()
         self.schedule()
 
+    def _measure_check(self, key: str) -> QCheckBox:
+        return self.measure_checks["axes" if key.startswith("axes_") else key]
+
+    def _measure_on(self, key: str) -> bool:
+        return self._measure_check(key).isChecked()
+
     def read_settings(self) -> A.AnalysisSettings:
         avail = set(self.project.available_measures())
         st = A.AnalysisSettings(
             mode=self.mode.currentData(),
-            measures=tuple(k for k, c in self.measure_checks.items() if c.isChecked() and k in avail),
+            measures=tuple(k for k in A.MEASURES if k in avail and self._measure_on(k)),
             rotation_threshold=self.rot_thr.value(), translation_threshold=self.tr_thr.value(),
             inter_session=self.session.currentData() or "", pool=self.pool.currentData())
         self.project.settings = st
@@ -732,7 +840,7 @@ class AssessorTab(QWidget):
         self._busy = True
         self.mode.setCurrentIndex(max(self.mode.findData(st.mode), 0))
         for k, c in self.measure_checks.items():
-            c.setChecked(k in st.measures)
+            c.setChecked(k in st.measures or (k == "axes" and any(m.startswith("axes_") for m in st.measures)))
         self.rot_thr.setValue(st.rotation_threshold)
         self.tr_thr.setValue(st.translation_threshold)
         self.pool.setCurrentIndex(max(self.pool.findData(st.pool), 0))
