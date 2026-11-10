@@ -80,7 +80,21 @@ class ImageSequence:
     """
 
     def __init__(self, files: list[Path] | None = None, multipage: Path | None = None, cache: int = 8,
-                 display_max: int = 1024, display_budget_mb: int = 1200, workers: int = 4):
+                 display_max: int = 1024, display_budget_mb: int = 1200, workers: int = 4,
+                 store: str | Path | None = None, store_kind: str = "session"):
+        """Images from a folder's files or a multi-page TIFF. With `store` (a saved radiograph file, see
+        core.radiograph_store), display copies come from that file; with a store and no files, the
+        originals aren't needed at all (only the display copies are available)."""
+        self._store = None
+        self.store_kind = None              # "session" or "cache" when display copies come from a saved file
+        self.originals_available = True
+        meta = None
+        if store is not None:
+            from .radiograph_store import StoreReader
+
+            self._store = StoreReader(store)
+            meta = self._store.meta
+            self.store_kind = store_kind
         if multipage is not None:
             import tifffile
 
@@ -90,25 +104,39 @@ class ImageSequence:
                 raise ImageSequenceError("This TIFF has only one page.")
             self.items = [(Path(multipage), i) for i in range(n)]
             self.source = Path(multipage)
-        else:
-            if not files:
-                raise ImageSequenceError("No images given.")
+        elif files:
             self.items = [(Path(f), None) for f in files]
             self.source = Path(files[0]).parent
+        elif meta is not None:                  # originals unavailable: everything from the saved file
+            src = Path(meta["source"])
+            self.items = [((src if meta["multipage"] else src / name), pg)
+                          for name, pg in zip(meta["names"], meta["pages"])]
+            self.source = src
+            self.originals_available = False
+        else:
+            raise ImageSequenceError("No images given.")
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._cache_size = cache
         self._window: tuple[float, float] | None = None
         self._lock = threading.Lock()
-        first = self._raw(0)
-        self.height, self.width = first.shape[:2]
-        self.dtype = str(first.dtype)
-        self.channels = 1 if first.ndim == 2 else first.shape[2]
+        self._fingerprint = None
+        first = None
+        if meta is not None:
+            self.width, self.height = meta["width"], meta["height"]
+            self.dtype, self.channels = meta["dtype"], meta["channels"]
+        else:
+            first = self._raw(0)
+            self.height, self.width = first.shape[:2]
+            self.dtype = str(first.dtype)
+            self.channels = 1 if first.ndim == 2 else first.shape[2]
         # Display copies: at most display_max pixels across, and shrunk further if the whole sequence
         # wouldn't fit in display_budget_mb (so every image can be read once, up front, and kept).
         self.display_step = max(1, -(-max(self.width, self.height) // display_max))   # ceiling division
         self.display_budget_mb = display_budget_mb
         while self.display_step < 16 and len(self.items) * self._frame_bytes() > display_budget_mb * 1_000_000:
             self.display_step += 1
+        if meta is not None:
+            self.display_step = meta["display_step"]
         self._display: OrderedDict[int, np.ndarray] = OrderedDict()
         self._display_limit = max(16, display_budget_mb * 1_000_000 // max(self._frame_bytes(), 1))
         self._pending: dict[int, Future] = {}
@@ -117,7 +145,32 @@ class ImageSequence:
         self._pool: ThreadPoolExecutor | None = None
         self._workers = workers
         self._closed = False
-        self._set_window(first)
+        if first is not None:
+            self._set_window(first)
+
+    def fingerprint(self) -> list:
+        """Name, size and modified time of each original file (to tell whether they've changed)."""
+        if self._fingerprint is None:
+            from .radiograph_store import fingerprint
+
+            self._fingerprint = fingerprint(p for p, _ in self.items)
+        return self._fingerprint
+
+    def attach_store(self, path: str | Path, kind: str = "cache") -> bool:
+        """Take display copies from a saved radiograph file from now on, if it holds these images
+        unchanged and nothing has been read yet. Returns whether it was attached."""
+        from .radiograph_store import StoreReader, matches
+
+        reader = StoreReader(path)
+        with self._lock:
+            busy = bool(self._display or self._pending)
+        if busy or not matches(reader.meta, self):
+            reader.close()
+            return False
+        self._store, self.store_kind = reader, kind
+        self.display_step = reader.meta["display_step"]
+        self._display_limit = max(16, self.display_budget_mb * 1_000_000 // max(self._frame_bytes(), 1))
+        return True
 
     def _frame_bytes(self) -> int:
         return -(-self.width // self.display_step) * -(-self.height // self.display_step)
@@ -168,7 +221,9 @@ class ImageSequence:
         return np.clip((img.astype(np.float32) - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
 
     def get(self, i: int) -> np.ndarray:
-        """Full-resolution 8-bit grayscale image i."""
+        """Full-resolution 8-bit grayscale image i (the display copy if the originals aren't available)."""
+        if not self.originals_available:
+            return self.get_display(i)
         with self._lock:
             if i in self._cache:
                 self._cache.move_to_end(i)
@@ -192,7 +247,12 @@ class ImageSequence:
     def _load_display(self, i: int) -> np.ndarray:
         s = self.display_step
         try:
-            img = np.ascontiguousarray(self._to_uint8(self._raw(i))[::s, ::s])
+            if self._store is not None:
+                img = self._store.page(i)
+                nbytes = self._store.page_bytes(i)
+            else:
+                img = np.ascontiguousarray(self._to_uint8(self._raw(i))[::s, ::s])
+                nbytes = self._file_size(i)
         except Exception as e:
             with self._lock:
                 self._pending.pop(i, None)
@@ -202,7 +262,7 @@ class ImageSequence:
             self._display[i] = img
             self._pending.pop(i, None)
             self.failed.pop(i, None)
-            self.bytes_read += self._file_size(i)
+            self.bytes_read += nbytes
             while len(self._display) > self._display_limit:
                 self._display.popitem(last=False)
         return img
@@ -279,11 +339,21 @@ class ImageSequence:
             self._pending.clear()
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
+        if self._store is not None:
+            self._store.close()
 
     def describe(self) -> str:
         bits = "8-bit" if self.dtype == "uint8" else f"{self.dtype}"
         col = "RGB" if self.channels >= 3 else "grayscale"
         return f"{bits} {col} · {self.width} × {self.height}"
+
+    def where_from(self) -> str:
+        """Where the shown images are read from, in words."""
+        if self._store is None:
+            return "the original images"
+        if not self.originals_available:
+            return "copies saved with the session (the originals weren't found)"
+        return {"session": "copies saved with the session", "cache": "the local cache"}[self.store_kind]
 
 
 def adjust_lut(brightness: float = 0.0, contrast: float = 1.0, invert: bool = False) -> np.ndarray:

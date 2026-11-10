@@ -487,3 +487,158 @@ class AddCameraDialog(QDialog):
         cam.calibration, cam.images = self.calibration, self.images
         self.result_camera = cam
         self.accept()
+
+
+# ---------------------------------------------------------------- saving sessions and the radiograph cache
+def _settings():
+    from PySide6.QtCore import QSettings
+
+    return QSettings("BVR", "BVR Motion Viewer")
+
+
+def _mb(n: float) -> str:
+    if n >= 1e9:
+        return f"{n / 1e9:.1f} GB"
+    if n >= 1e6:
+        return f"{n / 1e6:.0f} MB"
+    return f"{max(n / 1e3, 1):.0f} KB" if n else "0 MB"
+
+
+CACHE_MODES = (("slow", "Radiographs that are slow to read (network drives)"), ("always", "All radiographs"),
+               ("never", "Never"))
+
+
+def cache_settings() -> tuple[str, int]:
+    """(mode, size limit in bytes) of the local radiograph cache."""
+    s = _settings()
+    mode = s.value("radiographs/cache_mode", "slow")
+    gb = float(s.value("radiographs/cache_limit_gb", 20))
+    return (mode if mode in dict(CACHE_MODES) else "slow"), int(gb * 1e9)
+
+
+class SaveSessionDialog(QDialog):
+    """What to save with a session besides the session file itself."""
+
+    def __init__(self, parent, state, path):
+        from ..core.session import data_folder, session_files
+
+        super().__init__(parent)
+        self.setWindowTitle("Save session")
+        self.setMinimumWidth(520)
+        path = Path(path)
+        v = QVBoxLayout(self)
+        v.addWidget(label(f"Saving <b>{path.name}</b>. The session file records where each file is and your "
+                          "settings. To open it quickly elsewhere, or without the original files, also save:"))
+        cams = [c for c in state.cameras if c.images is not None]
+        n_img = sum(len(c.images) for c in cams)
+        raw = sum(len(c.images) * c.images.display_size[0] * c.images.display_size[1] for c in cams)
+        files = session_files(state)
+        size = sum(p.stat().st_size for p in files if p.exists())
+        s = _settings()
+        self.radiographs = QCheckBox("Save the radiographs with the session")
+        self.radiographs.setEnabled(bool(cams))
+        self.radiographs.setChecked(bool(cams) and s.value("session/save_radiographs", "false") == "true")
+        v.addWidget(self.radiographs)
+        v.addWidget(label((f"{len(cams)} camera(s), {n_img} images, as shown in the app (one compressed file per "
+                           f"camera; up to {_mb(raw)}, usually far less). The session then opens in seconds, even "
+                           "without the original images.") if cams else "No X-ray cameras in this tab.",
+                          "Muted"))
+        self.all_files = QCheckBox("Include all other files")
+        self.all_files.setEnabled(bool(files))
+        self.all_files.setChecked(bool(files) and s.value("session/include_files", "false") == "true")
+        v.addWidget(self.all_files)
+        v.addWidget(label(f"Bones, volumes, transforms, tracking, calibration and model files: {len(files)} file(s), "
+                          f"{_mb(size)}. With the radiographs, the session and its folder are self-contained, to "
+                          "copy to another computer or share.", "Muted"))
+        self.all_files.toggled.connect(lambda on: on and self.radiographs.isEnabled()
+                                       and self.radiographs.setChecked(True))
+        self.where = label("", "Muted")
+        v.addWidget(self.where)
+        folder = data_folder(path).name
+
+        def update():
+            on = self.radiographs.isChecked() or self.all_files.isChecked()
+            self.where.setText(f"Saved in the folder <b>{folder}</b> next to the session file. Keep the two "
+                               "together." if on else "Only the session file is saved.")
+        self.radiographs.toggled.connect(update)
+        self.all_files.toggled.connect(update)
+        update()
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def accept(self):
+        s = _settings()
+        if self.radiographs.isEnabled():
+            s.setValue("session/save_radiographs", "true" if self.radiographs.isChecked() else "false")
+        if self.all_files.isEnabled():
+            s.setValue("session/include_files", "true" if self.all_files.isChecked() else "false")
+        super().accept()
+
+    def choices(self) -> tuple[bool, bool]:
+        return self.radiographs.isChecked(), self.all_files.isChecked()
+
+
+class CacheDialog(QDialog):
+    """Settings of the local radiograph cache."""
+
+    def __init__(self, parent):
+        from ..core import radiograph_store as RS
+
+        super().__init__(parent)
+        self.RS = RS
+        self.setWindowTitle("Radiograph cache")
+        self.setMinimumWidth(520)
+        v = QVBoxLayout(self)
+        v.addWidget(label("Once radiographs have been read, a copy as shown in the app (compressed, typically a few "
+                          "hundred KB per image) can be kept on this computer, so the same trial opens in "
+                          "seconds next time. Copies are checked against the originals (names, sizes and dates) "
+                          "and read again if the originals change."))
+        mode, limit = cache_settings()
+        form = QFormLayout()
+        self.mode = QComboBox()
+        for k, t in CACHE_MODES:
+            self.mode.addItem(t, k)
+        self.mode.setCurrentIndex([k for k, _ in CACHE_MODES].index(mode))
+        form.addRow("Keep copies of", self.mode)
+        self.limit = QDoubleSpinBox()
+        self.limit.setRange(1, 2000)
+        self.limit.setDecimals(0)
+        self.limit.setSuffix(" GB")
+        self.limit.setValue(limit / 1e9)
+        self.limit.setToolTip("When the cache is full, the trials used longest ago are removed first")
+        form.addRow("Cache size up to", self.limit)
+        self.used = QLabel()
+        form.addRow("Used", self.used)
+        where = QLabel(str(RS.cache_dir()))
+        where.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        where.setWordWrap(True)
+        form.addRow("Folder", where)
+        v.addLayout(form)
+        row = QHBoxLayout()
+        clear = QPushButton("Clear cache")
+        clear.clicked.connect(self._clear)
+        row.addWidget(clear)
+        row.addStretch(1)
+        v.addLayout(row)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self._show_used()
+
+    def _show_used(self):
+        n = len(self.RS.cache_files())
+        self.used.setText(f"{_mb(self.RS.cache_size())} (radiographs of {n} camera{'s' if n != 1 else ''})")
+
+    def _clear(self):
+        self.RS.clear_cache()
+        self._show_used()
+
+    def accept(self):
+        s = _settings()
+        s.setValue("radiographs/cache_mode", self.mode.currentData())
+        s.setValue("radiographs/cache_limit_gb", self.limit.value())
+        self.RS.prune_cache(int(self.limit.value() * 1e9))
+        super().accept()

@@ -126,8 +126,15 @@ class MainWindow(QMainWindow):
         r = mb.addMenu("&Radiographs")
         self._act(r, "Add X-ray camera…", self._vis("add_camera"))
         self._act(r, "Import cameras from .cfg…", self._vis("import_cfg"))
+        r.addSeparator()
+        self._act(r, "Radiograph cache…", self.cache_settings)
         h = mb.addMenu("&Help")
         self._act(h, "About", self.about)
+
+    def cache_settings(self) -> None:
+        from .dialogs import CacheDialog
+
+        CacheDialog(self).exec()
 
     def _toggle_camera_views(self) -> None:
         tab = self.current()

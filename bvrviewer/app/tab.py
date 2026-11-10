@@ -289,7 +289,21 @@ class VisualiserTab(QWidget):
         """
         import time
 
+        from ..core import radiograph_store as RS
+        from .dialogs import cache_settings
+
         cams = [c for c in cams if c.images is not None]
+        mode, limit = cache_settings()
+        for c in cams:                              # a copy in the local cache, if the originals are unchanged
+            im = c.images
+            if mode != "never" and im.store_kind is None and im.originals_available:
+                try:
+                    p = RS.find_cached(im)
+                    if p is not None:
+                        im.attach_store(p, "cache")
+                except Exception:  # noqa: BLE001 - a broken cache never stops the originals being read
+                    pass
+        t_start = time.monotonic()
         for c in cams:
             c.images.preload(c.first_image)
         total = sum(len(c.images) - c.first_image for c in cams)
@@ -298,6 +312,7 @@ class VisualiserTab(QWidget):
             return [c.images.progress() for c in cams]
 
         if not total or all(p[2] == 0 for p in counts()):
+            self._cache_radiographs(cams, time.monotonic() - t_start)
             return
         dlg = QProgressDialog("Reading radiographs…", "Skip", 0, total, self)
         dlg.setWindowTitle("Reading radiographs")
@@ -319,6 +334,7 @@ class VisualiserTab(QWidget):
             dt = time.monotonic() - t0
             mb = (sum(c.images.bytes_read for c in cams) - b0) / 1e6
             lines = [f"{c.name}: {r} of {len(c.images) - c.first_image} images" + (f" ({f} unreadable)" if f else "")
+                     + (f", from {c.images.where_from()}" if c.images.store_kind else "")
                      for c, (r, f, _) in zip(cams, ps)]
             if dt > 1 and mb > 0:
                 rate = mb / dt
@@ -334,6 +350,7 @@ class VisualiserTab(QWidget):
             for c in cams:
                 c.images.cancel_preload()
         dlg.close()
+        self._cache_radiographs(cams, time.monotonic() - t_start)
         bad = [(c, len(c.images.failed)) for c in cams if c.images.failed]
         if bad:
             first = bad[0][0].images
@@ -341,6 +358,74 @@ class VisualiserTab(QWidget):
             self._error("Some radiographs couldn't be read",
                         "\n".join(f"{c.name}: {n} image(s)" for c, n in bad)
                         + f"\n\nFor example {first.name(i)}: {err}\nThey'll be tried again when shown.")
+
+    def _cache_radiographs(self, cams, elapsed: float) -> None:
+        """Keep a copy of fully read radiographs in the local cache (in the background), if they were slow
+        to read (or always / never, as set in Radiographs → Radiograph cache)."""
+        import threading
+
+        from ..core import radiograph_store as RS
+        from .dialogs import cache_settings
+
+        mode, limit = cache_settings()
+        if mode == "never":
+            return
+        for c in cams:
+            im = c.images
+            if im.store_kind is not None or not im.originals_available or im.failed or not im.fits_in_memory:
+                continue
+            if im.progress()[0] < len(im):
+                continue                                    # skipped: not all in memory
+            if mode == "slow" and not (elapsed > 5 or RS.is_network_path(im.source)):
+                continue
+
+            def work(im=im):
+                try:
+                    RS.save_to_cache(im, limit, cancelled=lambda: im._closed)
+                except Exception:  # noqa: BLE001 - the cache is only a convenience
+                    pass
+            threading.Thread(target=work, name="radiograph-cache", daemon=True).start()
+
+    def _with_progress(self, title: str, fn) -> object:
+        """Run fn(progress, cancelled) on a thread with a modal progress dialog; returns its result or
+        raises its exception. progress(text, done, total) updates the dialog."""
+        import threading
+
+        st = {"text": title + "…", "done": 0, "total": 0, "result": None, "error": None, "finished": False}
+        stop = threading.Event()
+
+        def progress(text, done, total):
+            st.update(text=text, done=done, total=total)
+
+        def run():
+            try:
+                st["result"] = fn(progress, stop.is_set)
+            except BaseException as e:  # noqa: BLE001 - re-raised on the UI thread
+                st["error"] = e
+            st["finished"] = True
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        dlg = QProgressDialog(title + "…", "Cancel", 0, 0, self)
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(400)
+        dlg.setMinimumWidth(420)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        while not st["finished"]:
+            if dlg.wasCanceled():
+                stop.set()
+            dlg.setLabelText(st["text"])
+            if st["total"]:
+                dlg.setMaximum(st["total"])
+                dlg.setValue(min(st["done"], st["total"]))
+            QApplication.processEvents()
+            QThread.msleep(40)
+        dlg.close()
+        if st["error"] is not None:
+            raise st["error"]
+        return st["result"]
 
     def _run(self, text: str, fn, on_done) -> None:
         """Run slow loading off the UI thread with a busy dialog."""
@@ -765,6 +850,11 @@ class VisualiserTab(QWidget):
                 tip="Radiographs are shrunk for display so that every image fits in memory "
                     f"(up to {cam.images.display_budget_mb} MB per camera)")
         p.value("Folder", cam.images.source.name, tip=str(cam.images.source))
+        p.value("Read from", cam.images.where_from().split(" (")[0].capitalize(),
+                tip="Radiographs come from the original images, the local cache (Radiographs → Radiograph "
+                    "cache), or the copies saved with the session")
+        if cam.note:
+            p.note(cam.note, "Warn")
         if self.state.models and n != self.scene.n_frames:
             p.note(f"{n} images for {self.scene.n_frames} tracked frames (image 1 is shown at frame 1).", "Warn")
         p.section("Calibration")
@@ -1258,7 +1348,42 @@ class VisualiserTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Save tab as session", f"{self.state.name}.bvrsession.json",
                                               "Session (*.json)")
         if path:
-            save_session(self.state, path)
+            self.save_session_file(path)
+
+    def save_session_file(self, path: str, radiographs: bool | None = None, all_files: bool | None = None) -> None:
+        """Save the tab, asking what to save with it (unless both choices are given)."""
+        from .dialogs import SaveSessionDialog, _mb
+
+        if radiographs is None or all_files is None:
+            dlg = SaveSessionDialog(self, self.state, path)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            radiographs, all_files = dlg.choices()
+        try:
+            if radiographs or all_files:
+                rep = self._with_progress("Saving session", lambda progress, cancelled: save_session(
+                    self.state, path, radiographs=radiographs, all_files=all_files, progress=progress,
+                    cancelled=cancelled))
+            else:
+                rep = save_session(self.state, path)
+        except InterruptedError:
+            return
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            self._error("Couldn't save the session", str(e))
+            return
+        self.last_save = rep
+        if rep["data_folder"] is not None:
+            bits = ([f"the radiographs of {rep['radiographs']} camera(s)"] if rep["radiographs"] else []) + \
+                   ([f"{rep['files']} other file(s)"] if rep["files"] else [])
+            self._toast(f"Saved {Path(path).name} with {' and '.join(bits)} in {rep['data_folder'].name} "
+                        f"({_mb(rep['bytes'])}).")
+
+    def _toast(self, text: str) -> None:
+        """A short confirmation in the main window's status bar (or a message box without one)."""
+        win = self.window()
+        bar = win.statusBar() if hasattr(win, "statusBar") else None
+        if bar is not None:
+            bar.showMessage(text, 10000)
 
     def open_session(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open saved session", "", "Session (*.json)")
@@ -1288,6 +1413,7 @@ class VisualiserTab(QWidget):
                 except Exception as e:  # noqa: BLE001
                     problems.append(f"{cam.name}: {e}")
             self._read_radiographs(built)
+            problems.extend(f"{cam.name}: {cam.note}" for cam in built if cam.note)
             for cam in built:
                 self.state.cameras.append(cam)
                 self.scene.add_camera(cam)
@@ -1319,7 +1445,7 @@ class VisualiserTab(QWidget):
             self.refresh_all()
             self.scene.update_frame(0)
             if problems:
-                self._error("Some radiographs or joints couldn't be loaded", "\n".join(problems))
+                self._error("Some files couldn't be used as saved", "\n".join(problems))
 
         if st.models:
             self._build_models(st.models, then=add_cams)
