@@ -64,7 +64,7 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 | a **bone** | name, colour, opacity, visible, display; hold this bone still; surface file details | load tracking, load coordinate system, hold still, show/hide, rename, replace surface file, .tfm or voxel size, remove |
 | its **Tracking** | file, rows, trial frames it covers, untracked frames, format | load file / load new file, refresh current file, format and frames, hold still, remove |
 | **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, camera views (2D) and their overlay, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
-| a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); which image is frame 1; files | view through it, show/hide, rename, change files, remove |
+| a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); images and the size they're shown at; files | view through it, show/hide, rename, change files, remove |
 | its **Axes** (coordinate system) | model file and the model's bone, axes and curves on/off, motion relative to, zero at a frame, values at this frame | load file / load new file, refresh current file, show curves, show/hide axes, zero, export CSV, remove |
 | **Joints** | show curves | Add joint, show/hide curves |
 | a **joint** | model file, which bones in the tab it joins, axes and curves on/off, use the reference pose, zero at a frame, values at this frame | show curves, show/hide axes, reference pose, zero, export CSV, rename, change bones, remove |
@@ -102,7 +102,7 @@ The dialog previews your tracked bones on that image. If they sit on their shado
 
 With cameras added, the radiographs appear on detector planes behind the bones. The planes are see-through from behind, so they don't hide the bones. The **Through X-ray** buttons (or double-clicking a camera in the navigator) look from each X-ray source with the bones overlaid on the image.
 
-Radiographs are decoded in the background as soon as a camera is added, so playback may be slower for the first few seconds of a long trial. They're shown at up to 1024 pixels across, and hidden cameras aren't decoded at all.
+When a camera is added, all its radiographs are read into memory first, with a progress bar showing each camera's images, the read speed and the time left, so that playing and jumping between frames need no more reading. This matters most for large images on a network drive (500 uncompressed 2016 × 2016 frames per camera is about 2 GB to fetch). **Skip** starts straight away instead, and images not yet read are then read as each frame is shown. Radiographs are shown at up to 1024 pixels across, and smaller still if a whole sequence wouldn't fit in 1.2 GB per camera (the camera's properties show the size used).
 
 ## The Model Builder
 

@@ -280,6 +280,68 @@ class VisualiserTab(QWidget):
         self.refresh_all()
 
     # ---------------------------------------------------------------- helpers
+    def _read_radiographs(self, cams) -> None:
+        """Read every radiograph of these cameras up front, with a progress bar.
+
+        Reading while playing is too slow when the images are large or on a network drive, so they are
+        all read (and shrunk for display) before the cameras are shown. Skip leaves the rest to be read
+        as each frame is shown.
+        """
+        import time
+
+        cams = [c for c in cams if c.images is not None]
+        for c in cams:
+            c.images.preload(c.first_image)
+        total = sum(len(c.images) - c.first_image for c in cams)
+
+        def counts():
+            return [c.images.progress() for c in cams]
+
+        if not total or all(p[2] == 0 for p in counts()):
+            return
+        dlg = QProgressDialog("Reading radiographs…", "Skip", 0, total, self)
+        dlg.setWindowTitle("Reading radiographs")
+        text = QLabel()
+        text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        dlg.setLabel(text)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(400)
+        dlg.setMinimumWidth(460)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        t0, b0 = time.monotonic(), sum(c.images.bytes_read for c in cams)
+        while True:
+            ps = counts()
+            done = sum(min(r + f, len(c.images) - c.first_image) for c, (r, f, _) in zip(cams, ps))
+            left = sum(p[2] for p in ps)
+            if left == 0 or dlg.wasCanceled():
+                break
+            dt = time.monotonic() - t0
+            mb = (sum(c.images.bytes_read for c in cams) - b0) / 1e6
+            lines = [f"{c.name}: {r} of {len(c.images) - c.first_image} images" + (f" ({f} unreadable)" if f else "")
+                     for c, (r, f, _) in zip(cams, ps)]
+            if dt > 1 and mb > 0:
+                rate = mb / dt
+                eta = left * (mb / max(done, 1)) / rate
+                lines.append(f"{rate:.0f} MB/s · about {eta:.0f} s left" if eta < 90 else
+                             f"{rate:.0f} MB/s · about {eta / 60:.0f} min left")
+            lines.append("\nSkip to start now: the rest are then read as each frame is shown.")
+            dlg.setLabelText("Reading the radiographs into memory so they play smoothly…\n\n" + "\n".join(lines))
+            dlg.setValue(done)
+            QApplication.processEvents()
+            QThread.msleep(40)
+        if dlg.wasCanceled():
+            for c in cams:
+                c.images.cancel_preload()
+        dlg.close()
+        bad = [(c, len(c.images.failed)) for c in cams if c.images.failed]
+        if bad:
+            first = bad[0][0].images
+            i, err = next(iter(first.failed.items()))
+            self._error("Some radiographs couldn't be read",
+                        "\n".join(f"{c.name}: {n} image(s)" for c, n in bad)
+                        + f"\n\nFor example {first.name(i)}: {err}\nThey'll be tried again when shown.")
+
     def _run(self, text: str, fn, on_done) -> None:
         """Run slow loading off the UI thread with a busy dialog."""
         self._busy = QProgressDialog(text, None, 0, 0, self)
@@ -698,6 +760,10 @@ class VisualiserTab(QWidget):
         p.section("Images")
         n = len(cam.images)
         p.value("Images", f"{n} · {cam.images.describe()}", tip=str(cam.images.source))
+        w, h = cam.images.display_size
+        p.value("Shown at", f"{w} × {h}" + (f" (1/{cam.images.display_step} size)" if cam.images.display_step > 1 else ""),
+                tip="Radiographs are shrunk for display so that every image fits in memory "
+                    f"(up to {cam.images.display_budget_mb} MB per camera)")
         p.value("Folder", cam.images.source.name, tip=str(cam.images.source))
         if self.state.models and n != self.scene.n_frames:
             p.note(f"{n} images for {self.scene.n_frames} tracked frames (image 1 is shown at frame 1).", "Warn")
@@ -1111,6 +1177,7 @@ class VisualiserTab(QWidget):
     def add_camera(self) -> None:
         dlg = AddCameraDialog(self, self.scene.n_frames, self._preview_bones(), index=len(self.state.cameras) + 1)
         if dlg.exec() == QDialog.Accepted and dlg.result_camera:
+            self._read_radiographs([dlg.result_camera])
             self.state.cameras.append(dlg.result_camera)
             self.scene.add_camera(dlg.result_camera)
             self.sel_kind, self.sel_obj = CAMERA, dlg.result_camera
@@ -1126,6 +1193,7 @@ class VisualiserTab(QWidget):
                 old.visible, old.show_plane, old.show_source, old.show_beams
             if new.images is not old.images:
                 self.scene.forget_camera(old)
+                self._read_radiographs([new])
             else:
                 self.scene.remove_camera(old)
             self.state.cameras[i] = new
@@ -1166,6 +1234,7 @@ class VisualiserTab(QWidget):
                 cams.append(cam)
             except Exception as e:  # noqa: BLE001 - reported to the user
                 problems.append(f"Camera {k}: {e}\n  calibration: {cal}\n  images: {folder}")
+        self._read_radiographs(cams)
         for cam in cams:
             self.state.cameras.append(cam)
             self.scene.add_camera(cam)
@@ -1177,7 +1246,7 @@ class VisualiserTab(QWidget):
         counts = {len(c.images) for c in cams}
         if cams and self.state.models and any(n != self.scene.n_frames for n in counts):
             msg += f"\n\nImage counts ({', '.join(map(str, sorted(counts)))}) differ from the {self.scene.n_frames} " \
-                   "tracked frames. Select a camera to choose which image is frame 1."
+                   "tracked frames (image 1 is shown at frame 1)."
         msg += "\n\nIts voxel sizes will be offered when you add TIF volumes."
         if problems:
             self._error("Some cameras couldn't be added", msg + "\n\n" + "\n\n".join(problems))
@@ -1211,14 +1280,17 @@ class VisualiserTab(QWidget):
         cams = st.cameras
 
         def add_cams():
-            problems = []
+            problems, built = [], []
             for cam in cams:
                 try:
                     cam.build()
-                    self.state.cameras.append(cam)
-                    self.scene.add_camera(cam)
+                    built.append(cam)
                 except Exception as e:  # noqa: BLE001
                     problems.append(f"{cam.name}: {e}")
+            self._read_radiographs(built)
+            for cam in built:
+                self.state.cameras.append(cam)
+                self.scene.add_camera(cam)
             for m in self.state.models:                  # coordinate systems on the models
                 if m.has_axes:
                     try:

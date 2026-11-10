@@ -153,8 +153,9 @@ class SceneController:
         beams = self.p.add_mesh(beams_mesh, color="#5A6170", line_width=1, pickable=False, reset_camera=False)
         self._cam_actors[id(cam)] = {"plane": plane, "source": src, "beams": beams, "image": None,
                                      "tex": tex, "scalars": scalars}
-        # Start decoding radiographs in the background, from the first frame onwards.
-        cam.images.prefetch(range(cam.first_image, len(cam.images)))
+        # Radiographs are read up front by the tab (with a progress bar); any still unread (Skip) are
+        # read a little ahead of the frame being shown.
+        cam.images.prefetch(range(cam.first_image, cam.first_image + 40))
         self.refresh_camera_style()
         self.update_camera_image(cam)
 

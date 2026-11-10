@@ -71,13 +71,16 @@ class ImageSequence:
     """Lazily-read sequence of radiographs, returned as 8-bit grayscale.
 
     `get(i)` gives the full-resolution image. `get_display(i)` gives a copy shrunk so its longest
-    side is at most `display_max` pixels, which is what the 3D view shows. Display images are
-    decoded ahead of time on background threads (`prefetch`) and kept in a memory-limited cache,
-    because decoding compressed TIFFs is far too slow to do while playing.
+    side is at most `display_max` pixels, which is what the views show. When a camera is added,
+    every display copy is read up front on background threads (`preload`, with `progress` for a
+    progress bar) and kept in memory, because reading radiographs while playing is far too slow
+    (compressed TIFFs are slow to decode; large uncompressed ones are slow to fetch from a network
+    drive). If the whole sequence wouldn't fit in `display_budget_mb`, the display copies are shrunk
+    further until it does.
     """
 
     def __init__(self, files: list[Path] | None = None, multipage: Path | None = None, cache: int = 8,
-                 display_max: int = 1024, display_budget_mb: int = 400):
+                 display_max: int = 1024, display_budget_mb: int = 1200, workers: int = 4):
         if multipage is not None:
             import tifffile
 
@@ -100,14 +103,29 @@ class ImageSequence:
         self.height, self.width = first.shape[:2]
         self.dtype = str(first.dtype)
         self.channels = 1 if first.ndim == 2 else first.shape[2]
+        # Display copies: at most display_max pixels across, and shrunk further if the whole sequence
+        # wouldn't fit in display_budget_mb (so every image can be read once, up front, and kept).
         self.display_step = max(1, -(-max(self.width, self.height) // display_max))   # ceiling division
-        frame_bytes = -(-self.width // self.display_step) * -(-self.height // self.display_step)
+        self.display_budget_mb = display_budget_mb
+        while self.display_step < 16 and len(self.items) * self._frame_bytes() > display_budget_mb * 1_000_000:
+            self.display_step += 1
         self._display: OrderedDict[int, np.ndarray] = OrderedDict()
-        self._display_limit = max(16, display_budget_mb * 1_000_000 // max(frame_bytes, 1))
+        self._display_limit = max(16, display_budget_mb * 1_000_000 // max(self._frame_bytes(), 1))
         self._pending: dict[int, Future] = {}
+        self.failed: dict[int, str] = {}           # image index -> error, from background reads
+        self.bytes_read = 0                        # file bytes read for display copies (progress / speed)
         self._pool: ThreadPoolExecutor | None = None
+        self._workers = workers
         self._closed = False
         self._set_window(first)
+
+    def _frame_bytes(self) -> int:
+        return -(-self.width // self.display_step) * -(-self.height // self.display_step)
+
+    @property
+    def display_size(self) -> tuple[int, int]:
+        """(width, height) of the display copies."""
+        return -(-self.width // self.display_step), -(-self.height // self.display_step)
 
     @classmethod
     def from_folder(cls, folder: str | Path) -> "ImageSequence":
@@ -162,49 +180,99 @@ class ImageSequence:
                 self._cache.popitem(last=False)
         return img
 
-    # ---- display copies, decoded in the background
+    # ---- display copies, read in the background
+    def _file_size(self, i: int) -> int:
+        p, page = self.items[i]
+        try:
+            n = p.stat().st_size
+        except OSError:
+            return 0
+        return n if page is None else n // len(self.items)
+
     def _load_display(self, i: int) -> np.ndarray:
         s = self.display_step
-        img = np.ascontiguousarray(self._to_uint8(self._raw(i))[::s, ::s])
+        try:
+            img = np.ascontiguousarray(self._to_uint8(self._raw(i))[::s, ::s])
+        except Exception as e:
+            with self._lock:
+                self._pending.pop(i, None)
+                self.failed[i] = str(e) or type(e).__name__
+            raise
         with self._lock:
             self._display[i] = img
             self._pending.pop(i, None)
+            self.failed.pop(i, None)
+            self.bytes_read += self._file_size(i)
             while len(self._display) > self._display_limit:
                 self._display.popitem(last=False)
         return img
 
     def get_display(self, i: int) -> np.ndarray:
-        """Image i shrunk for display. Waits for a background decode if one is under way."""
+        """Image i shrunk for display.
+
+        If its background read has started, waits for it; if it is still queued behind others, takes it
+        out of the queue and reads it here (so jumping to a frame never waits for the rest of the queue).
+        """
         with self._lock:
             if i in self._display:
                 self._display.move_to_end(i)
                 return self._display[i]
             fut = self._pending.get(i)
         if fut is not None:
-            try:
-                return fut.result()
-            except Exception:  # noqa: BLE001 - fall back to decoding here
-                pass
+            if fut.cancel():
+                with self._lock:
+                    self._pending.pop(i, None)
+            else:
+                try:
+                    return fut.result()
+                except Exception:  # noqa: BLE001 - try again here; a second failure is raised
+                    pass
         return self._load_display(i)
 
     def has_display(self, i: int) -> bool:
         with self._lock:
             return i in self._display
 
-    def prefetch(self, indices) -> None:
-        """Start decoding these display images in the background (already cached ones are skipped)."""
+    def _submit(self, indices) -> None:
         if self._closed:
             return
         with self._lock:
             if self._pool is None:
-                self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="radiographs")
+                self._pool = ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="radiographs")
             todo = [i for i in indices if 0 <= i < len(self.items) and i not in self._display
                     and i not in self._pending][: self._display_limit]
             for i in todo:
                 self._pending[i] = self._pool.submit(self._load_display, i)
 
+    def prefetch(self, indices) -> None:
+        """Start reading these display images in the background (already read ones are skipped)."""
+        self._submit(indices)
+
+    @property
+    def fits_in_memory(self) -> bool:
+        return len(self.items) <= self._display_limit
+
+    def preload(self, start: int = 0) -> None:
+        """Read every display image in the background, in order from `start` (see `progress`)."""
+        self.failed.clear()
+        self._submit(range(start, len(self.items)))
+
+    def progress(self) -> tuple[int, int, int]:
+        """(read, failed, still to read) for the current background reads."""
+        with self._lock:
+            return len(self._display), len(self.failed), len(self._pending)
+
+    def cancel_preload(self) -> None:
+        """Drop the background reads that haven't started (images are then read when they're shown)."""
+        with self._lock:
+            futs = list(self._pending.items())
+        for i, f in futs:
+            if f.cancel():
+                with self._lock:
+                    self._pending.pop(i, None)
+
     def close(self) -> None:
-        """Stop background decoding (call when the camera is removed)."""
+        """Stop background reading (call when the camera is removed)."""
         self._closed = True
         with self._lock:
             pool, self._pool = self._pool, None
