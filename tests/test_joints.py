@@ -238,7 +238,8 @@ def test_segments_and_joints_structure():
     m.remove_segment("Left tibia")
     assert m.joints == []
     g = m.add_segment("generic", "Capitate")
-    assert g.side == "none" and m.axes_sources("Capitate") == [("inertial", "Automatic: Principal axes of inertia")]
+    assert g.side == "none" and m.axes_sources("Capitate") == [("inertial", "Automatic: Principal axes of inertia"),
+                                                               ("landmarks", "Landmarks (placed by hand)")]
 
 
 def _flexing_trial(n=30):

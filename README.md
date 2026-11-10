@@ -35,7 +35,7 @@ The app opens on a **Start** page with one box per tool. Click a box to open tha
 | Tool | Status | What it's for |
 |---|---|---|
 | **Visualiser** | available | Watch tracked bone motion in 3D, with radiographs if you have them, and joint angle curves from a joint model (below). |
-| **Model Builder** | available (knee first) | Define axes on bone surfaces, optionally joints between them and reference poses, and save a model for the other tools. |
+| **Model Builder** | available | Define axes on bone surfaces, optionally joints between them and reference poses, and save a model for the other tools. |
 | **Assessor Evaluation** | available | Load several raters' tracking of a trial (and, for validity, the criterion tracking) and get inter- and intra-rater reliability and validity: helical and surface errors per frame, statistics, violin plots and CSV export. |
 
 Adding a tool: describe it in `bvrviewer/app/tools.py` (it then appears on the Start page as "Coming soon"), write its tab widget, and register it in `MainWindow.TAB_CLASSES`.
@@ -75,7 +75,7 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 - Every slider has a box beside it to type the value (press Enter), and the timeline's frame number can be typed too.
 - Curves are labelled **Angle X/Y/Z** and **Translation X/Y/Z** (the coordinate system's axes, coloured like the 3D axes) by default; **Labels** above the curves switches to the anatomical names (Flexion, …). CSV exports follow the same order and add the anatomical name to each column.
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4).
-- **Save tab as session** (Ctrl+S) saves file paths and every setting to a `.json`. **Open saved session** restores it. When saving you can also choose:
+- **File → Save** (Ctrl+S) in a Visualiser tab saves the tab as a session: file paths and every setting to a `.json`. **Open saved session** restores it. When saving you can also choose:
   - **Save the radiographs with the session:** each camera's radiographs, as shown in the app, in one compressed file per camera (roughly a sixteenth of the originals' size for uncompressed 2016 × 2016 images). The session then opens in seconds, even where the original images can't be reached. They're used only while the originals are unchanged (names, sizes and dates), or when the originals can't be found.
   - **Include all other files:** copies of the bones, volumes, `.tfm`, tracking, calibration and Model Builder files. Ticking it also ticks the radiographs (which can be unticked). With both, the session file and its folder are self-contained: copy or zip them to open on another computer or share.
   
@@ -110,16 +110,22 @@ When a camera is added, all its radiographs are read into memory first, with a p
 
 ## The Model Builder
 
-A model is built in three steps; the navigator is laid out the same way (**1 Bones**, **2 Joints**, **3 Reference pose** under each joint), with **Properties** for the selected item. Right-click for actions. **Start a knee** (on the model's properties) adds a femur, a tibia and a Grood & Suntay knee in one go; **Start an ankle** adds a distal tibia, a talus, a calcaneus and ISB-style talocrural and subtalar joints.
+A model is built in three steps; the navigator is laid out the same way (**1 Bones**, **2 Joints**, **3 Reference pose** under each joint), with **Properties** for the selected item. Right-click for actions. The bar above the view has **Add bones…**, **Open model…**, **Save** (Ctrl+S) and **Save as…** (Ctrl+Shift+S); a • after the tab's name means unsaved changes, and closing the tab asks whether to save them.
 
-**1. Bones: axes on each bone.** Right-click **Bones → Add bone** and choose its type: **Femur** or **Tibia** (knee), the ankle and foot bones (**Tibia (distal: ankle)**, fibula, talus, calcaneus, navicular, cuboid, cuneiforms, metatarsals), or **Other bone**. The type decides how its axes can be made.
-- Load its surface (right-click → **Load surface…**): the same file, in the same model space, that you track with. Set its **side**.
-- **Axes from**: an automatic method fitted to the surface (the default; see below), or **landmarks** placed by hand: select a landmark under the bone, then **right-click the surface** (point), or right-click and drag to paint a region (its centre, or a sphere fitted to it). Left-drag still rotates.
-- Anatomical bones use ISB axis names: X anterior, Y superior, Z right on both sides (Wu et al. 2002). "Other bone" uses its principal axes of inertia (axis 1 = long axis), with no anatomical names.
+**1. Bones: axes on each bone.** Each bone's properties walk through numbered steps; each one opens once the one before it is done:
+1. **Surface.** **Add bones…** loads one or more surface files (STL, or TIF partial volumes with their voxel size): the same files, in the same model space, that you track with. Each file becomes a bone, shown in the view straight away.
+2. **Bone.** Which bone it is: the knee bones (femur, tibia), the ankle and foot bones (distal tibia, fibula, talus, calcaneus, navicular, cuboid, cuneiforms, metatarsals), or **General (any bone)**. It's guessed from the file name where possible (`AUT_Left_Femur.stl` → femur; `SOL001A_tal_aligned.stl` → talus; otherwise General), with the **side** from words like *Left*/*R*. The bone decides the methods offered next.
+3. **Axes method.** An automatic method fitted to the surface (the default for bones that have one; see below), AAFACT for the foot bones, or **landmarks** placed by hand. General bones offer their principal axes of inertia (axis 1 = long axis) or **three points**: an origin, a point along axis 1, and a point in the plane of axes 1 and 2.
+4. **Define.** For landmarks, a checklist: **Place** or **Paint** beside each landmark selects it and the matching tool (below), with ✓ once it's set; **Clear** removes it, and the active landmark shows its method (single point, centre of a painted region, or centre of a sphere fitted to it). Automatic methods show their flips; AAFACT has Run / Import.
+5. **Apply.** Nothing is calculated or shown until you press **Apply**: the axes are then made from the definition and drawn (automatic methods run then). After that, **Update automatically** (on by default) keeps the axes up to date as you change the definition, e.g. repainting an area; untick it to keep the applied axes until you Apply again (the bone then shows *Changed since applied*). The navigator marks each bone ✓ applied, ◐ changed, ○ not applied.
 
-A bone's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, bones already give each bone's motion about its own axes in the Visualiser (right-click **Axes** under a bone → **Load file…**, or **Load model…**).
+**Tools.** The bar on the left of the view sets what the left mouse button does: **Navigate** (N; as in the Visualiser: left-drag rotates, middle-drag pans, scroll or right-drag zooms), **Place point** (P), **Paint** (B) and **Erase** (E) for the selected landmark (with a **brush size** and a ring showing the brush on the surface), and **Inspect** (I: a point's coordinates, in model space and in the bone's axes, and the nearest landmark). While a tool is active, right-drag rotates, middle-drag pans and the scroll wheel zooms, so you can turn the bone without leaving the tool; Esc goes back to Navigate. Tools that don't apply (e.g. Paint for a single-point landmark) are greyed out with the reason in their tooltip. **Undo** (Ctrl+Z) reverses landmark changes. **Views** looks along the model space's axes; **Fit view** frames the bones.
 
-**2. Joints (optional).** Right-click **Joints → Add joint…**, choose a definition and its proximal and distal bones:
+Anatomical bones use ISB axis names: X anterior, Y superior, Z right on both sides (Wu et al. 2002). General bones' axes are numbered 1, 2, 3, with no anatomical names.
+
+A bone's axes live in its own model space, so they don't depend on where any other bone is. Saved on their own, bones already give each bone's motion about its own axes in the Visualiser (right-click **Axes** under a bone → **Load file…**, or **Load model…**). Bones that haven't been applied are saved without axes.
+
+**2. Joints (optional).** Select two bones with applied axes together (Ctrl+click them in the navigator, or right-click a bone → **Add joint with**). Properties then offers the definitions that fit those two bones, with proximal and distal set the way the definition needs (e.g. a calcaneus and a talus give the subtalar joint, talus → calcaneus), then the general ones (with **Swap proximal and distal**); name it and **Add joint**. (**Joints → Add joint…** also works.) The definitions:
 - **Knee (tibiofemoral): Grood & Suntay**, femur → tibia. ISB doesn't define the knee; this is the convention most BVR knee studies use. Left knees are mirrored, so positive values mean the same motion on both sides: flexion, adduction (varus), internal rotation; lateral, anterior and proximal translation of the tibia.
 - **Ankle (talocrural): ISB**, tibia → talus, **Subtalar: ISB style**, talus → calcaneus, and **Ankle complex: ISB**, tibia → calcaneus (Wu et al. 2002): dorsiflexion about the proximal bone's Z, internal rotation about the distal bone's Y, inversion about the floating axis; left sides mirrored like the knee.
 - **Joint coordinate system (ISB style)** between any two bones (proximal Z, floating axis, distal Y), without clinical names.
@@ -134,7 +140,7 @@ With no reference pose, a joint's zero is **anatomical**: all angles are 0 when 
 
 The reference is stored as the two bones' relative pose, so it stays valid if a bone's axes are changed later. The view shows the joint in its reference pose, and Properties lists the anatomical values that are being removed.
 
-**Preview and checks.** Attach a tracking file to a bone (right-click → **Preview tracking**) to see joints in a tracked pose with their values, anatomical and relative to the reference. **Compare methods** lists the joint's anatomical angles for every combination of the bones' axis methods. **Save model…** writes a `.bvrmodel.json`: bones (surface, axes method, landmarks, axes), joints and reference poses. Open it again here to edit it. In a Visualiser tab, **Load model…** brings in its bones, coordinate systems and joints together. Version-1 files (one template) are converted on opening.
+**Preview and checks.** Attach a tracking file to a bone (right-click → **Preview tracking**) to see joints in a tracked pose with their values, anatomical and relative to the reference. **Compare methods** lists the joint's anatomical angles for every combination of the bones' axis methods. **Save** writes a `.bvrmodel.json`: bones (surface, type, axes method, landmarks, applied axes), joints and reference poses. Open it again here to edit it. In a Visualiser tab, **Load model…** brings in its bones, coordinate systems and joints together. Version-1 files (one template) are converted on opening.
 
 ### Automatic axes (no landmarks)
 

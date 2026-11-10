@@ -224,8 +224,20 @@ def _inertial(L: dict, side: str, mesh) -> np.ndarray:
     return inertial_frame(mesh)[0]
 
 
+def _three_points(L: dict, side: str, mesh) -> np.ndarray:
+    """Axes from three points, for any bone: origin O; axis 1 from O towards A; axis 2 perpendicular to
+    axis 1 in the plane of O, A and P, on P's side; axis 3 = axis 1 × axis 2."""
+    o, a, pp = L["O"], L["A"], L["P"]
+    x = _unit(a - o, "axis 1 (the origin and the axis point coincide)")
+    v = pp - o
+    y = _unit(v - (v @ x) * x, "axis 2 (the plane point is in line with the origin and the axis point)")
+    m = np.eye(4)
+    m[:3, 0], m[:3, 1], m[:3, 2], m[:3, 3] = x, y, np.cross(x, y), o
+    return m
+
+
 RECIPES = {"isb_femur": _femur_isb, "knee_tibia": _tibia_knee, "isb_tibia_ankle": _tibia_ankle,
-           "inertial": _inertial}
+           "inertial": _inertial, "three_points": _three_points}
 
 # Joint conventions: rotation sequence (intrinsic, axes of the distal ACS relative to the proximal),
 # names of the three angles and three translations, and sign flips per side so that positive is
@@ -328,11 +340,58 @@ SEGMENT_TYPES: dict[str, SegmentType] = {t.key: t for t in [
     *[SegmentType(f"metatarsal{i}", f"Metatarsal {i}", (), None, ("aafact",), True, "", (PETERSON,))
       for i in range(1, 6)],
     SegmentType("fibula", "Fibula", (), None, ("aafact",), True, "", (PETERSON,)),
-    SegmentType("generic", "Other bone", (), None, ("inertial",), False,
-                "Principal axes of inertia: axis 1 is the long axis. No anatomical names."),
+    SegmentType("generic", "General (any bone)", (
+        LandmarkDef("O", "Origin", "The point the axes start from.", ("point", "region", "sphere")),
+        LandmarkDef("A", "Point along axis 1", "Axis 1 points from the origin towards this point.",
+                    ("point", "region", "sphere")),
+        LandmarkDef("P", "Point in the plane of axes 1 and 2",
+                    "Axis 2 lies in the plane through the origin, the axis 1 point and this point, pointing to "
+                    "this point's side. Axis 3 is perpendicular to both (right-handed).",
+                    ("point", "region", "sphere")),
+    ), "three_points", ("inertial",), False,
+                "Three points: origin, a point along axis 1, and a point in the plane of axes 1 and 2. "
+                "Axes are numbered 1, 2, 3 (no anatomical names)."),
 ]}
 
 AAFACT_TITLE = "AAFACT (Peterson et al. 2023): run it, or import its results"
+
+# Words in surface file names that say which bone it is (matched against the start of each word).
+_TYPE_WORDS = (
+    (("femur", "fem"), "femur"),
+    (("tibia", "tib"), "tibia"),
+    (("talus", "tal", "tali"), "talus"),
+    (("calcaneus", "calc", "cal", "calcan"), "calcaneus"),
+    (("navicular", "nav"), "navicular"),
+    (("cuboid", "cub"), "cuboid"),
+    (("fibula", "fib"), "fibula"),
+)
+
+
+def guess_segment_type(filename: str) -> str | None:
+    """A bone type from a surface's file name (e.g. 'SOL001A_tal_aligned.stl' -> 'talus'), or None.
+
+    Tibias are 'tibia' (knee) unless the name says distal or ankle; cuneiforms need medial /
+    intermediate / lateral with 'cun…'; metatarsals need their number (MT1, met1, metatarsal1).
+    """
+    import re
+
+    stem = Path(filename).name.split(".")[0].lower()
+    words = [w for w in re.split(r"[^a-z0-9]+|(?<=[a-z])(?=[0-9])", stem) if w]
+    joined = " ".join(words)
+    m = re.search(r"\b(?:mt|met|meta|metatarsal)\s?([1-5])\b", joined)
+    if m:
+        return f"metatarsal{m.group(1)}"
+    if any(w.startswith("cun") for w in words):
+        for pre, t in (("med", "medial_cuneiform"), ("int", "intermediate_cuneiform"), ("lat", "lateral_cuneiform")):
+            if any(w.startswith(pre) for w in words):
+                return t
+        return None
+    for keys, t in _TYPE_WORDS:
+        if any(w == k or (len(k) >= 4 and w.startswith(k)) for w in words for k in keys):
+            if t == "tibia" and any(w.startswith(("dist", "ankle", "plafond")) for w in words):
+                return "tibia_distal"
+            return t
+    return None
 
 
 def axes_source_title(source: str) -> str:
@@ -448,8 +507,12 @@ class Segment:
     preview_tracking: str | None = None   # optional .tra used to preview the segment and its joints
     imported: dict | None = None          # axes from an external program (AAFACT): see KinematicModel.set_imported
 
+    applied: bool = True                  # the axes have been applied (Model Builder: nothing until Apply)
+    auto_update: bool = True              # once applied, changes to the definition update the axes
+
     # runtime
-    acs: np.ndarray | None = None
+    acs: np.ndarray | None = None         # the axes in use (applied): what joints, files and the Visualiser use
+    draft: np.ndarray | None = None       # the axes from the current definition (= acs unless not yet applied)
     error: str = ""
     auto: object = None                   # core.auto_axes.AutoResult when axes_source is automatic
 
@@ -513,6 +576,9 @@ class KinematicModel:
     segments: list = field(default_factory=list)     # [Segment]
     joints: list = field(default_factory=list)       # [Joint]
     path: Path | None = None
+    # When True (the Model Builder), a segment's axes are used only once applied (see apply); before that
+    # only cheap definitions (landmarks, imported axes) are evaluated, and automatic methods run on Apply.
+    require_apply: bool = False
     _auto_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     # ---- building
@@ -549,8 +615,72 @@ class KinematicModel:
         seg = Segment(name=self._unique(name or t.title, {s.name for s in self.segments}), type=type_key,
                       side=side if t.anatomical else "none")
         seg.axes_source = t.auto_methods[0] if t.auto_methods else "landmarks"
+        seg.applied = not self.require_apply
         self.segments.append(seg)
         return seg
+
+    def set_segment_type(self, name: str, type_key: str) -> None:
+        """Change what bone a segment is. Its axes method goes back to the type's first one, landmarks the
+        new type doesn't have are dropped, and its axes need applying again."""
+        s = self.segment(name)
+        if type_key not in SEGMENT_TYPES:
+            raise JointModelError(f"Unknown bone type {type_key!r}.")
+        if type_key == s.type:
+            return
+        t = SEGMENT_TYPES[type_key]
+        keep = {d.key for d in t.landmarks}
+        s.type = type_key
+        s.landmarks = {k: v for k, v in s.landmarks.items() if k in keep}
+        s.side = (s.side if s.side in ("right", "left") else "right") if t.anatomical else "none"
+        s.axes_source = t.auto_methods[0] if t.auto_methods else "landmarks"
+        s.auto_options, s.imported = {}, None
+        s.applied = not self.require_apply
+        s.acs = None
+        for j in [j for j in self.joints if name in (j.proximal, j.distal)]:
+            jt = j.jtype
+            if (jt.proximal_types and self.segment(j.proximal).type not in jt.proximal_types) or \
+                    (jt.distal_types and self.segment(j.distal).type not in jt.distal_types):
+                self.joints.remove(j)
+
+    def joint_types_for(self, a: str, b: str) -> list[tuple[str, str, str]]:
+        """Joint definitions that fit two segments, as (type key, proximal, distal): specific ones first
+        (in whichever order the definition needs), then the general ones with a as proximal."""
+        sa, sb = self.segment(a), self.segment(b)
+        out = []
+        for k, jt in JOINT_TYPES.items():
+            if not jt.proximal_types and not jt.distal_types:
+                continue
+            for p, d in ((sa, sb), (sb, sa)):
+                if p.type in jt.proximal_types and d.type in jt.distal_types:
+                    out.append((k, p.name, d.name))
+                    break
+        out += [(k, a, b) for k, jt in JOINT_TYPES.items() if not jt.proximal_types and not jt.distal_types]
+        return out
+
+    def apply(self, name: str) -> None:
+        """Apply a segment's axes: compute them from its current definition (running an automatic method
+        if that's the method) and use them from now on. Raises JointModelError if they can't be made."""
+        s = self.segment(name)
+        was = (s.applied, s.acs)
+        s.applied = True
+        self.compute()
+        if s.draft is None:
+            err = s.error or "The axes couldn't be made."
+            s.applied, s.acs = was
+            self.compute()
+            s.error = err                       # shown with the bone until something changes
+            raise JointModelError(err)
+        s.acs = s.draft.copy()
+
+    def status(self, name: str) -> str:
+        """'none' (not applied), 'applied', 'changed' (definition changed since: not auto-updated) or
+        'failed' (applied axes, but the current definition doesn't give axes)."""
+        s = self.segment(name)
+        if not s.applied or s.acs is None:
+            return "none"
+        if s.draft is None:
+            return "failed"
+        return "applied" if np.allclose(s.draft, s.acs, atol=1e-9) else "changed"
 
     def remove_segment(self, name: str) -> None:
         self.segments = [s for s in self.segments if s.name != name]
@@ -707,23 +837,35 @@ class KinematicModel:
         return s.imported["options"].get(s.imported.get("option"))
 
     def compute(self) -> None:
-        """(Re)compute every segment's ACS; failures go in Segment.error."""
+        """(Re)compute every segment's axes from its definition (Segment.draft); failures go in
+        Segment.error. Without require_apply the axes in use (Segment.acs) are always the draft. With it,
+        acs is the draft only for applied segments that update automatically; others keep their applied axes
+        (or none), and automatic methods only run for applied segments (see apply)."""
         for s in self.segments:
-            s.acs, s.error, s.auto = None, "", None
+            s.draft, s.error, s.auto = None, "", None
             if s.mesh is None:
                 s.error = "No surface loaded."
-                continue
-            if s.axes_source == "aafact":
-                s.acs, s.error = self.axes_for(s.name, "aafact")
-                continue
-            if s.axes_source != "landmarks":
-                res = self._auto_result(s, s.axes_source, s.auto_options)
-                if isinstance(res, Exception):
-                    s.error = str(res)
+            elif s.axes_source == "aafact":
+                s.draft, s.error = self.axes_for(s.name, "aafact")
+            elif s.axes_source != "landmarks":
+                if not self.require_apply or s.applied:
+                    res = self._auto_result(s, s.axes_source, s.auto_options)
+                    if isinstance(res, Exception):
+                        s.error = str(res)
+                    else:
+                        s.auto, s.draft = res, res.acs.copy()
                 else:
-                    s.auto, s.acs = res, res.acs.copy()
-                continue
-            s.acs, s.error = self.axes_for(s.name, "landmarks")
+                    s.error = "Not applied yet."
+            else:
+                s.draft, s.error = self.axes_for(s.name, "landmarks")
+            if not self.require_apply:
+                s.acs = s.draft
+            elif not s.applied:
+                s.acs = None
+            elif s.auto_update and s.draft is not None:
+                s.acs = s.draft.copy()
+            elif s.mesh is None:
+                s.acs = None
 
     def checks(self) -> list[str]:
         """Plain-language warnings about axes, landmarks and joints that look wrong."""
@@ -872,6 +1014,7 @@ class KinematicModel:
                           "surface": s.surface.to_dict() if s.surface is not None else None,
                           "axes_source": s.axes_source, "auto_options": s.auto_options, "landmarks": s.landmarks,
                           "preview_tracking": s.preview_tracking, "imported": s.imported,
+                          "applied": bool(s.applied and s.acs is not None), "auto_update": s.auto_update,
                           "acs": s.acs.tolist() if s.acs is not None else None} for s in self.segments],
             "joints": [{"name": j.name, "type": j.type, "proximal": j.proximal, "distal": j.distal,
                         "reference": j.reference.to_dict() if j.reference is not None else None}
@@ -905,6 +1048,8 @@ class KinematicModel:
                 s.axes_source = m.axes_sources(s.name)[0][0]
             if sd.get("acs") is not None:
                 s.acs = np.array(sd["acs"], float)
+            s.applied = bool(sd.get("applied", s.acs is not None))
+            s.auto_update = bool(sd.get("auto_update", True))
         for jd in d.get("joints", []):
             if jd.get("type") not in JOINT_TYPES:
                 raise JointModelError(f"Unknown joint type {jd.get('type')!r}.")
@@ -915,9 +1060,10 @@ class KinematicModel:
         return m
 
     @classmethod
-    def load(cls, path: str | Path, build_surfaces: bool = True) -> "KinematicModel":
+    def load(cls, path: str | Path, build_surfaces: bool = True, require_apply: bool = False) -> "KinematicModel":
         m = cls.from_dict(json.loads(Path(path).read_text()))
         m.path = Path(path)
+        m.require_apply = require_apply
         if build_surfaces:
             for s in m.segments:
                 if s.surface is not None:

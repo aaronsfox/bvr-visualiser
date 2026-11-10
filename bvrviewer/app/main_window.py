@@ -109,7 +109,8 @@ class MainWindow(QMainWindow):
         self._act(f, "Add bone…", self._vis("add_models"), "Ctrl+O")
         self._act(f, "Load model…", self._vis("load_full_model"), "Ctrl+M")
         self._act(f, "Open saved session…", self.open_session, "Ctrl+Shift+O")
-        self._act(f, "Save tab as session…", self._vis("save_session"), "Ctrl+S")
+        self._act(f, "Save", self.save_current, "Ctrl+S")
+        self._act(f, "Save as…", lambda: self.save_current(as_new=True), "Ctrl+Shift+S")
         f.addSeparator()
         self._act(f, "Save screenshot…", self._vis("screenshot"), "Ctrl+P")
         self._act(f, "Export video…", self._vis("export_video"), "Ctrl+E")
@@ -193,11 +194,29 @@ class MainWindow(QMainWindow):
             tab.state.name = text.strip()
             self.tabs.setTabText(i, tab.state.name)
 
+    def save_current(self, as_new: bool = False) -> None:
+        """Save what the current tab holds: a Visualiser session, a Model Builder model or an Assessor project."""
+        tab = self.current()
+        if isinstance(tab, VisualiserTab):
+            tab.save_session()
+        elif isinstance(tab, ModelBuilderTab):
+            tab.save_model_as() if as_new else tab.save_model()
+        elif hasattr(tab, "save_project"):
+            tab.save_project()
+        else:
+            QMessageBox.information(self, "Save", "Open a Visualiser, Model Builder or Assessor tab to save it.")
+
     def close_tab(self, i: int) -> None:
         tab = self.tabs.widget(i)
         if i < 0 or tab is self.start:
             return
-        if getattr(tab.state, "models", None) and QMessageBox.question(
+        if hasattr(tab, "has_unsaved"):
+            if tab.has_unsaved():
+                r = QMessageBox.question(self, "Close tab", f"Save the changes to “{tab.state.name}” first?",
+                                         QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+                if r == QMessageBox.Cancel or (r == QMessageBox.Save and not tab.save_model()):
+                    return
+        elif getattr(tab.state, "models", None) and QMessageBox.question(
                 self, "Close tab", f"Close “{tab.state.name}”? Unsaved settings will be lost.") != QMessageBox.Yes:
             return
         tab.close_tab()

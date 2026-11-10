@@ -433,18 +433,26 @@ class PropertySheet(QWidget):
         lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
         return self.row(text, lab, tip)
 
-    def buttons(self, items, danger: str | None = None) -> None:
+    def buttons(self, items, danger: str | None = None, primary: str | None = None) -> list:
+        """A row of buttons from (text, fn) or (text, fn, enabled, tooltip); returns them."""
         box = QWidget()
         h = QHBoxLayout(box)
         h.setContentsMargins(0, 2, 0, 0)
         h.setSpacing(6)
-        for text, fn in items:
+        out = []
+        for text, fn, *rest in items:
             b = QPushButton(text)
-            b.setObjectName("Danger" if text == danger else "Small")
+            b.setObjectName("Danger" if text == danger else "Primary" if text == primary else "Small")
             b.clicked.connect(fn)
+            if rest:
+                b.setEnabled(bool(rest[0]))
+            if len(rest) > 1 and rest[1]:
+                b.setToolTip(rest[1])
             h.addWidget(b)
+            out.append(b)
         h.addStretch(1)
         self.wide(box)
+        return out
 
     # ---- editors
     def line(self, text: str, value: str, on_done) -> QLineEdit:

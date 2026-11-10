@@ -2,9 +2,10 @@
 
 Usage: BVR_SAMPLE_DATA=... xvfb-run -a python3 tests/drive_model_builder.py OUT_DIR
 
-Follows the three steps: segments (automatic axes, then landmarks placed by real right-click picks and
-paint strokes in the viewport), a Grood & Suntay knee joint, and reference poses (scan pose and a
-"neutral trial"). Then loads the saved model into a Visualiser tab with a synthetic flexion sweep and
+Follows the steps: bones added from their surface files (type and side from the file names), automatic
+axes applied, then landmarks placed with the tools (Place point, Paint, Erase, undo; real left-button
+clicks and strokes in the viewport, right-drag rotating), a Grood & Suntay knee joint from the two
+selected bones, and reference poses (scan pose and a "neutral trial"). Then loads the saved model into a Visualiser tab with a synthetic flexion sweep and
 checks segment and joint curves, zeroing, CSV export and sessions.
 """
 
@@ -62,30 +63,37 @@ shot("mb_00_empty")
 for kind in ("model", "segments", "joints"):
     assert not tab.build_menu(kind).isEmpty()
 
-# ---- step 1: segments ------------------------------------------------------------------------------
-tab.add_preset("knee")
+# ---- step 1: bones from their surfaces, then type, method, define, Apply ---------------------------------
+added = tab.add_surfaces([K / "Models" / "AUT_Left_Femur.stl", K / "Models" / "AUT_Left_Tibia.stl"])
 m = tab.model
-fem, tib = m.segment("Femur"), m.segment("Tibia")
-assert [j.name for j in m.joints] == ["Knee"]
-for s in (fem, tib):
-    tab._set_side(s, "left")
+fem, tib = added
+assert (fem.type, fem.side, fem.name) == ("femur", "left", "Femur") and (tib.type, tib.side) == ("tibia", "left")
+assert fem.acs is None and m.status("Femur") == "none" and fem.auto is None      # nothing until Apply
+assert win.tabs.tabText(1) == "Model 1 •", win.tabs.tabText(1)                  # unsaved changes
 for s, f in [(fem, "Femur"), (tib, "Tibia")]:
-    assert tab.set_surface(s, K / "Models" / f"AUT_Left_{f}.stl")
     tab.set_preview(s, K / "Tracking" / f"Left_{f}.tra")
-    pump()
-assert fem.axes_source == "staple_femur_cylinder" and fem.acs is not None, fem.error
+tab.select("segment", fem)
+assert not tab.tool_buttons["point"].isEnabled() and tab.tool_buttons["navigate"].isChecked()
+shot("mb_01_femur_steps")
+assert tab.apply_axes(fem) and tab.apply_axes(tib)
+assert fem.axes_source == "staple_femur_cylinder" and m.status("Femur") == "applied", fem.error
 assert tib.axes_source == "staple_tibia_kai" and tib.acs is not None, tib.error
 assert fem.auto.quality["Bone"].startswith("partial") and fem.auto.notes == [], fem.auto.notes
 tab.select("segment", fem)
-shot("mb_01_femur_auto")
+shot("mb_02_femur_applied")
 tab.select("segment", tib)
 x_before = tib.acs[:3, 0].copy()
-tab._toggle_option(tib, "flip_ap")
+tab._toggle_option(tib, "flip_ap")                   # applied and updating automatically: follows at once
 assert tib.acs[:3, 0] @ x_before < -0.7
-tab._toggle_option(tib, "flip_ap")
-shot("mb_02_tibia_auto")
+tab._set_auto_update(tib, False)
+tab._toggle_option(tib, "flip_ap")                   # not updating: the applied axes stay, marked changed
+assert tib.acs[:3, 0] @ x_before < -0.7 and m.status("Tibia") == "changed"
+tab.apply_axes(tib)
+assert tib.acs[:3, 0] @ x_before > 0.7 and m.status("Tibia") == "applied"
+tab._set_auto_update(tib, True)
+shot("mb_02b_tibia_auto")
 
-# landmarks instead, placed by real picks and paint strokes
+# landmarks instead, placed with the tools by real clicks and strokes (left button)
 Tf = load_tracking(K / "Tracking" / "Left_Femur.tra").poses[0]
 Tt = load_tracking(K / "Tracking" / "Left_Tibia.tra").poses[0]
 L = _auto_landmarks(fem.mesh, tib.mesh, Tf, Tt)
@@ -113,15 +121,15 @@ def face_camera(point, mesh):
     pump(0.1)
 
 
-def right_click(xy, drag_to=None):
+def click(xy, drag_to=None, button="Left"):
     iren.SetEventInformation(xy[0], xy[1], 0, 0)
-    iren.InvokeEvent("RightButtonPressEvent")
+    iren.InvokeEvent(f"{button}ButtonPressEvent")
     if drag_to is not None:
         for t in np.linspace(0, 1, 8):
             p = (np.array(xy) * (1 - t) + np.array(drag_to) * t).round().astype(int)
             iren.SetEventInformation(int(p[0]), int(p[1]), 0, 0)
             iren.InvokeEvent("MouseMoveEvent")
-    iren.InvokeEvent("RightButtonReleaseEvent")
+    iren.InvokeEvent(f"{button}ButtonReleaseEvent")
     pump(0.05)
 
 
@@ -129,31 +137,72 @@ auto_acs = {s.name: s.acs.copy() for s in (fem, tib)}
 errors = []
 for s, keys, role in [(fem, ("ME", "LE", "FS"), "femur"), (tib, ("MC", "LC", "TD"), "tibia")]:
     tab.set_axes_source(s, "landmarks")
+    assert m.status(s.name) == "failed"                 # applied axes kept until the landmarks give new ones
     for key in keys:
-        tab.select("landmark", s, key)
-        if key in ("FS", "TD"):
+        tab.edit_landmark(s, key)
+        painted = key in ("FS", "TD")
+        assert tab.tool == ("paint" if painted else "point"), (key, tab.tool)
+        assert tab.tool_buttons["paint" if painted else "point"].isChecked()
+        assert not tab.tool_buttons["point" if painted else "paint"].isEnabled()
+        if painted:
             pts = L[role][f"{key}_points"]
             target = pts.mean(0)
             near = pts[np.argmin(np.linalg.norm(pts - target, axis=1))]
             face_camera(near, s.mesh)
             a = screen_of(near)
-            right_click((a[0] - 25, a[1]), drag_to=(a[0] + 25, a[1]))
+            click((a[0] - 25, a[1]), drag_to=(a[0] + 25, a[1]))
         else:
             target = L[role][key]
             face_camera(target, s.mesh)
-            right_click(screen_of(target))
+            click(screen_of(target))
         got = m.landmark(s.name, key)
         assert got is not None, f"{s.name} {key} not placed"
         errors.append((s.name, key, float(np.linalg.norm(got - target))))
         if key == "FS":
+            # erase part of the painted area, then undo it
+            n0 = len(s.landmarks["FS"]["points"])
+            assert tab.set_tool("erase")
+            click((a[0] - 25, a[1]), drag_to=(a[0] - 5, a[1]))
+            n1 = len(s.landmarks.get("FS", {}).get("points", []))
+            assert n1 < n0, (n0, n1)
+            tab.undo()
+            assert len(s.landmarks["FS"]["points"]) == n0
+            tab.set_tool("paint")
+            # right-drag rotates while a tool is active, without painting
+            pos = np.array(tab.plotter.camera.position)
+            click((a[0], a[1] - 60), drag_to=(a[0] + 80, a[1] - 60), button="Right")
+            assert not np.allclose(pos, tab.plotter.camera.position)
+            assert len(s.landmarks["FS"]["points"]) == n0
+            face_camera(near, s.mesh)
+            iren.SetEventInformation(a[0], a[1], 0, 0)
+            iren.InvokeEvent("MouseMoveEvent")
+            pump(0.05)
+            assert tab._cursor_actor is not None                       # the brush ring follows the mouse
             shot("mb_03_painted")
 for e in errors:
     print("landmark", *e[:2], f"{e[2]:.1f} mm from target", flush=True)
 assert all(e[2] < 15 for e in errors if e[1] not in ("FS", "TD")), errors
-assert fem.acs is not None and tib.acs is not None and m.checks() == [], m.checks()
+assert m.status("Femur") == m.status("Tibia") == "applied" and m.checks() == [], m.checks()  # updated as placed
+tab.select("segment", fem)
+tab.set_tool("pick")
+face_camera(L["femur"]["ME"], fem.mesh)
+click(screen_of(L["femur"]["ME"]))
+assert "nearest landmark: Medial epicondyle" in tab.hint.text(), tab.hint.text()
+tab.set_tool("navigate")
 
-# ---- step 2: the joint ------------------------------------------------------------------------------
+# ---- step 2: the joint, from the two bones selected together -------------------------------------------------
+tab.select_pair(fem, tib)
+assert len(tab.tree.selectedItems()) == 2
+assert m.joint_types_for("Femur", "Tibia")[0] == ("knee_grood_suntay", "Femur", "Tibia")
+assert m.joint_types_for("Tibia", "Femur")[0] == ("knee_grood_suntay", "Femur", "Tibia")   # either order
+shot("mb_04a_pair")
+from PySide6.QtWidgets import QPushButton  # noqa: E402
+
+add_btn = next(b for b in tab.props.findChildren(QPushButton) if b.text() == "Add joint")
+add_btn.click()
+pump()
 knee = m.joint("Knee")
+assert (knee.type, knee.proximal, knee.distal) == ("knee_grood_suntay", "Femur", "Tibia")
 tab.select("joint", knee)
 rows = tab.compare_methods(knee)
 assert len(rows) == 5 * 6 and sum(r["current"] for r in rows) == 1
@@ -191,15 +240,19 @@ shot("mb_07_reference_props")
 ReferenceDialog(tab, m, knee, "scan").apply()
 
 path = OUT / "knee_left.bvrmodel.json"
-m.save(path)
+assert tab._save_to(path)
+assert win.tabs.tabText(1) == "Model 1" and not tab.has_unsaved()
 tab2 = win.open_tool("model_builder")
 tab2.load_model_file(path)
 pump()
 assert tab2.model.joint("Knee").reference is not None and tab2.model.segment("Femur").acs is not None
+assert tab2.model.status("Femur") == "applied" and tab2.model.segment("Femur").applied
 assert win.tabs.tabText(win.tabs.indexOf(tab2)) == tab2.model.name
-# segments without a joint are a model too; removing a segment removes its joint
-extra = tab2.add_segment("generic", "Patella")
-assert extra.side == "none"
+# a bone that isn't applied is saved without axes
+extra = tab2.add_surfaces([K / "Models" / "AUT_Left_Tibia.stl"])[0]
+tab2.set_segment_type(extra, "generic")
+assert extra.side == "none" and extra.type == "generic" and extra.acs is None
+assert ("landmarks", "Landmarks (placed by hand)") in tab2.model.axes_sources(extra.name)
 tab2.model.remove_segment("Tibia")
 assert tab2.model.joints == []
 print("MODEL BUILDER OK", flush=True)
@@ -336,15 +389,14 @@ from test_aafact import write_aafact_xlsx  # noqa: E402
 
 A = Path(os.environ["BVR_SAMPLE_DATA"]) / "2025-01-12-Ankle" / "Meshes"
 ab = win.open_tool("model_builder")
-ab.add_preset("ankle")
+segs = ab.add_surfaces([A / f"SOL001A_{f}_aligned.stl" for f in ("tib", "tal", "cal")])
 am = ab.model
-assert [s.type for s in am.segments] == ["tibia_distal", "talus", "calcaneus"]
-assert [j.type for j in am.joints] == ["ankle_isb", "subtalar_isb"]
-for s, f in zip(am.segments, ("tib", "tal", "cal")):
-    assert ab.set_surface(s, A / f"SOL001A_{f}_aligned.stl")
-    pump()
-tal, cal = am.segment("Talus"), am.segment("Calcaneus")
-assert tal.axes_source == "staple_talus_ankle" and tal.acs is not None, tal.error
+assert [s.type for s in am.segments] == ["tibia", "talus", "calcaneus"]       # guessed from the file names
+ab.set_segment_type(segs[0], "tibia_distal")                                   # the ankle's (distal) tibia
+tib_a, tal, cal = segs
+assert [s.type for s in am.segments] == ["tibia_distal", "talus", "calcaneus"] and tib_a.axes_source == "aafact"
+assert tal.axes_source == "staple_talus_ankle" and tal.acs is None and tal.auto is None
+assert ab.apply_axes(tal) and tal.acs is not None, tal.error
 assert tal.auto.quality["Algorithm"] == "STAPLE-Talus"
 ab.select("segment", tal)
 shot("mb_10_talus_staple")
@@ -356,10 +408,20 @@ write_aafact_xlsx(xl, [("CC_bvr_Calcaneus_Right", "bvr_Calcaneus_Right", "Calcan
                        ("ST_bvr_Calcaneus_Right", "bvr_Calcaneus_Right", "Calcaneus", "Right",
                         np.array(cal.mesh.center), R[:, [1, 2, 0]] @ np.diag([1, 1, 1]))])
 assert ab.import_aafact(cal, str(xl))
-assert cal.acs is not None and cal.imported["option"] == "CC"
+assert cal.acs is None and am.status("Calcaneus") == "none" and cal.imported["option"] == "CC"
+assert ab.apply_axes(cal) and cal.acs is not None
 ab.select("segment", cal)
 shot("mb_11_calcaneus_aafact")
 ab._set_aafact_option(cal, "ST")
 assert cal.imported["option"] == "ST"
+# joints offered for each pair of bones
+assert am.joint_types_for("Talus", "Calcaneus")[0] == ("subtalar_isb", "Talus", "Calcaneus")
+ab.select_pair(cal, tal)
+assert "Add joint" in [b.text() for b in ab.props.findChildren(QPushButton)]
+ab.add_joint(*am.joint_types_for("Calcaneus", "Talus")[0])
+assert [(j.type, j.proximal, j.distal) for j in am.joints] == [("subtalar_isb", "Talus", "Calcaneus")]
+ab.select_pair(tib_a, tal)                       # the tibia's axes aren't applied: no joint yet
+assert any("Apply the axes of Tibia" in w.text() for w in ab.props.findChildren(type(ab.hint)))
+shot("mb_12_pair_not_applied")
 print("ANKLE OK", flush=True)
 win.close()
