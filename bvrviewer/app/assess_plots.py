@@ -13,9 +13,45 @@ import re
 
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
 from ..core.assessment import MEASURES, AnalysisSettings, Comparison, unit_symbol
+
+# Figure style (Aaron, 10 Nov 2026). FONTS: Arial where installed (Windows, macOS), else a close match.
+FONTS = ["Arial", "Helvetica", "Liberation Sans", "Nimbus Sans", "DejaVu Sans"]
+
+
+def _first_font() -> str:
+    from matplotlib import font_manager
+
+    have = {f.name for f in font_manager.fontManager.ttflist}
+    return next((f for f in FONTS if f in have), "DejaVu Sans")
+
+
+def style() -> dict:
+    """The rcParams used for every Assessor figure, on screen and exported."""
+    font = _first_font()
+    return {
+        "font.family": "sans-serif", "font.sans-serif": FONTS, "font.size": 9, "font.weight": "bold",
+        "axes.labelweight": "bold", "axes.labelsize": 7, "axes.titleweight": "bold", "axes.titlesize": 9,
+        "axes.linewidth": 0.8, "axes.spines.top": False, "axes.spines.right": False, "axes.grid": True,
+        "xtick.direction": "in", "ytick.direction": "in", "xtick.major.size": 3, "ytick.major.size": 3,
+        "xtick.minor.size": 1.8, "ytick.minor.size": 1.8, "xtick.major.width": 0.8, "ytick.major.width": 0.8,
+        "xtick.labelsize": 8, "ytick.labelsize": 8, "legend.fontsize": 8, "legend.frameon": False,
+        "lines.linewidth": 1.6, "lines.markersize": 5,
+        "mathtext.fontset": "custom", "mathtext.rm": font, "mathtext.it": f"{font}:italic",
+        "mathtext.bf": f"{font}:bold", "mathtext.sf": font, "mathtext.default": "it",
+        "savefig.dpi": 300, "savefig.bbox": "tight", "pdf.fonttype": 42,
+    }
+
+
+def apply_style() -> None:
+    """Use the figure style for all matplotlib figures in the app (only the Assessor tab draws with it)."""
+    import matplotlib
+
+    matplotlib.rcParams.update(style())
+
 
 PALETTE = ("#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3", "#937860", "#DA8BC3", "#8C8C8C",
            "#CCB974", "#64B5CD")
@@ -72,7 +108,7 @@ def _values(comps, bone, label, key):
 
 
 def _title(settings: AnalysisSettings) -> str:
-    return {"validity": "Difference from the criterion", "inter": "Difference between raters",
+    return {"validity": "Difference from the reference", "inter": "Difference between raters",
             "intra": "Difference between sessions"}[settings.mode]
 
 
@@ -101,7 +137,7 @@ def draw_distributions(fig: Figure, comps: list[Comparison], settings: AnalysisS
             for i, (lab, x) in enumerate(zip(labels, data)):
                 if len(x) == 0:             # a comparison the factors call for, but a file is missing
                     ax.text(i, 0.04, "N/A", transform=ax.get_xaxis_transform(), ha="center", va="bottom",
-                            fontsize=7, color="#999")
+                            fontsize="x-small", color="#999")
                     continue
                 shown = x if top is None else x[np.abs(x) <= top]
                 hidden += len(x) - len(shown)
@@ -128,24 +164,29 @@ def draw_distributions(fig: Figure, comps: list[Comparison], settings: AnalysisS
                 ax.set_ylim(top=top * 1.02, bottom=-top * 1.02 if m.signed else 0)
                 if hidden:
                     ax.text(0.98, 0.98, f"{hidden} frames above {top:g}{unit_symbol(m.unit)} not shown",
-                            transform=ax.transAxes, ha="right", va="top", fontsize=7, color="#a33")
+                            transform=ax.transAxes, ha="right", va="top", fontsize="x-small", color="#a33")
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels if r == len(bones) - 1 else [], rotation=30 if tilt else 0,
-                               ha="right" if tilt else "center", fontsize=8)
+                               ha="right" if tilt else "center")
             ax.set_xlim(-0.6, len(labels) - 0.4)
-            ax.set_ylabel(f"{m.short} ({unit_symbol(m.unit)})", fontsize=8)
-            ax.tick_params(labelsize=8)
-            ax.grid(axis="y", color="#eee", linewidth=0.8)
+            ax.set_ylabel(f"{m.short} ({unit_symbol(m.unit)})")
+            ax.grid(False, axis="x")                # categories on x: horizontal grid lines only
             ax.set_axisbelow(True)
             if r == 0:
-                ax.set_title(m.short, fontsize=9)
+                ax.set_title(m.short)
             if k == 0:
                 ax.annotate(bone, xy=(0, 0.5), xycoords="axes fraction", xytext=(-46, 0),
                             textcoords="offset points", rotation=90, ha="center", va="center",
-                            fontsize=10, fontweight="bold")
-    fig.suptitle(_title(settings) + "  ·  median ○, IQR ▮, mean —, threshold - -", fontsize=9, color="#444")
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.9 if len(bones) > 1 else 0.85,
-                        bottom=0.2 if tilt else 0.12, hspace=0.25, wspace=0.32)
+                            fontsize="large")
+    fig.suptitle(_title(settings), color="#444")
+    key = [Line2D([], [], marker="o", color="none", markerfacecolor="white", markeredgecolor="#222",
+                  markersize=6, label="Median"),
+           Line2D([], [], color="#222", linewidth=4, label="IQR"),
+           Line2D([], [], color="#222", linewidth=2, label="Mean"),
+           Line2D([], [], color="#222", linestyle="--", linewidth=1, label="Threshold")]
+    top = 0.88 if len(bones) > 1 else 0.8
+    fig.legend(handles=key, loc="upper center", ncol=4, bbox_to_anchor=(0.5, top + 0.075), handlelength=1.6)
+    fig.subplots_adjust(left=0.13, right=0.98, top=top, bottom=0.2 if tilt else 0.12, hspace=0.25, wspace=0.32)
 
 
 def draw_over_frames(fig: Figure, comps: list[Comparison], settings: AnalysisSettings, key: str,
@@ -167,7 +208,7 @@ def draw_over_frames(fig: Figure, comps: list[Comparison], settings: AnalysisSet
         for c in [c for c in comps if c.bone == bone]:
             f = c.frames + 1
             y = c.values[key]
-            ax.plot(f, y, dash[c.label], color=col[c.label], linewidth=1.3, label=c.label, marker=".", markersize=3)
+            ax.plot(f, y, dash[c.label], color=col[c.label], label=c.label, marker=".")
             over = np.abs(y) > thr
             if over.any():
                 ax.scatter(f[over], y[over], s=28, facecolors="none", edgecolors="#C0392B", linewidths=1.2,
@@ -180,14 +221,16 @@ def draw_over_frames(fig: Figure, comps: list[Comparison], settings: AnalysisSet
             ax.set_ylim(bottom=0)
         if cap:
             ax.set_ylim(top=3 * thr, bottom=-3 * thr if m.signed else 0)
-        ax.set_ylabel(f"{bone}\n{m.short} ({unit_symbol(m.unit)})", fontsize=8)
-        ax.tick_params(labelsize=8)
-        ax.grid(color="#eee", linewidth=0.8)
+        ax.set_ylabel(f"{bone}\n{m.short} ({unit_symbol(m.unit)})")
         ax.set_axisbelow(True)
         if r == 0:
-            ax.legend(fontsize=7, ncol=min(4, len(col)), loc="upper left", frameon=False)
-    axes[-1, 0].set_xlabel("Frame", fontsize=8)
+            ax.legend(ncol=min(4, len(col)), loc="upper left")
+    axes[-1, 0].set_xlabel("Frame")
     axes[-1, 0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    fig.suptitle(f"{_title(settings)}: {m.short}" + (f" · {trial}" if trial else "")
-                 + "  ·  ○ frames above the threshold", fontsize=9, color="#444")
-    fig.subplots_adjust(left=0.11, right=0.98, top=0.92, bottom=0.08, hspace=0.12)
+    fig.suptitle(f"{_title(settings)}: {m.short}" + (f" · {trial}" if trial else ""), color="#444",
+                 x=0.11, ha="left")
+    key = [Line2D([], [], marker="o", color="none", markerfacecolor="none", markeredgecolor="#C0392B",
+                  markersize=6, label="Above the threshold"),
+           Line2D([], [], color="#222", linestyle="--", linewidth=1, label="Threshold")]
+    fig.legend(handles=key, loc="upper right", ncol=2, bbox_to_anchor=(0.98, 0.985))
+    fig.subplots_adjust(left=0.11, right=0.98, top=0.9, bottom=0.08, hspace=0.12)

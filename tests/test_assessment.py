@@ -185,33 +185,28 @@ def test_mismatched_lengths_are_reported():
     assert any("different numbers of rows" in s for s in p.problems())
 
 
-def test_file_patterns(tmp_path):
-    root = tmp_path
-    f = root / "RaterA" / "T0019_jog0001_s2_tib.tra"
-    fields = A.guess_fields(f, root, ["tib", "tal", "cal"], "{rater}/{trial}_*_s{session}_{bone}")
-    assert fields == {"rater": "RaterA", "trial": "T0019", "session": "2", "bone": "tib", "criterion": False}
-    g = A.guess_fields(root / "Reference" / "T0019_jog0001_cal.tra", root, ["tib", "tal", "cal"])
-    assert g["bone"] == "cal" and g["criterion"]
-    with pytest.raises(ValueError):
-        A.pattern_regex("{nope}")
-
-
-def test_matching_files_to_slots(tmp_path):
+def test_only_frames_tracked_in_both_files_are_compared():
+    """Keyframe tracking: each file has NaN rows where it wasn't tracked; only frames tracked in both count."""
+    rng = np.random.default_rng(7)
+    truth = np.array([_T(rng.normal(size=3) * 20, rng.normal(size=3) * 50) for _ in range(40)])
+    ref = truth.copy()
+    ref[1::2] = np.nan                                              # reference: every other frame
+    test = np.array([t @ _T((1, 0, 0)) for t in truth])
+    test[np.arange(40) % 3 != 0] = np.nan                           # assessor: every third frame
     p = A.AssessmentProject()
-    for b in ("tib", "tal", "cal"):
-        p.add_bone(b)
-    for a in ("Expert", "Novice A"):
-        p.add_assessor(a)
-    p.add_session()
-    p.set_reference(True)
-    m = A.match_file(tmp_path / "Expert" / "T0019_jog0001_s2_tal.tra", p)
-    assert m == {"bone": "tal", "who": "Expert", "session": "2", "trial": "Trial 1"}
-    m = A.match_file(tmp_path / "raters" / "novice_a_session1_cal.tra", p)
-    assert m == {"bone": "cal", "who": "Novice A", "session": "1", "trial": "Trial 1"}
-    m = A.match_file(tmp_path / "Reference" / "T0019_jog0001_tib.tra", p)
-    assert m == {"bone": "tib", "who": A.CRITERION, "trial": "Trial 1"}
-    m = A.match_file(tmp_path / "x" / "unknown.tra", p)
-    assert "bone" not in m and "who" not in m and "session" not in m      # two sessions: can't guess
+    for who, poses in ((A.CRITERION, ref), ("Jo", test)):
+        e = A.TrackingEntry(path=Path(f"{who}.tra"), bone="tib", rater="" if who == A.CRITERION else who,
+                            session="" if who == A.CRITERION else "1", criterion=who == A.CRITERION)
+        e.tracking = _track(poses)
+        p.entries.append(e)
+    p.sync_factors()
+    (c,) = p.comparisons(A.AnalysisSettings(mode="validity"))
+    assert list(c.frames) == [f for f in range(40) if f % 6 == 0]      # frames 0, 6, 12, ...
+    assert (c.n_test, c.n_ref) == (14, 20)
+    np.testing.assert_allclose(c.values["helical_rotation"], 1.0, atol=1e-9)
+    (row,) = A.summarise([c], A.AnalysisSettings(measures=("helical_rotation",)))
+    assert row.stats["n"] == 7 and (row.frames_test, row.frames_ref) == (14, 20)
+    assert row.note == "7 of 14 tracked frames in common"
 
 
 def test_factors_rename_remove_and_slots(tmp_path):
@@ -225,8 +220,14 @@ def test_factors_rename_remove_and_slots(tmp_path):
     with pytest.raises(ValueError):
         p.add_assessor("Jo")
     assert p.rows() == [("Jo", "1")]
-    p.set_reference(True)
-    assert p.rows() == [(A.CRITERION, ""), ("Jo", "1")] and p.row_label(A.CRITERION, "") == "Reference"
+    p.set_reference(True, "Beads")
+    assert p.rows() == [(A.CRITERION, ""), ("Jo", "1")] and p.row_label(A.CRITERION, "") == "Beads"
+    with pytest.raises(ValueError):
+        p.rename_reference("Jo")                                   # an assessor's name
+    with pytest.raises(ValueError):
+        p.add_assessor("Beads")                                    # the reference's name
+    p.rename_reference("Bead tracking")
+    assert p.row_label(A.CRITERION, "") == "Bead tracking"
     p.set_entry("Trial 1", "tib", A.CRITERION, "", tra)
     e = p.set_entry("Trial 1", "tib", "Jo", "1", tra)
     assert e.tracking.n_rows == 10 and p.filled() == (2, 2)
@@ -255,8 +256,8 @@ def test_factors_rename_remove_and_slots(tmp_path):
     p.add_assessor("Kim")
     p.save(tmp_path / "p.bvrassess.json")
     q = A.AssessmentProject.load(tmp_path / "p.bvrassess.json")
-    assert (q.bone_names(), q.raters(), q.sessions(), q.trials(), q.has_reference) == \
-        (p.bone_names(), p.raters(), p.sessions(), p.trials(), p.has_reference)
+    assert (q.bone_names(), q.raters(), q.sessions(), q.trials(), q.has_reference, q.reference_name) == \
+        (p.bone_names(), p.raters(), p.sessions(), p.trials(), p.has_reference, "Bead tracking")
     assert len(q.entries) == len(p.entries)
 
 
@@ -282,11 +283,11 @@ def test_older_project_files_get_factors(tmp_path):
 def test_project_round_trip(tmp_path):
     tra = tmp_path / "a.tra"
     tra.write_text("\n".join(",".join(f"{v:.6f}" for v in np.eye(4).reshape(-1)) for _ in range(3)))
-    p = A.AssessmentProject(pattern="{rater}/{bone}")
+    p = A.AssessmentProject()
     p.set_entry("Trial 1", "tib", "A", "2", tra, offset=1)
     p.settings.mode = "inter"
     p.save(tmp_path / "x.bvrassess.json")
     q = A.AssessmentProject.load(tmp_path / "x.bvrassess.json")
-    assert q.settings.mode == "inter" and q.pattern == "{rater}/{bone}"
+    assert q.settings.mode == "inter"
     e = q.entries[0]
     assert (e.rater, e.session, e.offset) == ("A", "2", 1) and e.tracking.n_frames == 4

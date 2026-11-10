@@ -115,8 +115,8 @@ def test_bad_tracking_files(tmp_path):
 
 
 def test_calibration_errors(tmp_path):
-    (tmp_path / "v1.txt").write_text("1,2,3\n4,5,6\n7,8,9\n1,2,3\n1,2,3\n")
-    with pytest.raises(CalibrationError, match="1.0"):
+    (tmp_path / "v1.txt").write_text("1,2,3\n4,5,6\n7,8,9\n1,2,0\n1,2,3\n")    # MayaCam 1.x, focal length 0
+    with pytest.raises(CalibrationError, match="principal distance"):
         load_calibration(tmp_path / "v1.txt")
     (tmp_path / "c.json").write_text("{}")
     with pytest.raises(CalibrationError, match="VTK"):

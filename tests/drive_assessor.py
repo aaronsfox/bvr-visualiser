@@ -6,7 +6,8 @@ The ankle sample's tracking (the participant and jog trial of Welte et al. 2022)
 simulated raters (two sessions each) are made by moving each bone, at every frame, by a smooth random
 rotation about its centroid plus a translation, of known size:
   Expert ~0.4 deg / 0.2 mm, Novice A ~1.2 deg / 0.6 mm, Novice B ~2.5 deg / 1.2 mm with a few failed frames.
-Files are laid out as Reference/<trial>_<bone>.tra and <Rater>/<trial>_s<session>_<bone>.tra.
+Files are laid out as Reference/<trial>_<bone>.tra and <Rater>/<trial>_s<session>_<bone>.tra; the
+reference is called 'Beads' in the tab.
 """
 
 import os
@@ -132,13 +133,21 @@ for b in BONES:
 for r in RATERS:
     tab.add_factor("assessor", r)
 tab.add_factor("session", "2")
-tab.reference.setChecked(True)
+refbox = tab.lists["reference"]
+assert refbox.add_btn.isEnabled() and refbox.list.count() == 0
+assert tab.add_factor("reference", "Beads") == "Beads"          # the reference is added like an assessor
+assert refbox.list.count() == 1 and refbox.list.item(0).text() == "Beads"
+assert not refbox.add_btn.isEnabled() and "only one" in refbox.add_btn.toolTip()
 assert (p.bone_names(), p.raters(), p.sessions(), p.trials(), p.has_reference) == \
     (list(BONES), list(RATERS), ["1", "2"], ["Trial 1"], True)
 g = tab.grid
 assert (g.rowCount(), g.columnCount()) == (1 + 3 * 2, 3)
-assert [g.verticalHeaderItem(r).text() for r in range(3)] == ["Reference", "Expert · session 1",
+assert [g.verticalHeaderItem(r).text() for r in range(3)] == ["Beads", "Expert · session 1",
                                                                "Expert · session 2"]
+# measures that need surfaces are greyed out, and say why when hovered
+sm = tab.measure_checks["surface_mean"]
+assert not sm.isEnabled() and "Not available yet: load a surface" in sm.toolTip()
+assert tab.mode.isEnabled() and not tab.session.isEnabled() and "inter-rater" in tab.session.toolTip()
 assert g.item(0, 0).text() == "+" and tab.coverage.text() == "0 of 21 cells filled"
 shot("a01_factors_empty_grid")
 
@@ -148,15 +157,34 @@ for c, b in enumerate(BONES):
 assert asked == [f"{TRIAL}_tib.tra"], asked          # asked once, then remembered for the tab
 assert g.item(0, 0).text() == f"{TRIAL}_tib.tra"
 
-# 3. fill the rest from files, matched to cells by the names in their paths; leave one gap
-paths = sorted(str(x) for x in sim.rglob("*_s*_*.tra") if x.parent.name != "Reference")
-gap = str(sim / "NoviceB" / f"{TRIAL}_s2_cal.tra")
-paths.remove(gap)
-fd = setup.FillDialog(tab, p, paths, sim)
-got = {(Path(x).parent.name, Path(x).name): (t, b, w, s_) for x, t, b, w, s_ in fd.values()}
-assert len(got) == 17 and got[("NoviceA", f"{TRIAL}_s2_tal.tra")] == ("Trial 1", "tal", "NoviceA", "2")
-setup.FillDialog.exec = lambda self: QDialog.Accepted
-assert tab.fill_from_files(paths) == 17
+# 3. fill the assessors' cells: drop one file on a cell; dropping several at once is refused
+from PySide6.QtCore import QMimeData, QPointF, QUrl  # noqa: E402
+from PySide6.QtGui import QDropEvent  # noqa: E402
+
+
+def drop(r, c, paths):
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(x)) for x in paths])
+    rect = g.visualRect(g.model().index(r, c))
+    ev = QDropEvent(QPointF(rect.center()), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    g.dropEvent(ev)
+    pump(0.05)
+    return ev.isAccepted()
+
+
+r_exp = g.slots.index(("Expert", "1"))
+two = [sim / "Expert" / f"{TRIAL}_s1_{b}.tra" for b in ("tib", "tal")]
+assert not drop(r_exp, 0, two) and p.entry("Trial 1", "tib", "Expert", "1") is None
+assert drop(r_exp, 0, two[:1]) and p.entry("Trial 1", "tib", "Expert", "1").path == two[0]
+n = 1
+for rater in RATERS:
+    for ses in ("1", "2"):
+        for c, b in enumerate(BONES):
+            if (rater, ses, b) in (("Expert", "1", "tib"), ("NoviceB", "2", "cal")):    # done / left empty
+                continue
+            assert tab.load_cell("Trial 1", b, rater, ses, sim / rater / f"{TRIAL}_s{ses}_{b}.tra")
+            n += 1
+assert n == 17
 assert tab.coverage.text() == "20 of 21 cells filled" and not p.problems(), p.problems()
 r_gap = g.slots.index(("NoviceB", "2"))
 assert g.item(r_gap, 2).text() == "+" and g.item(r_gap, 0).text().endswith("_s2_tib.tra")
@@ -185,7 +213,8 @@ tab.add_cfg(str(ANK / "2025-01-12-Ankle.cfg"))
 pump()
 assert all(b.surface is not None for b in p.bones) and len(p.bones) == 3
 assert tab.bones_table.item(0, 1).text() == "tib.tif"
-assert tab.measure_checks["surface_mean"].isEnabled() and tab.measure_checks["surface_mean"].isChecked()
+assert sm.isEnabled() and "Not available" not in sm.toolTip()
+sm.setChecked(True)
 tab.recompute()
 rows = {(r.bone, r.label, r.measure): r.stats for r in tab.rows}
 sd = rows[("tib", "Expert s1", "surface_mean")]["median"]
@@ -256,7 +285,8 @@ head = (OUT / "summary.csv").read_text().splitlines()
 assert head[0].startswith("trial,bone,comparison,measure,unit,n,mean") and len(head) == 1 + len(tab.rows)
 assert any(",NA," in line and "no file for NoviceB" in line for line in head)
 frames = (OUT / "frames.csv").read_text().splitlines()
-assert frames[1].startswith("Trial 1,tib,validity,Expert s1,Criterion,1,helical_rotation"), frames[1]
+assert frames[1].startswith("Trial 1,tib,validity,Expert s1,Beads,1,helical_rotation"), frames[1]
+assert head[0].endswith("frames_tracked_test,frames_tracked_reference,note")
 tab.save_project(str(OUT / "project.bvrassess.json"))
 before = [(r.label, r.measure, r.note, round(r.stats.get("mean", -1), 9)) for r in tab.rows]
 next(a for a in new_tab.actions() if a.text() == "Assessor Evaluation").trigger()
@@ -268,16 +298,5 @@ after = [(r.label, r.measure, r.note, round(r.stats.get("mean", -1), 9)) for r i
 assert before == after
 assert tab2.coverage.text() == "20 of 21 cells filled"
 
-# filling from a folder with a name pattern adds assessors and sessions it names
-next(a for a in new_tab.actions() if a.text() == "Assessor Evaluation").trigger()
-pump()
-tab3 = win.current()
-tab3._format = dict(p.entries[0].overrides)
-for b in BONES:
-    tab3.add_bone(b)
-assert tab3.fill_from_folder(str(sim), "{rater}/*_s{session}_{bone}") == 21
-q = tab3.project
-assert (q.raters(), q.sessions(), q.has_reference) == (list(RATERS), ["1", "2"], True), (q.raters(), q.sessions())
-assert tab3.coverage.text() == "21 of 21 cells filled"
 print("ASSESSOR OK", flush=True)
 assert asmod  # module imported for the record

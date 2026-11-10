@@ -699,12 +699,8 @@ class VisualiserTab(QWidget):
         n = len(cam.images)
         p.value("Images", f"{n} · {cam.images.describe()}", tip=str(cam.images.source))
         p.value("Folder", cam.images.source.name, tip=str(cam.images.source))
-        p.combo("Frame 1 image", [(k, cam.images.label(k)) for k in range(n)], cam.first_image,
-                lambda k: self._set_first_image(cam, k),
-                tip="Which radiograph matches the first tracked frame.")
-        shown = n - cam.first_image
-        if self.state.models and shown != self.scene.n_frames:
-            p.note(f"{shown} images from here for {self.scene.n_frames} tracked frames.", "Warn")
+        if self.state.models and n != self.scene.n_frames:
+            p.note(f"{n} images for {self.scene.n_frames} tracked frames (image 1 is shown at frame 1).", "Warn")
         p.section("Calibration")
         p.value("File", cam.calibration_path.name, tip=str(cam.calibration_path))
         p.value("Details", cam.calibration.summary())
@@ -776,12 +772,6 @@ class VisualiserTab(QWidget):
     def _set_camera(self, cam: XrayCamera, key: str, value) -> None:
         setattr(cam, key, value)
         self.scene.update_frame(self.scene.frame)
-
-    def _set_first_image(self, cam: XrayCamera, k: int) -> None:
-        cam.first_image = int(k)
-        cam.images.prefetch(range(cam.first_image, len(cam.images)))
-        self.scene.update_frame(self.scene.frame)
-        self._update_frame_info()
 
     # ---------------------------------------------------------------- models
     def add_models(self) -> None:

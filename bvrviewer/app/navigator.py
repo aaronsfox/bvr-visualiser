@@ -308,12 +308,14 @@ class Navigator(QTreeWidget):
 
     def _context(self, pos: QPoint) -> None:
         it = self.itemAt(pos)
-        if it is None or self._kind(it) is None:
-            it = None
+        # placeholder rows ("Optional: right-click to add") have no kind: use their section's menu
+        while it is not None and self._kind(it) is None:
+            it = it.parent()
         if it is not None:
             self.setCurrentItem(it)
-        kind = self._kind(it) if it else MODELS
-        self.menuRequested.emit(kind, self._obj(it) if it else None, self.viewport().mapToGlobal(pos))
+            self.menuRequested.emit(self._kind(it), self._obj(it), self.viewport().mapToGlobal(pos))
+        else:                                   # empty space below the tree
+            self.menuRequested.emit(MODELS, None, self.viewport().mapToGlobal(pos))
 
 
 class PropertySheet(QWidget):

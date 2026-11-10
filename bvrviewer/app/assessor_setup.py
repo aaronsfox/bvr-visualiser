@@ -1,23 +1,18 @@
 """Set-up widgets of the Assessor Evaluation tab: the factors, and the grid of tracking files to fill.
 
-1. Factors: Bones (each with an optional surface and coordinate system), Assessors, Sessions and Trials
-   (short editable lists), and whether there is a Reference (criterion).
+1. Factors: Bones (each with an optional surface and coordinate system), and short editable lists of the
+   Reference (criterion; at most one), Assessors, Sessions and Trials.
 2. Tracking files: for each trial, a grid with one row per assessor × session (and a Reference row) and
-   one column per bone. Every cell is one tracking file; fill the gaps by double-clicking a cell, dropping
-   a file on it, or filling many at once from files whose names say which cell they belong to.
+   one column per bone. Every cell is one tracking file; fill the gaps by double-clicking a cell or
+   dropping a file on it.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QHBoxLayout,
     QHeaderView,
     QListWidget,
@@ -43,8 +38,10 @@ class FactorList(QWidget):
     removed = Signal(str)
     moved = Signal(str, int)
 
-    def __init__(self, title: str, tip: str):
+    def __init__(self, title: str, tip: str, max_items: int | None = None):
         super().__init__()
+        self.max_items = max_items
+        self.title = title
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(3)
@@ -55,6 +52,7 @@ class FactorList(QWidget):
         head.addStretch(1)
         self.add_btn = small_button("+")
         self.add_btn.setToolTip(f"Add {title.lower().rstrip('s')}")
+        self._add_tip = self.add_btn.toolTip()
         self.add_btn.setFixedWidth(28)
         self.add_btn.clicked.connect(self.added.emit)
         head.addWidget(self.add_btn)
@@ -76,18 +74,23 @@ class FactorList(QWidget):
             self.list.addItem(it)
             if n == cur:
                 self.list.setCurrentItem(it)
+        full = self.max_items is not None and len(names) >= self.max_items
+        self.add_btn.setEnabled(not full)
+        self.add_btn.setToolTip(f"There can be only one {self.title.lower()}: rename or remove it" if full
+                                else self._add_tip)
 
     def _menu(self, pos) -> None:
         from PySide6.QtWidgets import QMenu
 
         it = self.list.itemAt(pos)
         m = QMenu(self)
-        m.addAction("Add", self.added.emit)
+        m.addAction("Add", self.added.emit).setEnabled(self.add_btn.isEnabled())
         if it is not None:
             name = it.text()
             m.addAction("Rename…", lambda: self.renamed.emit(name))
-            m.addAction("Move up", lambda: self.moved.emit(name, -1))
-            m.addAction("Move down", lambda: self.moved.emit(name, 1))
+            if self.max_items != 1:
+                m.addAction("Move up", lambda: self.moved.emit(name, -1))
+                m.addAction("Move down", lambda: self.moved.emit(name, 1))
             m.addSeparator()
             m.addAction("Remove", lambda: self.removed.emit(name))
         m.exec(self.list.viewport().mapToGlobal(pos))
@@ -96,10 +99,10 @@ class FactorList(QWidget):
 class TrackingGrid(QTableWidget):
     """Rows: Reference and assessor × session; columns: bones. Each cell is one tracking file.
 
-    Files dropped on a cell fill it (several files dropped at once go to the bulk-fill dialog).
+    A single file dropped on a cell fills it.
     """
 
-    filesDropped = Signal(int, int, list)      # row, column, paths
+    fileDropped = Signal(int, int, str)        # row, column, path
 
     def __init__(self):
         super().__init__(0, 0)
@@ -160,110 +163,29 @@ class TrackingGrid(QTableWidget):
                 self.setItem(r, c, it)
 
     # ---- drops
+    @staticmethod
+    def _one_file(ev) -> str | None:
+        urls = ev.mimeData().urls() if ev.mimeData().hasUrls() else []
+        return urls[0].toLocalFile() if len(urls) == 1 and urls[0].isLocalFile() else None
+
     def dragEnterEvent(self, ev):
-        if ev.mimeData().hasUrls():
+        if self._one_file(ev):
             ev.acceptProposedAction()
         else:
-            super().dragEnterEvent(ev)
+            ev.ignore()
 
     def dragMoveEvent(self, ev):
-        if ev.mimeData().hasUrls():
+        idx = self.indexAt(ev.position().toPoint())
+        if self._one_file(ev) and idx.isValid():
             ev.acceptProposedAction()
         else:
-            super().dragMoveEvent(ev)
+            ev.ignore()
 
     def dropEvent(self, ev):
-        if not ev.mimeData().hasUrls():
-            return super().dropEvent(ev)
-        paths = [u.toLocalFile() for u in ev.mimeData().urls() if u.isLocalFile()]
+        path = self._one_file(ev)
         idx = self.indexAt(ev.position().toPoint())
-        self.filesDropped.emit(idx.row(), idx.column(), paths)
-        ev.acceptProposedAction()
-
-
-class FillDialog(QDialog):
-    """Fill many cells at once: each file is matched to a cell from its name; check and correct."""
-
-    def __init__(self, parent, p: A.AssessmentProject, paths, root: Path | None = None, pattern: str = "",
-                 trial: str | None = None):
-        super().__init__(parent)
-        self.setWindowTitle("Fill from files")
-        self.setMinimumWidth(820)
-        self.setMinimumHeight(420)
-        self.p = p
-        v = QVBoxLayout(self)
-        v.addWidget(label("Each file's cell is worked out from the names in its folder and file name (bones, "
-                          "assessors, trials, a session like s2 or session_2, and reference/criterion/gold/bead "
-                          "for the reference). Check them, correct any that are wrong, and leave a file's bone "
-                          "empty to skip it. A name that isn't in the lists adds it.", "Muted"))
-        self.table = QTableWidget(len(paths), 5)
-        self.table.setHorizontalHeaderLabels(["File", "Assessor", "Session", "Bone", "Trial"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.paths = [Path(x) for x in paths]
-        who_items = ["Reference"] + p.raters()
-        for r, path in enumerate(self.paths):
-            m = A.match_file(path, p, root, pattern)
-            it = QTableWidgetItem(path.name)
-            it.setFlags(Qt.ItemIsEnabled)
-            it.setToolTip(str(path))
-            self.table.setItem(r, 0, it)
-            who = m.get("who")
-            cells = [(1, who_items, "Reference" if who == A.CRITERION else (who or "")),
-                     (2, p.sessions(), m.get("session", "")),
-                     (3, p.bone_names(), m.get("bone", "")),
-                     (4, p.trials(), m.get("trial", trial or ""))]
-            for col, items, value in cells:
-                cb = QComboBox()
-                cb.setEditable(True)
-                cb.addItems(items)
-                cb.setCurrentText(value)
-                cb.currentTextChanged.connect(self._check)
-                self.table.setCellWidget(r, col, cb)
-        self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        v.addWidget(self.table, 1)
-        self.note = label("", "Warn")
-        v.addWidget(self.note)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        v.addWidget(bb)
-        self._check()
-
-    def _row(self, r: int):
-        get = lambda c: self.table.cellWidget(r, c).currentText().strip()
-        who = get(1)
-        who = A.CRITERION if who == "Reference" else who
-        return self.paths[r], get(4), get(3), who, ("" if who == A.CRITERION else get(2))
-
-    def _check(self, *_):
-        seen, problems = {}, []
-        skipped = 0
-        for r in range(len(self.paths)):
-            path, trial, bone, who, ses = self._row(r)
-            if not bone:
-                skipped += 1
-                continue
-            if not who or (who != A.CRITERION and not ses) or not trial:
-                problems.append(f"{path.name}: choose the assessor, session and trial")
-                continue
-            key = (trial, bone, who, ses)
-            if key in seen:
-                problems.append(f"{path.name} and {seen[key]} are for the same cell")
-            seen[key] = path.name
-            if self.p.entry(trial, bone, who, ses) is not None:
-                problems.append(f"{path.name} replaces the file already in "
-                                f"{self.p.row_label(who, ses)} · {bone}")
-        if skipped:
-            problems.append(f"{skipped} file{'s' * (skipped != 1)} without a bone will be skipped")
-        self.note.setText("\n".join(problems[:6]) + (f"\n… and {len(problems) - 6} more" if len(problems) > 6 else ""))
-
-    def values(self) -> list[tuple]:
-        """(path, trial, bone, who, session) for each file to load (files without a bone are skipped)."""
-        out = []
-        for r in range(len(self.paths)):
-            path, trial, bone, who, ses = self._row(r)
-            if bone and who and trial and (who == A.CRITERION or ses):
-                out.append((path, trial, bone, who, ses))
-        return out
+        if path and idx.isValid():
+            self.fileDropped.emit(idx.row(), idx.column(), path)
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()

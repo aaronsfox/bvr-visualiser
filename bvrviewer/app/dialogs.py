@@ -325,14 +325,8 @@ class AddCameraDialog(QDialog):
         box.addLayout(info, 1)
         v.addLayout(box)
 
-        v.addWidget(self._step(3, "Match images to tracking frames"))
-        r = QHBoxLayout()
-        r.addWidget(QLabel("Tracking frame 1 uses image"))
-        self.first = QComboBox()
-        self.first.currentIndexChanged.connect(self._update_match)
-        r.addWidget(self.first)
-        r.addStretch(1)
-        v.addLayout(r)
+        v.addWidget(self._step(3, "Images and tracking frames"))
+        v.addWidget(label("The first image is shown at tracking frame 1, the second at frame 2, and so on.", "Muted"))
         self.match_msg = label("")
         v.addWidget(self.match_msg)
 
@@ -352,7 +346,6 @@ class AddCameraDialog(QDialog):
             self._set_calibration(existing.calibration_path)
             self.kind_buttons[existing.source_kind].setChecked(True)
             self._set_images(existing.source_kind, existing.source)
-            self.first.setCurrentIndex(existing.first_image)
         self._refresh_ok()
 
     @staticmethod
@@ -433,11 +426,6 @@ class AddCameraDialog(QDialog):
         if skipped:
             detail += f"\nIgnored: {', '.join(skipped[:4])}" + (" …" if len(skipped) > 4 else "")
         self.img_detail.setText(detail)
-        self.first.blockSignals(True)
-        self.first.clear()
-        for i in range(n):
-            self.first.addItem(self.images.label(i) + ("  (first image)" if i == 0 else ""), i)
-        self.first.blockSignals(False)
         self._check_sizes()
         self._update_match()
         self._refresh_ok()
@@ -453,18 +441,17 @@ class AddCameraDialog(QDialog):
     def _update_match(self) -> None:
         if self.images is None:
             return
-        first = self.first.currentData() or 0
-        shown = len(self.images) - first
+        shown = len(self.images)
         if shown == self.n_frames:
             self.match_msg.setObjectName("Ok")
             self.match_msg.setText(f"✓ {shown} images match the {self.n_frames} tracked frames")
         elif shown > self.n_frames:
             self.match_msg.setObjectName("Warn")
-            self.match_msg.setText(f"{shown} images from here but {self.n_frames} tracked frames: "
+            self.match_msg.setText(f"{shown} images but {self.n_frames} tracked frames: "
                                    f"the last {shown - self.n_frames} images won't be shown.")
         else:
             self.match_msg.setObjectName("Warn")
-            self.match_msg.setText(f"Only {shown} images from here for {self.n_frames} tracked frames: "
+            self.match_msg.setText(f"Only {shown} images for {self.n_frames} tracked frames: "
                                    f"the last {self.n_frames - shown} frames will have no radiograph.")
         self.match_msg.style().polish(self.match_msg)
         self._draw_preview()
@@ -472,8 +459,7 @@ class AddCameraDialog(QDialog):
     def _draw_preview(self) -> None:
         if self.images is None:
             return
-        idx = self.first.currentData() or 0
-        img = np.ascontiguousarray(self.images.get(idx))
+        img = np.ascontiguousarray(self.images.get(0))
         h, w = img.shape
         qimg = QImage(img.data, w, h, w, QImage.Format_Grayscale8).convertToFormat(QImage.Format_RGB32)
         if self.calibration is not None and self.preview_bones:
@@ -496,7 +482,7 @@ class AddCameraDialog(QDialog):
 
     def _accept(self) -> None:
         cam = XrayCamera(calibration_path=Path(self.cal_path.text()), source_kind=self.source_kind,
-                         source=self.source, first_image=self.first.currentData() or 0,
+                         source=self.source, first_image=0,
                          name=self.name.text().strip() or "X-ray")
         cam.calibration, cam.images = self.calibration, self.images
         self.result_camera = cam

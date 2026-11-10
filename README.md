@@ -94,9 +94,9 @@ The axes only fit a bone loaded from the **same surface file in the same model s
 
 Right-click **X-ray cameras → Add X-ray camera…** (or use the Radiographs menu) and pick:
 
-1. the calibration file (MayaCam 2.0 text, as in SlicerAutoscoperM's sample data);
+1. the calibration file: MayaCam 2.0 text (as in SlicerAutoscoperM's sample data) or MayaCam 1.x (5 lines of numbers, e.g. XMALab's `*_MayaCam.csv` exports);
 2. the radiographs: a folder, selected files, or one multi-page TIFF. Images are ordered by the last number in each file name, so any naming works;
-3. which image is tracking frame 1 (also changeable later in the camera's properties).
+3. the first image is shown at tracking frame 1, the second at frame 2, and so on; the dialog says if the number of images and tracked frames differ.
 
 The dialog previews your tracked bones on that image. If they sit on their shadows, everything is matched up. Or use **Import cameras from .cfg…** to add every camera listed in an Autoscoper trial file at once.
 
@@ -169,15 +169,14 @@ Partial bones and landmarks: where a landmark definition needs the hip centre, t
 
 ## Assessor Evaluation
 
-How reliable is each rater's tracking, and how close is it to a criterion (e.g. bead-based tracking)? Load the tracking files, and the results update as you go.
+How reliable is each assessor's tracking, and how close is it to a reference (e.g. bead-based tracking)? List what was tracked, fill in the tracking files, and the results update as you go.
 
 1. **What was tracked:** list the factors.
    - **Bones**: **+** adds a bone label (e.g. `tib`). Each bone can also have a **surface**, adding the **surface distance** (**Surfaces…** for STL, OBJ, PLY or VTK; **From .cfg…** for the trial's TIF partial volumes and voxel sizes), and **axes**: **Axes…** takes the bones' coordinate systems from a Model Builder model (matched by label or surface file), adding errors about each bone's own axes. Surfaces and axes must be in the space the tracking maps (Autoscoper space for SlicerAutoscoperM).
    - **Assessors**, **Sessions** (repeats by the same assessor, for intra-rater reliability) and **Trials** (if more than one): short lists; **+** adds, double-click renames, right-click to move or remove.
-   - **Reference**: tick it when there is criterion tracking (e.g. bead-based), for validity.
+   - **Reference** (optional, at most one): the criterion tracking (e.g. bead-based), for validity. Add it with **+** like an assessor and give it a name (e.g. *Beads*); its name labels its row and the results.
 2. **Tracking files:** every combination becomes a cell to fill: a grid with one row per assessor × session (and a Reference row) and one column per bone, for each trial (pick the trial above the grid). Fill the gaps:
-   - double-click a cell, or drop a file on it, to load its tracking file (double-click a filled cell to change its format or frames; right-click to load a new file, refresh it, or clear cells);
-   - **Fill from files** places many files at once: each file's cell is worked out from the bone, assessor and trial names in its folders and file name, a session written like `s2` or `session_2`, and *reference*, *criterion*, *gold* or *bead* for the reference. A table shows where each will go; correct any before loading. With a folder you can also give a name pattern (`{rater}`, `{session}`, `{trial}`, `{bone}`, `*`, `/` for folders).
+   - double-click a cell, or drop one file on it, to load its tracking file (double-click a filled cell to change its format or frames; right-click to load a new file, refresh it, or clear cells);
    - The format is asked for the first file (as in the Visualiser); tick the box to use the same options for the tab's other files.
    - Cells can stay empty. Every comparison the factors call for is still listed in the results, as **N/A** with the reason (e.g. *no file for Jo · session 2*), so an assessor who skipped a bone or a second session simply has N/A for those.
 3. **Analysis:**
@@ -190,9 +189,10 @@ How reliable is each rater's tracking, and how close is it to a criterion (e.g. 
    - **Thresholds:** 2° and 1 mm by default (Welte et al. 2022).
    - **Statistics:** for each trial and bone separately, or pooled over trials, or over trials and bones.
 4. **Results:**
-   - **Summary:** one row per comparison and measure, N/A where a file is missing (the Note says which); frames, mean, SD, median, IQR, RMS, max, Bland–Altman limits of agreement (mean ± 1.96 SD, with the half-width of their 95% CI), robust limits (median ± 1.45 IQR, Williams et al. 2026), median absolute deviation, Hampel outliers and the share of frames over the threshold. Frames are treated as independent, which they aren't, so the CIs are optimistic.
+   - **Summary:** one row per comparison and measure, N/A where a file is missing (the Note says which). Only frames tracked in **both** files are compared (rows of NaN are untracked, e.g. when only keyframes were tracked): **Frames** is how many were compared, **Tracked** how many each file has, and the Note says when they have few in common. Then mean, SD, median, IQR, RMS, max, Bland–Altman limits of agreement (mean ± 1.96 SD, with the half-width of their 95% CI), robust limits (median ± 1.45 IQR, Williams et al. 2026), median absolute deviation, Hampel outliers and the share of frames over the threshold. Frames are treated as independent, which they aren't, so the CIs are optimistic.
    - **Distributions:** a violin per rater (or pair) for each bone and measure, with every frame as a point, median, IQR, mean and threshold (as Welte et al. 2022, figure 4).
    - **Over frames:** the error at every frame for each rater, with frames above the threshold circled (as Welte et al. 2022, figure 5), to see where and how often tracking went wrong.
+   - Figures use one style (bold Arial, 9 pt, inward ticks, no top/right spines, grid; saved at 300 dpi with embedded TrueType fonts in PDFs). Where Arial isn't installed, Liberation Sans or DejaVu Sans stands in.
    - **Limit plots to 3 × threshold** hides failed frames so the rest can be seen (the number hidden is shown).
    - Very large, steady differences are flagged: they usually mean the files map different bone spaces (e.g. a criterion in CT space), different rows or a wrong format.
 5. **Export:** summary statistics and per-frame values (long format: trial, bone, comparison, test, reference, frame, measure, value, unit) as CSV, and the figures as PNG, SVG or PDF. **Save…** keeps everything in a `.bvrassess.json` project.
@@ -204,7 +204,7 @@ These conventions were checked against the SlicerAutoscoperM sample data (by pro
 - **Tracking:** pose at frame *f* = the .tra row as a 4×4 matrix × the model in Autoscoper volume space. xyzypr uses R = Rz(yaw)·Ry(pitch)·Rx(roll).
 - **TIF → Autoscoper space:** a voxel at column *i*, row *j*, slice *k* sits at x = *i*·dx, y = (rows − *j*)·dy, z = −*k*·dz.
 - **.tfm files** (ITK) store the resampling direction, so they're inverted before use.
-- **Calibration (MayaCam 2.0):** x_cam = R·X + t, pixel = K·x_cam / z.
+- **Calibration (MayaCam 2.0):** x_cam = R·X + t, pixel = K·x_cam / z. **MayaCam 1.x** (camera position; rotations about the camera's x, y, z axes applied z, y, x; film plane; u0, v0, Z; scale, width, height) is converted to the same K, R, t following Autoscoper's own reader (`Camera::loadMayaCam1`): 1-based u0, v0, camera looking along its local −z, image rows counted from the top.
 
 ## Testing
 
@@ -217,7 +217,7 @@ STAPLE_REPO=/path/to/msk-STAPLE pytest tests/test_staple.py   # the STAPLE trans
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.
 
-`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_assessor.py` simulates three raters (two sessions each) from the ankle sample's tracking, fills the grid (leaving one gap), and checks the Assessor Evaluation tab in every mode, including the N/A results, exports, the project file and filling from a folder. `tests/drive_requests.py` checks the features from `feature_requests/REQUESTS_VISUALISER.md` (tab menus, typed slider values, curve labels, the tracking prompt, Tracking/Axes rows, frame offsets, camera views) on the wrist data. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
+`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_assessor.py` simulates three raters (two sessions each) from the ankle sample's tracking, fills the grid (leaving one gap), and checks the Assessor Evaluation tab in every mode, including the N/A results, exports and the project file. `tests/test_calibration_mayacam1.py` checks MayaCam 1.x against an independent re-implementation of Autoscoper's camera model. `tests/drive_requests.py` checks the features from `feature_requests/REQUESTS_VISUALISER.md` (tab menus, typed slider values, curve labels, the tracking prompt, Tracking/Axes rows, frame offsets, camera views) on the wrist data. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
 
 ## Building the app
 
@@ -233,7 +233,7 @@ The Linux build is about 1.1 GB unzipped, most of it VTK.
 
 ## Known limitations
 
-- Calibration: only MayaCam 2.0 so far. MayaCam 1.0 and VTK camera (.json) files are detected and reported as unsupported.
+- Calibration: MayaCam 2.0 and 1.x. VTK camera (.json) files are detected and reported as unsupported.
 - `VolumeFlip` values other than 0 0 0 are applied but haven't been tested against real data.
 - Units in .tra files can't be detected; they default to Autoscoper's mm and degrees.
 - The through-X-ray view frames the image approximately (bones and image always line up exactly).

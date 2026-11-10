@@ -16,7 +16,7 @@ class XrayCamera:
     calibration_path: Path
     source_kind: str                 # "folder", "files" or "multipage"
     source: list[Path]               # the folder, the files, or the single TIFF
-    first_image: int = 0             # index of the image shown at tracking frame 1
+    first_image: int = 0             # image shown at tracking frame 1: always the first (setting removed 10 Nov 2026)
     visible: bool = True
     name: str = "X-ray"
     show_plane: bool = True          # radiograph on its detector plane in the 3D scene
@@ -52,7 +52,7 @@ class XrayCamera:
     @classmethod
     def from_dict(cls, d: dict) -> "XrayCamera":
         return cls(calibration_path=Path(d["calibration_path"]), source_kind=d["source_kind"],
-                   source=[Path(p) for p in d["source"]], first_image=d.get("first_image", 0),
+                   source=[Path(p) for p in d["source"]], first_image=0,
                    visible=d.get("visible", True), name=d.get("name", "X-ray"),
                    show_plane=d.get("show_plane", True), show_source=d.get("show_source", True),
                    show_beams=d.get("show_beams", False))

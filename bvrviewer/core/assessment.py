@@ -35,7 +35,6 @@ from __future__ import annotations
 import csv
 import itertools
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -327,11 +326,11 @@ class AssessmentProject:
     entries: list = field(default_factory=list)          # TrackingEntry, one per filled slot
     bones: list = field(default_factory=list)            # BoneInfo, in order: the bone factor
     settings: AnalysisSettings = field(default_factory=AnalysisSettings)
-    pattern: str = ""
     assessor_names: list = field(default_factory=list)
     session_names: list = field(default_factory=lambda: ["1"])
     trial_names: list = field(default_factory=lambda: ["Trial 1"])
     has_reference: bool = False
+    reference_name: str = "Reference"
 
     # ---- factors
     def trials(self) -> list[str]:
@@ -372,6 +371,8 @@ class AssessmentProject:
         return name
 
     def add_assessor(self, name: str) -> str:
+        if name.strip() and self.has_reference and name.strip() == self.reference_name:
+            raise ValueError(f"'{name.strip()}' is the reference's name.")
         return self._add(self.assessor_names, name, "assessor")
 
     def add_session(self, name: str | None = None) -> str:
@@ -422,10 +423,21 @@ class AssessmentProject:
             if factor in ("session", "trial") and not self._names(factor):
                 self._names(factor).append("1" if factor == "session" else "Trial 1")
 
-    def set_reference(self, on: bool) -> None:
+    def set_reference(self, on: bool, name: str | None = None) -> None:
+        """Add (on) or remove the reference; removing it removes its tracking files."""
         self.has_reference = bool(on)
+        if name is not None and name.strip():
+            self.reference_name = name.strip()
         if not on:
             self.entries = [e for e in self.entries if not e.criterion]
+
+    def rename_reference(self, name: str) -> None:
+        name = name.strip()
+        if not name:
+            raise ValueError("The reference needs a name.")
+        if name in self.assessor_names:
+            raise ValueError(f"There is already an assessor '{name}'.")
+        self.reference_name = name
 
     def move(self, factor: str, name: str, step: int) -> None:
         lst = self.bones if factor == "bone" else self._names(factor)
@@ -441,7 +453,7 @@ class AssessmentProject:
 
     def row_label(self, who: str, session: str) -> str:
         if who == CRITERION:
-            return "Reference"
+            return self.reference_name
         return who if len(self.session_names) == 1 else f"{who} · session {session}"
 
     def entry(self, trial: str, bone: str, who: str, session: str = "") -> TrackingEntry | None:
@@ -549,7 +561,7 @@ class AssessmentProject:
             if self.has_reference:
                 for a in self.assessor_names:
                     for ses in self.session_names:
-                        yield (a, ses), (CRITERION, ""), self.test_label(a, ses), CRITERION
+                        yield (a, ses), (CRITERION, ""), self.test_label(a, ses), self.reference_name
         elif s.mode == "inter":
             ses = s.inter_session if s.inter_session in self.session_names else self.session_names[0]
             for a, b in itertools.combinations(self.assessor_names, 2):
@@ -578,10 +590,10 @@ class AssessmentProject:
     # ---- file
     def to_dict(self) -> dict:
         st = self.settings
-        return {"tool": "assessor", "version": 3, "name": self.name, "pattern": self.pattern,
+        return {"tool": "assessor", "version": 3, "name": self.name,
                 "factors": {"bones": self.bone_names(), "assessors": self.assessor_names,
                             "sessions": self.session_names, "trials": self.trial_names,
-                            "reference": self.has_reference},
+                            "reference": self.has_reference, "reference_name": self.reference_name},
                 "entries": [e.to_dict() for e in self.entries], "bones": [b.to_dict() for b in self.bones],
                 "settings": {"mode": st.mode, "measures": list(st.measures),
                              "rotation_threshold": st.rotation_threshold,
@@ -600,7 +612,7 @@ class AssessmentProject:
         if d.get("tool") != "assessor":
             raise ValueError("This isn't an Assessor Evaluation project file.")
         st = d.get("settings", {})
-        p = cls(name=d.get("name", "Assessor evaluation"), pattern=d.get("pattern", ""),
+        p = cls(name=d.get("name", "Assessor evaluation"),
                 settings=AnalysisSettings(mode=st.get("mode", "validity"),
                                           measures=tuple(st.get("measures", DEFAULT_MEASURES)),
                                           rotation_threshold=float(st.get("rotation_threshold", 2.0)),
@@ -612,6 +624,7 @@ class AssessmentProject:
             p.session_names = list(f.get("sessions", ["1"])) or ["1"]
             p.trial_names = list(f.get("trials", ["Trial 1"])) or ["Trial 1"]
             p.has_reference = bool(f.get("reference", False))
+            p.reference_name = f.get("reference_name", "Reference") or "Reference"
             p.bones = [BoneInfo(name=b) for b in f.get("bones", [])]
         for a in d.get("assessors", []):                  # version 2: assessors with their bones
             if a.get("criterion"):
@@ -726,6 +739,11 @@ def summarise(comps: list[Comparison], settings: AnalysisSettings) -> list[Summa
             note = f"{len(missing)} of {len(group)} comparisons missing"
         else:
             note = ""
+        # only frames tracked in both files are compared: say so when that leaves out many of them
+        both = sum(len(c.frames) for c in ok)
+        fewer = sum(min(c.n_test, c.n_ref) for c in ok)
+        if ok and both < 0.8 * fewer:
+            note = "; ".join(x for x in (note, f"{both} of {fewer} tracked frames in common") if x)
         for key in settings.measures:
             m = MEASURES[key]
             arrays = [c.values[key] for c in ok if key in c.values]
@@ -756,12 +774,14 @@ def write_frames_csv(path, comps: list[Comparison], measures) -> None:
 def write_summary_csv(path, rows: list[SummaryRow]) -> None:
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["trial", "bone", "comparison", "measure", "unit"] + [k for k, _ in STAT_COLUMNS] + ["note"])
+        w.writerow(["trial", "bone", "comparison", "measure", "unit"] + [k for k, _ in STAT_COLUMNS]
+                   + ["frames_tracked_test", "frames_tracked_reference", "note"])
         for r in rows:
             m = MEASURES[r.measure]
             vals = ["0"] + ["NA"] * (len(STAT_COLUMNS) - 1) if r.na else [_fmt_csv(r.stats.get(k))
                                                                          for k, _ in STAT_COLUMNS]
-            w.writerow([r.trial, r.bone, r.label, r.measure, m.unit] + vals + [r.note])
+            tracked = ["NA", "NA"] if r.na else [str(r.frames_test), str(r.frames_ref)]
+            w.writerow([r.trial, r.bone, r.label, r.measure, m.unit] + vals + tracked + [r.note])
 
 
 def _fmt_csv(v) -> str:
@@ -770,109 +790,3 @@ def _fmt_csv(v) -> str:
     if isinstance(v, (int, np.integer)):
         return str(int(v))
     return f"{v:.6g}"
-
-
-# ---------------------------------------------------------------- importing files
-
-TOKENS = ("trial", "rater", "session", "bone")
-
-
-def pattern_regex(pattern: str) -> re.Pattern:
-    """A file-name pattern like '{rater}/{trial}_{bone}' as a regex on the path (no extension) relative to
-    the chosen folder. Tokens: {trial} {rater} {session} {bone}, and * for anything."""
-    out, i = "", 0
-    for m in re.finditer(r"\{(\w+)\}|\*", pattern):
-        out += re.escape(pattern[i:m.start()])
-        if m.group(0) == "*":
-            out += r"[^/]*?"
-        elif m.group(1) in TOKENS:
-            out += rf"(?P<{m.group(1)}>[^/]+?)"
-        else:
-            raise ValueError(f"Unknown field {{{m.group(1)}}}: use {', '.join('{' + t + '}' for t in TOKENS)}")
-        i = m.end()
-    out += re.escape(pattern[i:])
-    return re.compile(rf"^(?:.*/)?{out}$")
-
-
-CRITERION_WORDS = ("criterion", "reference", "gold", "bead", "marker")
-
-
-def guess_fields(path: Path, root: Path | None, bone_names, pattern: str = "") -> dict:
-    """Trial, rater, session, bone and criterion for a file: from the pattern if it matches, otherwise
-    guessed (bone = a known bone name in the file name; rater = the folder name)."""
-    rel = path.relative_to(root) if root is not None and path.is_relative_to(root) else Path(path.name)
-    stem = rel.with_suffix("").as_posix()
-    out = {}
-    if pattern:
-        m = pattern_regex(pattern).match(stem)
-        if m:
-            out = {k: v for k, v in m.groupdict().items() if v}
-    low = stem.lower()
-    if "bone" not in out:
-        parts = re.split(r"[^a-z0-9]+", path.stem.lower())
-        for b in sorted(bone_names, key=len, reverse=True):
-            if b.lower() in parts or path.stem.lower().endswith(b.lower()):
-                out["bone"] = b
-                break
-    out["criterion"] = any(w in low for w in CRITERION_WORDS) and "rater" not in out
-    if "rater" not in out and not out["criterion"]:
-        out["rater"] = path.parent.name
-    return out
-
-
-_SESSION = re.compile(r"(?:^|[^a-z0-9])(?:s|ses|sess|session)[ _-]?(\d+)(?![0-9])", re.IGNORECASE)
-
-
-def _tokens(text: str) -> list[str]:
-    return [t for t in re.split(r"[^a-z0-9]+", text.lower()) if t]
-
-
-def match_file(path: Path, project: AssessmentProject, root: Path | None = None, pattern: str = "") -> dict:
-    """Which slot a tracking file is for: bone, who (an assessor or CRITERION), session and trial.
-
-    Taken from the name pattern where it matches; otherwise matched against the project's own bone,
-    assessor and trial names appearing in the path (folders and file name), a session written like
-    s2 / ses2 / session_2, and reference/criterion/gold/bead for the reference. Missing items are omitted.
-    """
-    path = Path(path)
-    out: dict = {}
-    if pattern:
-        f = guess_fields(path, root, project.bone_names(), pattern)
-        for k_in, k_out in (("bone", "bone"), ("rater", "who"), ("session", "session"), ("trial", "trial")):
-            if f.get(k_in):
-                out[k_out] = f[k_in]
-    rel = path.relative_to(root) if root is not None and path.is_relative_to(root) else Path(*path.parts[-3:])
-    text = rel.with_suffix("").as_posix()
-    toks = _tokens(text)
-    stem_toks = _tokens(path.stem)
-    if "bone" not in out:
-        for b in sorted(project.bone_names(), key=len, reverse=True):
-            bt = _tokens(b)
-            if bt and any(stem_toks[i:i + len(bt)] == bt for i in range(len(stem_toks))):
-                out["bone"] = b
-                break
-    if "who" not in out:
-        if any(w in text.lower() for w in CRITERION_WORDS):
-            out["who"] = CRITERION
-        else:
-            for a in sorted(project.raters(), key=len, reverse=True):
-                at = _tokens(a)
-                if at and any(toks[i:i + len(at)] == at for i in range(len(toks))):
-                    out["who"] = a
-                    break
-    if "session" not in out and out.get("who") != CRITERION:
-        m = _SESSION.search(text)
-        if m and str(int(m.group(1))) in project.sessions():
-            out["session"] = str(int(m.group(1)))
-        elif len(project.sessions()) == 1:
-            out["session"] = project.sessions()[0]
-    if "trial" not in out:
-        for t in sorted(project.trials(), key=len, reverse=True):
-            tt = _tokens(t)
-            if tt and any(toks[i:i + len(tt)] == tt for i in range(len(toks))):
-                out["trial"] = t
-                break
-        else:
-            if len(project.trials()) == 1:
-                out["trial"] = project.trials()[0]
-    return out

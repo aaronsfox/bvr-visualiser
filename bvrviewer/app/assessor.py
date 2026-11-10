@@ -11,7 +11,6 @@ The calculations are in core/assessment.py; see the notes there on what each mea
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -48,8 +47,8 @@ from ..core import assessment as A
 from ..core.config import read_cfg
 from ..core.models import BoneModel, is_volume_file
 from ..core.tracking import TrackingError, load_tracking
-from .assess_plots import draw_distributions, draw_over_frames
-from .assessor_setup import FactorList, FillDialog, TrackingGrid
+from .assess_plots import apply_style, draw_distributions, draw_over_frames
+from .assessor_setup import FactorList, TrackingGrid
 from .dialogs import FormatDialog
 from .panels import label, small_button
 
@@ -96,6 +95,11 @@ class FigurePanel(QWidget):
         v.addWidget(self.canvas, 1)
 
 
+NEEDS = {"surface": ("Not available yet: load a surface for at least one bone (Bones: Surfaces… or From .cfg…, "
+                     "or double-click a bone's Surface)."),
+         "axes": "Not available yet: load coordinate systems from a Model Builder model (Bones: Axes…)."}
+
+
 class AssessorTab(QWidget):
     kind = "assessor"
     titleChanged = Signal(str)
@@ -114,6 +118,7 @@ class AssessorTab(QWidget):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.recompute)
+        apply_style()
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -122,7 +127,7 @@ class AssessorTab(QWidget):
         root.addWidget(split)
         split.addWidget(self._build_setup())
         split.addWidget(self._build_results())
-        split.setSizes([520, 1000])
+        split.setSizes([640, 960])
         self.refresh_tables()
         self.recompute()
 
@@ -130,7 +135,7 @@ class AssessorTab(QWidget):
     def _build_setup(self) -> QWidget:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(480)
+        scroll.setMinimumWidth(600)
         w = QWidget()
         w.setObjectName("Panel")
         v = QVBoxLayout(w)
@@ -184,10 +189,12 @@ class AssessorTab(QWidget):
         lists = QHBoxLayout()
         self.lists = {}
         for factor, title, tip in [
+                ("reference", "Reference", ("Optional: the criterion (gold-standard) tracking, e.g. from beads, "
+                                            "that assessors are compared with for validity. Only one.")),
                 ("assessor", "Assessors", "The people who tracked the bones (raters)"),
                 ("session", "Sessions", "Repeats by the same assessor, for intra-rater reliability"),
                 ("trial", "Trials", "Trials (or participants) each tracked by the assessors")]:
-            fl = FactorList(title, tip)
+            fl = FactorList(title, tip, max_items=1 if factor == "reference" else None)
             fl.added.connect(lambda f=factor: self.add_factor(f))
             fl.renamed.connect(lambda old, f=factor: self.rename_factor(f, old))
             fl.removed.connect(lambda name, f=factor: self.remove_factor(f, name))
@@ -195,9 +202,6 @@ class AssessorTab(QWidget):
             lists.addWidget(fl)
             self.lists[factor] = fl
         v.addLayout(lists)
-        self.reference = QCheckBox("Reference (criterion) tracking, e.g. from beads, for validity")
-        self.reference.toggled.connect(self.set_reference)
-        v.addWidget(self.reference)
 
         # ---- 2 tracking files
         v.addWidget(label("2  Tracking files", "H2", wrap=False))
@@ -208,20 +212,13 @@ class AssessorTab(QWidget):
         self.grid_trial.setToolTip("The trial whose files are shown")
         self.grid_trial.currentIndexChanged.connect(self._grid_trial_changed)
         gh.addWidget(self.grid_trial)
-        fill = QPushButton("Fill from files ▾")
-        fill.setObjectName("Small")
-        fm = QMenu(fill)
-        fm.addAction("Choose files…", self.fill_from_files)
-        fm.addAction("Choose a folder (with subfolders)…", self.fill_from_folder)
-        fill.setMenu(fm)
-        gh.addWidget(fill)
         v.addLayout(gh)
-        v.addWidget(label("Double-click a cell (or drop a file on it) to load its tracking file. 'Fill from "
-                          "files' places many files at once by the names in their paths.", "Muted"))
+        v.addWidget(label("Double-click a cell, or drop a file on it, to load its tracking file. Cells can stay "
+                          "empty: comparisons that need them are N/A.", "Muted"))
         self.grid = TrackingGrid()
         self.grid.cellDoubleClicked.connect(self._cell_double_clicked)
         self.grid.customContextMenuRequested.connect(self._grid_menu)
-        self.grid.filesDropped.connect(self._files_dropped)
+        self.grid.fileDropped.connect(self._file_dropped)
         v.addWidget(self.grid, 1)
         self.problems = label("", "Warn")
         v.addWidget(self.problems)
@@ -257,6 +254,7 @@ class AssessorTab(QWidget):
         for i, (key, text, tip) in enumerate(boxes):
             c = QCheckBox(text)
             c.setToolTip(tip)
+            c.setProperty("tip", tip)
             c.setChecked(key in A.DEFAULT_MEASURES)
             c.toggled.connect(self._settings_changed)
             mg.addWidget(c, i // 2, i % 2)
@@ -351,6 +349,8 @@ class AssessorTab(QWidget):
 
     def add_factor(self, factor: str, name: str | None = None) -> str | None:
         p = self.project
+        if factor == "reference":
+            return self.add_reference(name)
         if name is None:
             default = {"assessor": p.next_assessor_name(),
                        "session": next(str(i) for i in range(1, 1000) if str(i) not in p.sessions()),
@@ -379,7 +379,10 @@ class AssessorTab(QWidget):
             if not ok:
                 return
         try:
-            self.project.rename(factor, old, new)
+            if factor == "reference":
+                self.project.rename_reference(new)
+            else:
+                self.project.rename(factor, old, new)
         except ValueError as e:
             QMessageBox.warning(self, f"Rename {factor}", str(e))
             return
@@ -389,6 +392,9 @@ class AssessorTab(QWidget):
 
     def remove_factor(self, factor: str, name: str, ask: bool = True) -> None:
         p = self.project
+        if factor == "reference":
+            self.remove_reference(ask)
+            return
         attr = A._FIELDS[factor]
         n = sum(getattr(e, attr) == name and not (e.criterion and factor in ("assessor", "session"))
                 for e in p.entries)
@@ -400,20 +406,38 @@ class AssessorTab(QWidget):
         self._changed()
 
     def move_factor(self, factor: str, name: str, step: int) -> None:
-        self.project.move(factor, name, step)
-        self._changed()
+        if factor != "reference":
+            self.project.move(factor, name, step)
+            self._changed()
 
-    def set_reference(self, on: bool) -> None:
+    def add_reference(self, name: str | None = None) -> str | None:
+        """The reference (criterion) tracking: only one."""
         p = self.project
-        if self._busy or on == p.has_reference:
-            return
+        if p.has_reference:
+            QMessageBox.information(self, "Reference", "There can be only one reference. Rename or remove the "
+                                                       "one there.")
+            return None
+        if name is None:
+            name, ok = QInputDialog.getText(self, "Add reference", "Name for the reference (criterion) tracking, "
+                                                                   "e.g. Beads:", text="Reference")
+            if not ok:
+                return None
+        name = name.strip() or "Reference"
+        if name in p.raters():
+            QMessageBox.warning(self, "Add reference", f"There is already an assessor '{name}'.")
+            return None
+        p.set_reference(True, name)
+        self._changed()
+        return name
+
+    def remove_reference(self, ask: bool = True) -> None:
+        p = self.project
         n = sum(e.criterion for e in p.entries)
-        if not on and n and QMessageBox.question(
-                self, "Reference", f"Remove the reference and its {n} tracking file{'s' * (n != 1)}?"
-        ) != QMessageBox.Yes:
-            self.reference.setChecked(True)
+        if ask and n and QMessageBox.question(
+                self, "Remove", f"Remove the reference '{p.reference_name}' and its {n} tracking "
+                                f"file{'s' * (n != 1)}? (The files themselves are kept.)") != QMessageBox.Yes:
             return
-        p.set_reference(on)
+        p.set_reference(False)
         self._changed()
 
     # ================================================================ bones table
@@ -484,11 +508,9 @@ class AssessorTab(QWidget):
             m.addAction(f"Clear {len(entries)} cell{'s' * (len(entries) != 1)}", lambda: self.clear_cells(entries))
         m.exec(self.grid.viewport().mapToGlobal(pos))
 
-    def _files_dropped(self, r: int, c: int, paths: list) -> None:
-        if len(paths) == 1 and r >= 0 and c >= 0:
-            self.load_cell(*self._slot(r, c), path=paths[0])
-        elif paths:
-            self.fill_from_files(paths)
+    def _file_dropped(self, r: int, c: int, path: str) -> None:
+        if r >= 0 and c >= 0:
+            self.load_cell(*self._slot(r, c), path=path)
 
     def load_cell(self, trial: str, bone: str, who: str, session: str, path=None, more: int = 0) -> bool:
         """Put a tracking file in one cell (choosing it if not given)."""
@@ -515,40 +537,6 @@ class AssessorTab(QWidget):
             if e in self.project.entries:
                 self.project.entries.remove(e)
         self._changed()
-
-    def fill_from_files(self, paths=None, root=None, pattern: str = "") -> int:
-        """Several files placed in their cells by the names in their paths (checked in a dialog first)."""
-        if paths is None:
-            paths, _ = QFileDialog.getOpenFileNames(self, "Tracking files", self._last_dir,
-                                                    "Autoscoper tracking (*.tra *.csv *.txt);;All files (*)")
-            if not paths:
-                return 0
-        if root is None:
-            root = Path(os.path.commonpath([str(Path(x).parent) for x in paths])).parent
-        dlg = FillDialog(self, self.project, paths, root, pattern, trial=self._trial)
-        if dlg.exec() != QDialog.Accepted:
-            return 0
-        rows = dlg.values()
-        done = 0
-        for i, (path, trial, bone, who, ses) in enumerate(rows):
-            if not self.load_cell(trial, bone, who, ses, path, more=len(rows) - i - 1):
-                break
-            done += 1
-        return done
-
-    def fill_from_folder(self, folder: str | None = None, pattern: str | None = None) -> int:
-        if folder is None:
-            folder = QFileDialog.getExistingDirectory(self, "Folder with the tracking files (and subfolders)")
-            if not folder:
-                return 0
-        root = Path(folder)
-        paths = sorted(x for x in root.rglob("*") if x.suffix.lower() in (".tra", ".csv", ".txt") and x.is_file())
-        if not paths:
-            QMessageBox.information(self, "No tracking files", f"No .tra files in {root}.")
-            return 0
-        if pattern is not None:
-            self.project.pattern = pattern
-        return self.fill_from_files([str(x) for x in paths], root, self.project.pattern)
 
     def refresh_tracking(self, e: A.TrackingEntry) -> None:
         e.load()
@@ -710,7 +698,16 @@ class AssessorTab(QWidget):
 
     # ================================================================ refresh
     def refresh_tables(self, *_):
+        """Redraw the set-up from the project. The analysis controls ignore changes while this runs, so it
+        always lets them go again, even if something fails part-way."""
         self._busy = True
+        try:
+            self._refresh_tables()
+        finally:
+            self._busy = False
+        self._sync_settings_widgets()
+
+    def _refresh_tables(self) -> None:
         p = self.project
         # factors
         self.bones_table.setRowCount(len(p.bones))
@@ -732,7 +729,7 @@ class AssessorTab(QWidget):
         self.lists["assessor"].set_items(p.raters())
         self.lists["session"].set_items(p.sessions())
         self.lists["trial"].set_items(p.trials())
-        self.reference.setChecked(p.has_reference)
+        self.lists["reference"].set_items([p.reference_name] if p.has_reference else [])
         # grid
         if self._trial not in p.trials():
             self._trial = p.trials()[0]
@@ -755,7 +752,10 @@ class AssessorTab(QWidget):
         # analysis options that depend on the factors
         avail = set(p.available_measures())
         for key, c in self.measure_checks.items():
-            c.setEnabled(key in avail or (key == "axes" and "axes_rz" in avail))
+            ok = key in avail or (key == "axes" and "axes_rz" in avail)
+            c.setEnabled(ok)
+            need = "axes" if key == "axes" else A.MEASURES[key].needs
+            c.setToolTip(c.property("tip") + ("" if ok else "\n\n" + NEEDS[need]))
         cur = self.session.currentData()
         self.session.blockSignals(True)
         self.session.clear()
@@ -764,12 +764,15 @@ class AssessorTab(QWidget):
         i = self.session.findData(cur if cur is not None else p.settings.inter_session)
         self.session.setCurrentIndex(max(i, 0))
         self.session.blockSignals(False)
-        self._busy = False
-        self._sync_settings_widgets()
 
     def _sync_settings_widgets(self) -> None:
         mode = self.mode.currentData()
-        self.session.setEnabled(mode == "inter" and len(self.project.sessions()) > 1)
+        multi = len(self.project.sessions()) > 1
+        self.session.setEnabled(mode == "inter" and multi)
+        why = ("Inter-rater: which session of each assessor to compare." if mode == "inter" and multi else
+               "Only used for inter-rater comparisons (Compare: Between assessors)." if mode != "inter" else
+               "There is only one session. Add sessions (Sessions: +) to choose which one to compare.")
+        self.session.setToolTip(why)
 
     # ================================================================ settings and results
     def _settings_changed(self, *_):
@@ -796,13 +799,15 @@ class AssessorTab(QWidget):
 
     def apply_settings(self, st: A.AnalysisSettings) -> None:
         self._busy = True
-        self.mode.setCurrentIndex(max(self.mode.findData(st.mode), 0))
-        for k, c in self.measure_checks.items():
-            c.setChecked(k in st.measures or (k == "axes" and any(m.startswith("axes_") for m in st.measures)))
-        self.rot_thr.setValue(st.rotation_threshold)
-        self.tr_thr.setValue(st.translation_threshold)
-        self.pool.setCurrentIndex(max(self.pool.findData(st.pool), 0))
-        self._busy = False
+        try:
+            self.mode.setCurrentIndex(max(self.mode.findData(st.mode), 0))
+            for k, c in self.measure_checks.items():
+                c.setChecked(k in st.measures or (k == "axes" and any(m.startswith("axes_") for m in st.measures)))
+            self.rot_thr.setValue(st.rotation_threshold)
+            self.tr_thr.setValue(st.translation_threshold)
+            self.pool.setCurrentIndex(max(self.pool.findData(st.pool), 0))
+        finally:
+            self._busy = False
         self.refresh_tables()
         i = self.session.findData(st.inter_session)
         self.session.setCurrentIndex(max(i, 0))
@@ -860,18 +865,20 @@ class AssessorTab(QWidget):
                                   "same format.")
         self.space_warn.setVisible(bool(bad))
 
-    SUMMARY_COLS: tuple = (("n", "Frames", 0), ("mean", "Mean", 2), ("sd", "SD", 2), ("median", "Median", 2),
+    SUMMARY_COLS: tuple = (("n", "Frames", 0), ("tracked", "Tracked", 0), ("mean", "Mean", 2), ("sd", "SD", 2), ("median", "Median", 2),
                     ("iqr", "IQR", 2), ("rmse", "RMS", 2), ("max", "Max", 2), ("loa", "LoA (95%)", 2),
                     ("robust", "Robust LoA", 2), ("mad", "MAD", 2), ("outliers", "Outliers", 0),
                     ("pct_over", "% > thr.", 0))
 
     def _fill_summary(self, st: A.AnalysisSettings) -> None:
-        head = ["Trial", "Bone", {"validity": "Rater", "inter": "Raters", "intra": "Sessions"}[st.mode], "Measure"]
+        head = ["Trial", "Bone", {"validity": "Assessor", "inter": "Assessors", "intra": "Sessions"}[st.mode], "Measure"]
         cols = self.SUMMARY_COLS
         self.summary.clear()
         self.summary.setColumnCount(len(head) + len(cols) + 1)
         self.summary.setHorizontalHeaderLabels(head + [c[1] for c in cols] + ["Note"])
-        tips = {"LoA (95%)": "Bland–Altman limits of agreement: mean ± 1.96 SD (± half-width of their 95% CI)",
+        tips = {"Frames": "Frames compared: only frames tracked in both files (rows of NaN are untracked)",
+                "Tracked": "Frames tracked in the test file / in the file it's compared with",
+                "LoA (95%)": "Bland–Altman limits of agreement: mean ± 1.96 SD (± half-width of their 95% CI)",
                 "Robust LoA": "Median ± 1.45 × IQR (Williams et al. 2026); lower limit floored at 0 for magnitudes",
                 "MAD": "Median absolute deviation from the median",
                 "Outliers": "Hampel identifier: more than 3.5 scaled MADs from the median",
@@ -899,6 +906,8 @@ class AssessorTab(QWidget):
                                 f"(±{_fmt(s.get('loa_ci'), d)})" if s.get("n", 0) > 1 else "–")
                 elif k == "robust":
                     vals.append(f"{_fmt(s.get('robust_low'), d)} to {_fmt(s.get('robust_high'), d)}")
+                elif k == "tracked":
+                    vals.append(f"{row.frames_test} / {row.frames_ref}")
                 elif k == "pct_over":
                     vals.append(f"{s.get('pct_over', 0):.0f}% ({s.get('over', 0)})")
                 else:
@@ -960,7 +969,7 @@ class AssessorTab(QWidget):
         st = self.project.settings
         fig = Figure(figsize=(8, max(3.2, 2.6 * max(1, len({c.bone for c in self.comps})))), facecolor="white")
         draw_distributions(fig, self.all_comps, st, cap=self.cap.isChecked())
-        fig.savefig(p.with_name(p.stem + "_distributions" + p.suffix), dpi=200)
+        fig.savefig(p.with_name(p.stem + "_distributions" + p.suffix))
         for key in st.measures:
             for trial in self.project.trials() or [None]:
                 fig = Figure(figsize=(8, max(3.2, 2.2 * max(1, len({c.bone for c in self.comps})))),
@@ -968,7 +977,7 @@ class AssessorTab(QWidget):
                 draw_over_frames(fig, self.comps, st, key, trial if len(self.project.trials()) > 1 else None,
                                  cap=self.cap.isChecked())
                 tag = f"_{trial}" if len(self.project.trials()) > 1 else ""
-                fig.savefig(p.with_name(f"{p.stem}_frames_{key}{tag}{p.suffix}"), dpi=200)
+                fig.savefig(p.with_name(f"{p.stem}_frames_{key}{tag}{p.suffix}"))
 
     def save_project(self, path=None) -> None:
         path = path or self._save_path("Save assessor project", f"{self.state.name}.bvrassess.json",
