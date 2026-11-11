@@ -19,6 +19,14 @@ from .session import KinItem, Trial, XrayCamera
 
 TRACKING_SUFFIXES = (".tra",)
 
+# Display settings the Trial setup dialog sets for a trial (Visualiser #22); each trial has its own (#23)
+DISPLAY_KEYS = ("xray_opacity", "xray_distance", "xray_bone_opacity", "camera_views", "overlay", "overlay_fill",
+                "overlay_opacity", "overlay_outline", "outline_width")
+
+
+def display_of(settings) -> dict:
+    return {k: getattr(settings, k) for k in DISPLAY_KEYS}
+
 
 @dataclass
 class BoneDraft:
@@ -64,6 +72,7 @@ class TrialDraft:
     model_path: Path | None = None         # Model Builder model whose bones (matched by name) give axes and joints
     read_radiographs: bool = True          # read every radiograph when the trial is first shown
     joints: list = field(default_factory=list)   # joints to copy (from the trial a new one started from)
+    display: dict = field(default_factory=dict)  # display settings for the trial (DISPLAY_KEYS)
 
     def tracking_files(self) -> list[Path]:
         return list_tracking(self.tracking_dir) if self.tracking_dir else []
@@ -313,4 +322,5 @@ def draft_from_trial(t: Trial) -> TrialDraft:
         cams.append(CameraDraft(name=c.name, calibration_path=Path(c.calibration_path), folder=folder,
                                 source_kind=c.source_kind, source=list(c.source), show_source=c.show_source,
                                 source_cam=c))
-    return TrialDraft(name=t.name, cfg_path=t.cfg_path, tracking_dir=t.tracking_dir, bones=bones, cameras=cams)
+    return TrialDraft(name=t.name, cfg_path=t.cfg_path, tracking_dir=t.tracking_dir, bones=bones, cameras=cams,
+                      display=display_of(t.settings))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import traceback
 from pathlib import Path
 
@@ -9,23 +10,63 @@ import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
-    QProgressDialog, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QSplitter,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
 from pyvistaqt import QtInteractor
 
 from ..core import joints as J
 from ..core.config import read_cfg
 from ..core.models import PALETTE, BoneModel, ModelError, is_volume_file
-from ..core.session import KinItem, TabState, Trial, XrayCamera, load_session, save_session
+from ..core.session import (
+    TAB_WIDE,
+    KinItem,
+    TabState,
+    Trial,
+    XrayCamera,
+    load_session,
+    save_session,
+)
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError
 from .camera_views import OVERLAYS, CameraViews
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
-from .joint_panel import JointCurves, SegmentMapDialog, curve_labels, guess_segment_map, write_csv, zeroed
+from .joint_panel import (
+    JointCurves,
+    SegmentMapDialog,
+    curve_labels,
+    guess_segment_map,
+    write_csv,
+    zeroed,
+)
 from .model_builder import add_triad
 from .navigator import (
-    ADD_TRIAL, AXES, CAMERA, CAMERAS, JOINT, JOINTS, MODEL, MODELS, SCENE, TRACKING, TRIAL, TRIALS, Navigator,
+    ADD_TRIAL,
+    AXES,
+    CAMERA,
+    CAMERAS,
+    JOINT,
+    JOINTS,
+    MODEL,
+    MODELS,
+    SCENE,
+    TRACKING,
+    TRIAL,
+    TRIALS,
+    Navigator,
     PropertySheet,
 )
 from .panels import Timeline, h2, label
@@ -36,18 +77,36 @@ MODEL_FILTER = "Bone models (*.stl *.STL *.tif *.tiff *.TIF *.obj *.ply *.vtk *.
 
 class _Worker(QObject):
     done = Signal(object, object)       # result, error text
+    progress = Signal(int, str)         # step done, what it's doing (for _run_steps)
 
-    def __init__(self, fn):
+    def __init__(self, fn, steps: bool = False):
         super().__init__()
         self.fn = fn
+        self.steps = steps
+        self.cancel = threading.Event()
 
     def run(self):
         try:
-            self.done.emit(self.fn(), None)
+            if self.steps:
+                self.done.emit(self.fn(self.progress.emit, self.cancel.is_set), None)
+            else:
+                self.done.emit(self.fn(), None)
         except Exception as e:  # noqa: BLE001 - shown to the user
             msg = str(e) if isinstance(e, (ModelError, TrackingError, TransformFileError, ValueError, OSError)) \
                 else f"{type(e).__name__}: {e}\n\n{traceback.format_exc(limit=3)}"
             self.done.emit(None, msg)
+
+
+class _ProgressRelay(QObject):
+    """Brings a worker's progress reports onto the UI thread."""
+
+    def __init__(self, fn, parent):
+        super().__init__(parent)
+        self.fn = fn
+
+    @Slot(int, str)
+    def deliver(self, step, text):
+        self.fn(step, text)
 
 
 class _Relay(QObject):
@@ -294,7 +353,7 @@ class VisualiserTab(QWidget):
         self.refresh_all()
 
     # ---------------------------------------------------------------- helpers
-    def _read_radiographs(self, cams) -> None:
+    def _read_radiographs(self, cams, title: str | None = None) -> None:
         """Read every radiograph of these cameras up front, with a progress bar.
 
         Reading while playing is too slow when the images are large or on a network drive, so they are
@@ -331,7 +390,7 @@ class VisualiserTab(QWidget):
             self._cache_radiographs(cams, time.monotonic() - t_start)
             return
         dlg = QProgressDialog("Reading radiographs…", "Skip", 0, total, self)
-        dlg.setWindowTitle("Reading radiographs")
+        dlg.setWindowTitle(title or "Reading radiographs")
         text = QLabel()
         text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         dlg.setLabel(text)
@@ -470,6 +529,58 @@ class VisualiserTab(QWidget):
         self._threads.append((thread, worker, relay))
         thread.start()
 
+    def _run_steps(self, title: str, total: int, fn, on_done) -> None:
+        """Like _run, with a progress bar and Cancel (Visualiser #20).
+
+        ``fn(report, cancelled)`` runs on a worker thread: ``report(step, text)`` moves the bar to ``step`` of
+        ``total`` and says what it's doing; ``cancelled()`` is True once Cancel is pressed (stop at the next
+        convenient point). ``on_done(result, error)`` runs on the UI thread.
+        """
+        dlg = QProgressDialog(title, "Cancel", 0, max(total, 1), self)
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setMinimumWidth(460)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        self._busy = dlg
+        thread = QThread(self)
+        worker = _Worker(fn, steps=True)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def progress(step, text):
+            if self._busy is dlg:
+                dlg.setValue(min(step, dlg.maximum()))
+                dlg.setLabelText(text)
+
+        def cancel():
+            worker.cancel.set()
+            dlg.setLabelText("Cancelling after the current step…")
+
+        dlg.canceled.connect(cancel)
+
+        def finished(result, err):
+            if self._busy is dlg:
+                self._busy = None
+            dlg.canceled.disconnect(cancel)          # (closing the dialog would emit it)
+            dlg.close()
+            thread.quit()
+            thread.wait()
+            entry = (thread, worker, relay)
+            if entry in self._threads:
+                self._threads.remove(entry)
+            on_done(result, err)
+
+        relay = _Relay(finished, self)
+        prog = _ProgressRelay(progress, self)
+        worker.progress.connect(prog.deliver, Qt.QueuedConnection)
+        worker.done.connect(relay.deliver, Qt.QueuedConnection)
+        self._threads.append((thread, worker, relay))
+        self._progress_relays = getattr(self, "_progress_relays", []) + [prog]
+        thread.start()
+
     def _status(self, text: str, seconds: float = 5.0) -> None:
         """A short message in the bar under the 3D view that clears itself."""
         self.status_msg.setText(text)
@@ -493,6 +604,8 @@ class VisualiserTab(QWidget):
     # ---------------------------------------------------------------- refresh
     def refresh_all(self) -> None:
         """Bring the navigator, properties, timeline and view buttons in line with the state."""
+        if self.timeline.s is not self.state.settings:      # e.g. "Trial 1" made by adding bones to an empty tab
+            self._use_trial_settings()
         has = bool(self.state.models)
         self.stack.setCurrentIndex(1 if has else 0)
         self.empty.set_trial(self.state.trial.name if self.state.trial is not None and not has else None)
@@ -998,9 +1111,22 @@ class VisualiserTab(QWidget):
         p.section("Camera views (2D)")
         p.check("Show", s.camera_views, lambda on: self.set_camera_views(on), caption="Beside the 3D view",
                 tip="Each camera's radiograph in its own 2D panel, with the bones projected onto it")
-        p.combo("Bones drawn as", OVERLAYS, s.overlay, lambda v: self._set("overlay", v))
-        p.slider("Overlay opacity", s.overlay_opacity, 5, 100, 100, _fmt_pct, lambda v: self._set("overlay_opacity", v),
-                 spin=PCT)
+        p.combo("Bones drawn as", OVERLAYS, s.overlay, lambda v: (self._set("overlay", v), self.show_properties()))
+        if s.overlay == "silhouette":
+            p.check("Fill", s.overlay_fill, lambda on: (self._set("overlay_fill", on), self.show_properties()),
+                    caption="Show fill")
+            if s.overlay_fill:
+                p.slider("Fill opacity", s.overlay_opacity, 5, 100, 100, _fmt_pct,
+                         lambda v: self._set("overlay_opacity", v), spin=PCT)
+            p.check("Outline", s.overlay_outline, lambda on: (self._set("overlay_outline", on), self.show_properties()),
+                    caption="Show outline", tip="The bone's outline in its colour, at full opacity, plus the edges "
+                                                "inside it where the surface turns away from the X-ray source")
+            if s.overlay_outline:
+                p.slider("Outline weight", s.outline_width, 1, 6, 1, lambda x: f"{x:.0f} px",
+                         lambda v: self._set("outline_width", int(round(v))), spin=(1, 0, " px"))
+        elif s.overlay == "points":
+            p.slider("Point opacity", s.overlay_opacity, 5, 100, 100, _fmt_pct,
+                     lambda v: self._set("overlay_opacity", v), spin=PCT)
         p.section("Image")
         p.slider("Brightness", s.brightness, -100, 100, 100, lambda x: f"{x:+.2f}", lambda v: self._set("brightness", v),
                  spin=(1, 2, ""))
@@ -1029,7 +1155,10 @@ class VisualiserTab(QWidget):
 
     # ---- property setters
     def _set(self, key: str, value) -> None:
-        setattr(self.state.settings, key, value)
+        if key in TAB_WIDE:
+            self.state.set_tab_wide(key, value)          # the same for every trial
+        else:
+            setattr(self.state.settings, key, value)     # the shown trial's own
         self._settings_changed(key)
 
     def _set_model(self, m: BoneModel, key: str, value, nav: bool = True) -> None:
@@ -1424,7 +1553,7 @@ class VisualiserTab(QWidget):
         """Show this trial: its bones, cameras and joints in the 3D view, camera views, timeline and curves.
 
         The trial shown before keeps everything it has loaded (surfaces, tracking, radiographs), so showing
-        it again is instant; its frame, frame rate and held-still bone are kept with it. A trial's
+        it again is instant; its settings (Visualiser #23), frame and 3D viewpoint are kept with it. A trial's
         radiographs are read (with the progress bar) the first time it is shown.
         """
         st = self.state
@@ -1435,15 +1564,14 @@ class VisualiserTab(QWidget):
             old = self._scene_trial
             if old is not None:
                 if old is st.trial:
-                    old.fps, old.hold_still, old.frame = st.settings.fps, st.settings.hold_still, self.scene.frame
+                    old.frame, old.view = self.scene.frame, list(self.plotter.camera_position)
                 for m in old.models:
                     self.scene.remove_model(m)
                 for c in old.cameras:
                     self.scene.remove_camera(c)
             st.active = next(i for i, x in enumerate(st.trials) if x is t)
             self._scene_trial = t
-            st.settings.fps, st.settings.hold_still = t.fps, t.hold_still
-            self._sync_timeline_settings()
+            self._use_trial_settings()
             self.selected = None
             self.curve_joint = None
             self.scene.selected = None
@@ -1454,7 +1582,7 @@ class VisualiserTab(QWidget):
                     self.scene.add_model(m)
             unread = [c for c in t.cameras if c.images is not None and not getattr(c, "_read_once", False)]
             if unread:
-                self._read_radiographs(unread)
+                self._read_radiographs(unread, title=f"Loading {t.name}: radiographs")
             for c in t.cameras:
                 if c.images is not None:
                     self.scene.add_camera(c)
@@ -1470,15 +1598,26 @@ class VisualiserTab(QWidget):
         frame = min(t.frame, max(self.scene.n_frames - 1, 0))
         self.timeline.slider.setValue(frame)
         self.scene.update_frame(frame)
-        if t.models:
+        if t.view:
+            self.plotter.camera_position = t.view          # where it was looked at from
+            self.plotter.render()
+        elif t.models:
             self.scene.zoom_to_bones()
+
+    def _use_trial_settings(self) -> None:
+        """Point the timeline, scene and curves at the shown trial's settings (Visualiser #23)."""
+        self.timeline.s = self.state.settings
+        self._sync_timeline_settings()
+        self.scene.apply_settings()
+        self.curves.set_style(self.state.settings.curve_labels)
 
     def import_trial(self, start_from: Trial | None = None) -> bool:
         """Open the Trial setup wizard (Visualiser #17) and add the trial it sets up."""
         from .trial_wizard import TrialSetupDialog
 
         dlg = TrialSetupDialog(self, mode="new", trials=self.state.trials, start_from=start_from,
-                               taken_names=[t.name for t in self.state.trials])
+                               taken_names=[t.name for t in self.state.trials],
+                               settings=(start_from or self.state).settings)
         self._trial_dialog = dlg                # (kept for scripts and screenshots)
         if dlg.exec() != QDialog.Accepted:
             return False
@@ -1494,6 +1633,10 @@ class VisualiserTab(QWidget):
         """Build and show the trial a Trial setup draft describes (then add its model's axes and joints)."""
         t = draft.to_trial()
         t.name = self.state.unique_trial_name(t.name)
+        t.settings = self.state.settings.copy()          # starts like the trial shown (Visualiser #23) ...
+        t.settings.hold_still = None
+        for k, v in draft.display.items():               # ... with the display chosen in the dialog (#22)
+            setattr(t.settings, k, v)
         if not draft.read_radiographs:
             for c in t.cameras:
                 c._read_once = True           # read as each frame is shown
@@ -1604,6 +1747,8 @@ class VisualiserTab(QWidget):
             self.state.settings.hold_still = renamed[self.state.settings.hold_still]
         t.name = self.state.unique_trial_name(d.name) if d.name != t.name else t.name
         t.tracking_dir = d.tracking_dir
+        for k, v in d.display.items():                   # display settings from the dialog (Visualiser #22)
+            setattr(t.settings, k, v)
         if shown:
             for m in removed + rebuild:
                 self.scene.remove_model(m)
@@ -1647,7 +1792,7 @@ class VisualiserTab(QWidget):
                         problems.append(f"{m.name} coordinate system: {e}")
             if shown:
                 st = self.state.settings
-                t.fps, t.hold_still, t.frame = st.fps, st.hold_still, self.scene.frame
+                t.frame, t.view = self.scene.frame, list(self.plotter.camera_position)
                 self._scene_trial = None              # put the trial's bones and cameras back in the scene
                 self.show_trial(t, select=(TRIAL, t))
             else:
@@ -1806,10 +1951,8 @@ class VisualiserTab(QWidget):
         if not self.state.trials:
             self.state.name = st.name
             self.titleChanged.emit(st.name)
-            for k, v in st.settings.__dict__.items():
-                setattr(self.state.settings, k, v)
-            self._sync_timeline_settings()
-            self.curves.set_style(self.state.settings.curve_labels)
+            self.state._settings = st._settings          # the tab's settings (each trial brings its own)
+            self._use_trial_settings()
         self.state.originals.update(st.originals)
         trials, shown = st.trials, st.trial
         problems: list[str] = []
@@ -1844,13 +1987,23 @@ class VisualiserTab(QWidget):
             if same is not None:
                 m.mesh, m.image_data, m.surface_note = same.mesh, same.image_data, same.surface_note
 
-        def work():
-            built, errors = [], []
-            for m in models:
+        cams_in = list(t.cameras)
+        n_steps = len(models) + (1 if cams_in else 0)
+
+        def work(report, cancelled):
+            """Each bone's surface and tracking, then the cameras (calibration and image list)."""
+            built, errors, cams, cam_errors = [], [], [], []
+            for k, m in enumerate(models):
+                if cancelled():
+                    return built, errors, cams, cam_errors, True
+                what = "building the surface" if m.mesh is None and m.is_volume else (
+                    "reading the surface" if m.mesh is None else "using its surface")
+                report(k, f"{t.name}\n\nBone {k + 1} of {len(models)}: {m.name} ({Path(m.path).name}), {what}…")
                 try:
                     if m.mesh is None:              # (a duplicated bone shares its surface)
                         m.build()
                     if m.tracking_path:
+                        report(k, f"{t.name}\n\nBone {k + 1} of {len(models)}: {m.name}, reading its tracking…")
                         try:
                             m.load_tracking()
                         except (TrackingError, OSError, ValueError) as e:
@@ -1858,25 +2011,37 @@ class VisualiserTab(QWidget):
                     built.append(m)
                 except (ModelError, TrackingError, TransformFileError, OSError, ValueError) as e:
                     errors.append(f"{t.name} · {m.path.name}: {e}")
-            return built, errors
+            if cams_in:
+                if cancelled():
+                    return built, errors, cams, cam_errors, True
+                report(len(models), f"{t.name}\n\nX-ray cameras: reading {len(cams_in)} calibration(s) and listing "
+                                    "the radiographs…")
+                for cam in cams_in:
+                    try:
+                        cam.build()
+                        cams.append(cam)
+                    except Exception as e:  # noqa: BLE001
+                        cam_errors.append(f"{t.name} · {cam.name}: {e}")
+            report(n_steps, f"{t.name}\n\nCoordinate systems and joints…")
+            return built, errors, cams, cam_errors, False
 
         def done(res, err):
             if err:
                 problems.append(f"{t.name}: {err}")
-                built = []
+                built, cams, cancelled = [], [], False
             else:
-                built, errors = res
-                problems.extend(errors)
+                built, errors, cams, cam_errors, cancelled = res
+                problems.extend(errors + cam_errors)
+            if cancelled:
+                for c in cams:
+                    if c.images is not None:
+                        c.images.close()
+                self._status(f"Loading {t.name} was cancelled")
+                if then:
+                    then()
+                return
             t.models = built
-            cams = []
-            for cam in t.cameras:
-                try:
-                    cam.build()
-                    cams.append(cam)
-                    if cam.note:
-                        problems.append(f"{t.name} · {cam.name}: {cam.note}")
-                except Exception as e:  # noqa: BLE001
-                    problems.append(f"{t.name} · {cam.name}: {e}")
+            problems.extend(f"{t.name} · {c.name}: {c.note}" for c in cams if c.note)
             t.cameras = cams
             for m in t.models:                       # coordinate systems on the bones
                 if m.has_axes:
@@ -1918,11 +2083,10 @@ class VisualiserTab(QWidget):
             if then:
                 then()
 
-        if models:
-            names = ", ".join(m.path.name for m in models[:3]) + (" …" if len(models) > 3 else "")
-            self._run(f"{t.name}: loading {names}", work, done)
+        if n_steps:
+            self._run_steps(f"Loading {t.name}", n_steps, work, done)
         else:
-            done(([], []), None)
+            done(work(lambda *_: None, lambda: False), None)
 
     # ---------------------------------------------------------------- coordinate systems and joints
     MODEL_FILE_FILTER = "Model from the Model Builder (*.bvrmodel.json *.json)"
@@ -2359,7 +2523,7 @@ class VisualiserTab(QWidget):
             p.value(n, f"{(0.0 if abs(v) < 0.05 else v):+.1f} mm", tip=full)
 
     def _curve_style_changed(self, style: str) -> None:
-        self.state.settings.curve_labels = style
+        self.state.set_tab_wide("curve_labels", style)
         if self.sel_kind in (JOINT, AXES):
             self.show_properties()
 

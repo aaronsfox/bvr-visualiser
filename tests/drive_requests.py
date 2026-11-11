@@ -242,7 +242,8 @@ from PySide6.QtCore import QPointF  # noqa: E402
 
 assert path.contains(QPointF(200, 200)) and path.contains(QPointF(240, 160))
 # sessions keep the layout
-st = tab.state.to_dict()["settings"]
+d = tab.state.to_dict()
+st = d["trials"][d["active"]]["settings"]          # (each trial's own settings: Visualiser #23)
 assert st["camera_views"] is True and st["overlay"] == "silhouette" and st["curve_labels"] == "axes"
 assert tab.state.models[1].to_dict()["tracking_offset"] == 0
 print("#8 OK", flush=True)

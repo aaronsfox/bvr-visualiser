@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSlider,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -87,10 +88,16 @@ class TrialSetupDialog(QDialog):
     """
 
     def __init__(self, parent, draft: TR.TrialDraft | None = None, mode: str = "new", trials=(),
-                 start_from=None, taken_names=()):
+                 start_from=None, taken_names=(), settings=None):
         super().__init__(parent)
         self.mode = mode
         self.draft = draft or TR.TrialDraft(name="")
+        # display settings (Visualiser #22): the draft's, else those of ``settings`` (the trial shown), else defaults
+        from ..core.session import SceneSettings
+
+        if start_from is not None and settings is None:
+            settings = start_from.settings          # a trial started from another looks like it
+        self.display = dict(self.draft.display) or TR.display_of(settings or SceneSettings())
         self.trials = list(trials)
         self.taken = set(taken_names)
         self._checks: dict = {}            # (path, overrides, volume, offset) -> (frames, tracked, warnings)
@@ -274,6 +281,8 @@ class TrialSetupDialog(QDialog):
         d.cfg_path, d.tracking_dir = t.cfg_path, None
         d.model_path = self.draft.model_path
         self.draft = d
+        if hasattr(self, "disp"):
+            self.set_display(TR.display_of(t.settings))
         self.r_trial.setChecked(True)
         i = next((k for k in range(self.trial_combo.count()) if self.trial_combo.itemData(k) is t), -1)
         if i >= 0 and self.trial_combo.currentIndex() != i:
@@ -579,6 +588,10 @@ class TrialSetupDialog(QDialog):
         self.read_now.toggled.connect(lambda on: setattr(self.draft, "read_radiographs", on))
         left.addWidget(self.read_now)
         left.addWidget(self.read_later)
+        left.addWidget(h2("Display"))
+        left.addWidget(label("How this trial shows its radiographs; change them later under X-ray cameras in the "
+                             "navigator.", "Muted"))
+        left.addLayout(self._display_form())
         left.addStretch(1)
         outer.addLayout(left, 3)
         right = QVBoxLayout()
@@ -595,6 +608,84 @@ class TrialSetupDialog(QDialog):
         right.addStretch(1)
         outer.addLayout(right, 0)
         return w
+
+    def _display_form(self) -> QGridLayout:
+        from .camera_views import OVERLAYS
+
+        d = self.display
+        g = QGridLayout()
+        g.setColumnStretch(1, 1)
+        self.disp = {}
+
+        def slider(row, text, key, lo, hi, scale, fmt):
+            s = QSlider(Qt.Horizontal)
+            s.setRange(lo, hi)
+            s.setValue(round(d[key] * scale))
+            val = QLabel(fmt(d[key]))
+            val.setMinimumWidth(56)
+
+            def changed(x):
+                d[key] = x / scale if scale != 1 else int(x)
+                val.setText(fmt(d[key]))
+
+            s.valueChanged.connect(changed)
+            g.addWidget(QLabel(text), row, 0)
+            g.addWidget(s, row, 1)
+            g.addWidget(val, row, 2)
+            self.disp[key] = s
+            return s
+
+        def check(row, text, key, on_change=None):
+            c = QCheckBox(text)
+            c.setChecked(bool(d[key]))
+            c.toggled.connect(lambda on: (d.__setitem__(key, on), on_change and on_change()))
+            g.addWidget(c, row, 0, 1, 3)
+            self.disp[key] = c
+            return c
+
+        def pct(x):
+            return f"{x * 100:.0f}%"
+
+        slider(0, "Image opacity", "xray_opacity", 0, 100, 100, pct)
+        slider(1, "Distance behind the bones", "xray_distance", 0, 800, 1, lambda x: f"{x:.0f} mm")
+        slider(2, "Bone opacity (through-X-ray views)", "xray_bone_opacity", 0, 100, 100, pct)
+        check(3, "Show the camera views beside the 3D view", "camera_views")
+        ov = QComboBox()
+        for k, t in OVERLAYS:
+            ov.addItem(t, k)
+        ov.setCurrentIndex(max(0, ov.findData(d["overlay"])))
+        g.addWidget(QLabel("Bones on the camera views"), 4, 0)
+        g.addWidget(ov, 4, 1, 1, 2)
+        self.disp["overlay"] = ov
+        check(5, "Show fill", "overlay_fill", lambda: self._display_enable())
+        slider(6, "Fill opacity", "overlay_opacity", 5, 100, 100, pct)
+        check(7, "Show outline (in the bone's colour)", "overlay_outline", lambda: self._display_enable())
+        slider(8, "Outline weight", "outline_width", 1, 6, 1, lambda x: f"{x:.0f} px")
+        ov.currentIndexChanged.connect(lambda _i: (d.__setitem__("overlay", ov.currentData()), self._display_enable()))
+        self._display_enable()
+        return g
+
+    def set_display(self, values: dict) -> None:
+        """Show these display settings in the Display section (e.g. those of the trial started from)."""
+        for k, v in values.items():
+            w = self.disp.get(k)
+            if isinstance(w, QSlider):
+                w.setValue(round(v * (100 if k in ("xray_opacity", "xray_bone_opacity", "overlay_opacity")
+                                          else 1)))
+            elif isinstance(w, QCheckBox):
+                w.setChecked(bool(v))
+            elif isinstance(w, QComboBox):
+                w.setCurrentIndex(max(0, w.findData(v)))
+            self.display[k] = v
+        self._display_enable()
+
+    def _display_enable(self) -> None:
+        d, w = self.display, self.disp
+        sil = d["overlay"] == "silhouette"
+        w["overlay_fill"].setEnabled(sil)
+        w["overlay_outline"].setEnabled(sil)
+        w["overlay_opacity"].setEnabled(d["overlay"] == "points" or (sil and d["overlay_fill"]))
+        w["outline_width"].setEnabled(sil and d["overlay_outline"])
 
     def _fill_cameras(self) -> None:
         g = self.cam_grid
@@ -871,6 +962,7 @@ class TrialSetupDialog(QDialog):
 
     def _finish(self) -> None:
         self.draft.name = self.name.text().strip()
+        self.draft.display = dict(self.display)
         if self.problems():
             self.steps.setCurrentRow(len(PAGES) - 1)
             return

@@ -171,3 +171,67 @@ def test_drafts_from_the_samples(cfg, folder, name, pairs):
     assert [(b.name, b.tracking_path.name) for b in d.bones] == pairs
     assert all(b.is_volume and b.voxel_size for b in d.bones) and len(d.cameras) == 2
     assert d.problems() == []
+
+
+# ---------------------------------------------------------------- settings for each trial (Visualiser #23)
+def test_each_trial_has_its_own_settings_but_the_tab_wide_ones_are_shared():
+    from bvrviewer.core.session import TAB_WIDE
+
+    st = TabState()
+    a = st.add_trial("A")
+    st.settings.xray_distance, st.settings.speed, st.settings.loop = 200, 0.5, False
+    b = st.add_trial("B")                                  # starts like the trial shown
+    assert b.settings is not a.settings and (b.settings.xray_distance, b.settings.speed) == (200, 0.5)
+    st.active = 1
+    st.settings.xray_distance = 50
+    assert a.settings.xray_distance == 200
+    st.set_tab_wide("background", "white")
+    assert a.settings.background == b.settings.background == "white" == st._settings.background
+    assert set(TAB_WIDE) == {"show_axes", "show_grid", "background", "curve_labels"}
+
+
+def test_trial_settings_saved_with_each_trial(tmp_path):
+    st = TabState()
+    a = st.add_trial("A")
+    a.settings.overlay_fill, a.settings.outline_width, a.settings.camera_views = False, 4, True
+    a.view = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
+    b = st.add_trial("B")
+    b.settings.xray_distance = 300
+    st.set_tab_wide("curve_labels", "anatomical")
+    p = tmp_path / "s.json"
+    save_session(st, p)
+    st2 = load_session(p)
+    a2, b2 = st2.trials
+    assert (a2.settings.overlay_fill, a2.settings.outline_width, a2.settings.camera_views) == (False, 4, True)
+    assert a2.view[0] == (1.0, 2.0, 3.0) and b2.settings.xray_distance == 300 and a2.settings.xray_distance == 120
+    assert a2.settings.curve_labels == b2.settings.curve_labels == "anatomical"
+
+
+def test_trials_saved_before_their_own_settings_use_the_tabs(tmp_path):
+    d = {"version": 2, "tool": "visualiser", "name": "S", "active": 0, "settings": {"xray_distance": 250, "fps": 60},
+         "trials": [{"name": "A", "models": [], "cameras": [], "joints": [], "fps": 500, "hold_still": "tib"}]}
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps(d))
+    t = load_session(p).trials[0]
+    assert (t.settings.xray_distance, t.settings.fps, t.settings.hold_still) == (250, 500, "tib")
+
+
+# ---------------------------------------------------------------- outline on the camera views (Visualiser #21)
+def test_contour_edges_outline_a_sphere():
+    import numpy as np
+    import pyvista as pv
+
+    from bvrviewer.app.camera_views import _BoneShape
+
+    m = BoneModel(name="ball", path=Path("ball.stl"))
+    m.mesh = pv.Sphere(radius=10, theta_resolution=40, phi_resolution=40)
+    shape = _BoneShape(m)
+    src = np.array([0.0, 0.0, 500.0])                      # X-ray source on the z axis
+    edges = shape.contour_edges(np.eye(4), src)
+    assert 30 < len(edges) < 400
+    mid = shape.tri_points[edges].mean(axis=1)
+    # on a sphere the contour is the circle where the surface is edge-on to the source: |z| small, radius ~10
+    assert np.all(np.abs(np.linalg.norm(mid[:, :2], axis=1) - 10) < 1.5) and np.all(np.abs(mid[:, 2]) < 2.0)
+    moved = np.eye(4)
+    moved[:3, 3] = [0, 0, -100]                            # the bone moves: the contour follows
+    assert len(shape.contour_edges(moved, src))

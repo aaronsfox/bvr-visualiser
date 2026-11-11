@@ -13,8 +13,9 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bvrviewer.app import trial_wizard as TW  # noqa: E402
@@ -109,6 +110,12 @@ pump(0.3)
 assert all("images" in r["img"].text() for r in dlg.cam_rows), [r["img"].text() for r in dlg.cam_rows]
 dlg.preview_camera(dlg.cam_rows[0])
 assert dlg.preview.pixmap() is not None and "3 bones" in dlg.preview_note.text(), dlg.preview_note.text()
+# #22: display settings for the trial
+dlg.disp["xray_distance"].setValue(200)
+dlg.disp["camera_views"].setChecked(True)
+dlg.disp["overlay_fill"].setChecked(False)
+assert not dlg.disp["overlay_opacity"].isEnabled() and dlg.disp["outline_width"].isEnabled()
+dlg.disp["outline_width"].setValue(3)
 shot(dlg, "tr_03_wizard_cameras")
 dlg.steps.setCurrentRow(3)
 pump(0.3)
@@ -123,9 +130,22 @@ dlg._update_review()
 dlg._finish()
 assert dlg.result() == QDialog.Accepted
 t1 = tab.add_trial_from_draft(dlg.draft)
+# #20: a "Loading" dialog with a progress bar while the bones are built
+wait(lambda: tab._busy is not None and tab._busy.value() >= 0 and "Bone" in tab._busy.labelText(), timeout=30,
+     what="loading dialog")
+assert tab._busy.windowTitle() == "Loading T0019_jog0001" and tab._busy.maximum() == 4      # 3 bones + cameras
+pump(0.2)
+tab._busy.grab().save(str(OUT / "tr_04b_loading.png"))
 wait(lambda: tab.state.trial is t1 and len(tab.state.models) == 3 and len(tab.scene._cam_actors) == 2,
      what="ankle trial")
 pump(1)
+s1 = t1.settings
+assert (s1.xray_distance, s1.camera_views, s1.overlay_fill, s1.outline_width) == (200, True, False, 3)
+assert tab.cam_views.isVisible()
+v0 = tab.cam_views.views[0]
+pump(0.5)
+assert v0.outlines and all(it.isVisible() for it in v0.outlines.values())          # #21: outline only
+assert not any(it.isVisible() for it in v0.items.values())
 assert [m.name for m in t1.models] == ["cal", "tal", "tib"] and t1.models[2].color == "#E07A9A"
 assert all(m.tracking is not None for m in t1.models) and tab.scene.n_frames == 19
 assert all(c.show_source is False for c in t1.cameras)
@@ -155,6 +175,31 @@ t2 = tab.add_trial_from_draft(dup.draft)
 wait(lambda: tab.state.trial is t2 and len(tab.state.models) == 3, what="duplicate")
 assert all(a.mesh is b.mesh for a, b in zip(t1.models, t2.models))      # surfaces shared, not rebuilt
 assert not t2.cameras and not tab.scene._cam_actors
+assert t1.view is not None                                              # the viewpoint kept with the trial
+# #23: each trial's own settings; background, axes, grid and curve labels are the tab's
+assert t2.settings is not t1.settings and t2.settings.xray_distance == 200          # started like t1
+tab._set("xray_distance", 50)
+tab._set("trail", True)
+tab.timeline.speed.setCurrentIndex(tab.timeline.speed.findData(0.25))
+tab.timeline.loop.setChecked(False)
+tab._set("background", "light")
+assert (t1.settings.xray_distance, t1.settings.trail, t1.settings.speed, t1.settings.loop) == (200, False, 1.0, True)
+assert (t2.settings.xray_distance, t2.settings.trail, t2.settings.speed, t2.settings.loop) == (50, True, 0.25, False)
+assert t1.settings.background == "light" == t2.settings.background
+# a bone's own settings are its trial's too
+t2.models[0].color = "#FFFFFF"
+assert t1.models[0].color != "#FFFFFF"
+
+# #20: Cancel while a trial loads: nothing is added
+n_before = len(tab.state.trials)
+cancel_draft = TW.TR.draft_from_cfg(K / "Knee_Sample_Data.cfg", K / "Tracking")     # (surfaces not loaded yet)
+cancel_draft.name = "Cancelled"
+tab.add_trial_from_draft(cancel_draft)
+wait(lambda: tab._busy is not None, timeout=30, what="loading dialog to cancel")
+next(b for b in tab._busy.findChildren(QPushButton) if b.text() == "Cancel").click()
+wait(lambda: tab._busy is None, timeout=120, what="cancelled")
+pump(0.5)
+assert len(tab.state.trials) == n_before and tab.state.trial is t2
 
 # ---- the knee sample with a Model Builder model (axes from AUT STLs, bones from the .cfg's TIFs)
 model_path = OUT / "knee.bvrmodel.json"
@@ -194,6 +239,8 @@ shot(win, "tr_08_knee_trial")
 tab.show_trial(t1)
 pump(0.5)
 assert tab.state.trial is t1 and tab.scene.frame == 9 and len(tab.scene._cam_actors) == 2
+assert np.allclose(np.asarray(tab.plotter.camera_position[0]), np.asarray(t1.view[0]))   # same viewpoint
+assert tab.timeline.speed.currentData() == 1.0 and tab.timeline.loop.isChecked()        # t1's playback settings
 nav.select("model", t3.models[0])
 wait(lambda: tab.state.trial is t3 and tab.sel_obj is t3.models[0], what="switch by selecting a bone")
 tab._nav_activated(TRIAL, t1)

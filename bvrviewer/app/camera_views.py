@@ -3,7 +3,7 @@
 Shown beside the 3D view (one panel per camera, stacked). These are plain 2D image views, not 3D
 windows: each bone's surface is projected through the camera calibration (pixel = K·(R·X + t)/z) at
 the current frame, and drawn over the image in the bone's colour, either as a point cloud of its
-surface or as a filled silhouette (closest to Autoscoper's overlay).
+surface or as a silhouette (closest to Autoscoper's overlay): filled and/or outlined in the bone's colour.
 
 The bones are placed with their raw tracking (the Autoscoper world frame the cameras are calibrated
 in), so "hold this bone still" in the 3D view doesn't affect these panels.
@@ -30,7 +30,7 @@ from .panels import label
 MAX_POINTS = 4000           # surface points drawn per bone in point-cloud mode
 MAX_TRIANGLES = 6000        # triangles projected per bone in silhouette mode
 
-OVERLAYS = [("silhouette", "Filled silhouette"), ("points", "Point cloud"), ("off", "No overlay")]
+OVERLAYS = [("silhouette", "Silhouette"), ("points", "Point cloud"), ("off", "Off")]
 
 
 class _BoneShape:
@@ -51,6 +51,26 @@ class _BoneShape:
         self.tri_points = np.asarray(tri.points, float)
         faces = np.asarray(tri.faces).reshape(-1, 4)
         self.triangles = faces[faces[:, 0] == 3, 1:]
+        # for the outline (Visualiser #21): each edge shared by two triangles, with the triangles' normals
+        # and centres, so the edges where the surface turns away from the X-ray source can be found quickly
+        t, P = self.triangles, self.tri_points
+        a, b, c = P[t[:, 0]], P[t[:, 1]], P[t[:, 2]]
+        self.normals = np.cross(b - a, c - a)
+        self.centres = (a + b + c) / 3
+        e = np.sort(np.concatenate([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]]), axis=1)
+        f = np.tile(np.arange(len(t)), 3)
+        order = np.lexsort((e[:, 1], e[:, 0]))
+        e, f = e[order], f[order]
+        shared = np.nonzero(np.all(e[1:] == e[:-1], axis=1))[0]
+        self.edges, self.edge_faces = e[shared], np.stack([f[shared], f[shared + 1]], axis=1)
+
+    def contour_edges(self, pose: np.ndarray, source: np.ndarray) -> np.ndarray:
+        """(n, 2) vertex pairs of the edges where the surface turns away from the X-ray source (the bone's
+        outline as the camera sees it, plus folds inside it), for the bone at this pose."""
+        R, t = pose[:3, :3], pose[:3, 3]
+        src = R.T @ (np.asarray(source, float) - t)                 # the source in the bone's own frame
+        facing = np.einsum("ij,ij->i", self.centres - src, self.normals) > 0
+        return self.edges[facing[self.edge_faces[:, 0]] != facing[self.edge_faces[:, 1]]]
 
 
 def silhouette_path(uv: np.ndarray, triangles: np.ndarray) -> QPainterPath:
@@ -102,6 +122,7 @@ class CameraView(QWidget):
         self.gv.scene().sigMouseClicked.connect(self._clicked)
         v.addWidget(self.gv, 1)
         self.items: dict[int, object] = {}          # id(model) -> scatter or path item
+        self.outlines: dict[int, QGraphicsPathItem] = {}   # id(model) -> outline item (silhouette mode)
         self._image_key = None
         self._fitted = False
 
@@ -113,7 +134,10 @@ class CameraView(QWidget):
         cal = self.cam.calibration
         self.vb.setRange(QRectF(0, 0, cal.width, cal.height), padding=0.02)
 
-    def update_view(self, frame: int, models, shapes: dict, lut: np.ndarray, overlay: str, alpha: float) -> None:
+    def update_view(self, frame: int, models, shapes: dict, lut: np.ndarray, overlay: str, alpha: float,
+                    fill: bool = True, outline: bool = True, width: float = 2) -> None:
+        """Draw this frame: the radiograph, and each bone as a silhouette (fill at ``alpha`` and/or an outline
+        ``width`` pixels wide in the bone's colour at full opacity), a point cloud, or nothing."""
         cam, cal = self.cam, self.cam.calibration
         self.title.setText(cam.name)
         i = cam.image_index(frame)
@@ -134,12 +158,14 @@ class CameraView(QWidget):
         live = set()
         for m in models:
             item = self._bone_item(m, overlay)
+            line = self._outline_item(m)
             live.add(id(m))
             pose = m.tracking.pose(frame, "hide") if m.tracking is not None else None
             if item is None:
                 continue
             if overlay == "off" or pose is None or not m.visible or m.mesh is None:
                 item.setVisible(False)
+                line.setVisible(False)
                 continue
             shape = shapes[id(m)]
             colour = QColor(m.color)
@@ -147,14 +173,40 @@ class CameraView(QWidget):
                 uv = cal.project(shape.points @ pose[:3, :3].T + pose[:3, 3])
                 colour.setAlphaF(min(1.0, alpha + 0.3))
                 item.setData(pos=uv, brush=pg.mkBrush(colour), pen=None, size=2.5)
-            else:
-                uv = cal.project(shape.tri_points @ pose[:3, :3].T + pose[:3, 3])
+                item.setVisible(True)
+                line.setVisible(False)
+                continue
+            uv = cal.project(shape.tri_points @ pose[:3, :3].T + pose[:3, 3])
+            if fill:
                 item.setPath(silhouette_path(uv, shape.triangles))
-                colour.setAlphaF(alpha)
-                item.setBrush(QBrush(colour))
-            item.setVisible(True)
+                c = QColor(colour)
+                c.setAlphaF(alpha)
+                item.setBrush(QBrush(c))
+            item.setVisible(bool(fill))
+            if outline:
+                seg = uv[shape.contour_edges(pose, cal.source)]          # (n, 2, 2)
+                seg = seg[np.isfinite(seg).all(axis=(1, 2))]
+                line.setPath(pg.arrayToQPath(seg[:, :, 0].ravel(), seg[:, :, 1].ravel(), connect="pairs")
+                             if len(seg) else QPainterPath())
+                pen = QPen(colour, float(width))
+                pen.setCosmetic(True)                                    # the same width at any zoom
+                pen.setCapStyle(Qt.RoundCap)
+                line.setPen(pen)
+            line.setVisible(bool(outline))
         for k in [k for k in self.items if k not in live]:
             self.vb.removeItem(self.items.pop(k))
+        for k in [k for k in self.outlines if k not in live]:
+            self.vb.removeItem(self.outlines.pop(k))
+
+    def _outline_item(self, m: BoneModel) -> QGraphicsPathItem:
+        item = self.outlines.get(id(m))
+        if item is None:
+            item = QGraphicsPathItem()
+            item.setBrush(QBrush(Qt.NoBrush))
+            item.setZValue(11)
+            self.vb.addItem(item)
+            self.outlines[id(m)] = item
+        return item
 
     def _bone_item(self, m: BoneModel, overlay: str):
         want = pg.ScatterPlotItem if overlay == "points" else QGraphicsPathItem
@@ -208,14 +260,16 @@ class CameraViews(QWidget):
         return s
 
     def render_args(self) -> tuple:
-        """(models, shapes, lut, overlay, opacity) for CameraView.update_view, as the panels draw them."""
+        """(models, shapes, lut, overlay, opacity, fill, outline, outline width) for CameraView.update_view, as
+        the panels draw them."""
         st = self.scene.state.settings
         models = [m for m in self.scene.state.models if m.tracking is not None and self._shape(m) is not None]
         live = {id(m) for m in self.scene.state.models}
         for k in [k for k in self._shapes if k not in live]:
             del self._shapes[k]
         shapes = {id(m): self._shapes[id(m)] for m in models}
-        return models, shapes, self.scene._lut(), st.overlay, st.overlay_opacity
+        return (models, shapes, self.scene._lut(), st.overlay, st.overlay_opacity, st.overlay_fill, st.overlay_outline,
+                st.outline_width)
 
     def update_frame(self, frame: int) -> None:
         if not self.isVisible():

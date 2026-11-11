@@ -46,7 +46,16 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 
 ### Trials
 
-A tab holds any number of **trials**. Each trial has its own bones (with their tracking), X-ray cameras, coordinate systems and joints, so trials from different participants can sit in one tab. **One trial is shown at a time**: the 3D view, camera views, timeline and curves all show it. Its frame, frame rate and held-still bone are kept with it.
+A tab holds any number of **trials**. Each trial has its own bones (with their tracking), X-ray cameras, coordinate systems and joints, so trials from different participants can sit in one tab. **One trial is shown at a time**: the 3D view, camera views, timeline and curves all show it.
+
+**Each trial has its own settings**, kept with it while another is shown and saved with the session:
+- the X-ray settings (image opacity, distance behind the bones, bone opacity and wireframe in through-X-ray views, brightness, contrast, invert);
+- the camera views and their overlay;
+- motion trail and untracked frames;
+- held-still bone, frame rate, playback speed and loop;
+- the frame it was on and where the 3D view was looking from.
+
+Only the background, axes, grid and curve labels are the tab's, the same for every trial. A new or duplicated trial starts with the settings of the trial shown.
 
 - **A new tab** shows only **+ Add trial…** in the navigator. Click it, or use the buttons in the view, or File → **Import trial…** (Ctrl+I) / **Empty trial…**:
   - **Import trial…** opens the Trial setup wizard (below).
@@ -78,7 +87,10 @@ A tab holds any number of **trials**. Each trial has its own bones (with their t
    - one row per camera: include, name, calibration (format and image size), radiograph folder (number and size of images; **Folder…** to change it), and **Marker** (off by default);
    - **Preview** draws the bones, at their first tracked frame, on that camera's first radiograph: if they sit on their shadows, the calibration, images and tracking match;
    - **Radiographs:** read them all when the trial is first shown (recommended), or read each one as its frame is shown.
+   - **Display:** the trial's image opacity, distance behind the bones, bone opacity in through-X-ray views, whether the camera views show beside the 3D view, and how the bones are drawn on them (silhouette fill and outline, or points). It starts from the trial shown (or the one a duplicate starts from); change it later under X-ray cameras in the navigator.
 4. **Review:** a summary, anything to fix first (missing files, a voxel size, a name already used, a camera without its radiographs) and anything to check (in amber).
+
+**Loading a trial.** After **Add trial** (and for each trial when a session opens), a **Loading <trial>** dialog shows a progress bar and what it's doing: each bone in turn (building its surface from the TIF, reading its tracking), then the cameras. **Cancel** stops after the current step and the trial isn't added. When the trial is shown, its radiographs are read with their own progress bar (**Loading <trial>: radiographs**, with Skip).
 
 ### Bones, tracking and cameras by hand
 
@@ -103,7 +115,7 @@ A tab holds any number of **trials**. Each trial has its own bones (with their t
 | **Bones** | count, frames | Add bone, Load model, Show all, Hide all |
 | a **bone** | name, colour, opacity, visible, display; hold this bone still; surface file details | load tracking, load coordinate system, hold still, show/hide, rename, replace surface file, .tfm or voxel size, remove |
 | its **Tracking** | file, rows, trial frames it covers, untracked frames, format | load file / load new file, refresh current file, format and frames, hold still, remove |
-| **X-ray cameras** | settings for all radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, camera views (2D) and their overlay, brightness, contrast, invert | Add X-ray camera, Import from .cfg |
+| **X-ray cameras** | the trial's settings for all its radiographs: image opacity, distance behind bones, bone opacity and wireframe in through-X-ray views, camera views (2D) and how the bones are drawn on them (silhouette with fill and fill opacity, outline and outline weight; point cloud; off), brightness, contrast, invert | Add X-ray camera, Import from .cfg |
 | a **camera** | name, visible; what it shows in 3D (radiograph, source marker, beam outline); images and the size they're shown at; files | view through it, show/hide, rename, change files, remove |
 | its **Axes** (coordinate system) | model file and the model's bone, axes and curves on/off, motion relative to, zero at a frame, values at this frame | load file / load new file, refresh current file, show curves, show/hide axes, zero, export CSV, remove |
 | **Joints** | show curves | Add joint, show/hide curves |
@@ -111,7 +123,7 @@ A tab holds any number of **trials**. Each trial has its own bones (with their t
 | **Scene** | axes, grid, background, motion trail, untracked frames | fit bones in view |
 
 - **Hold this bone still** (bone properties or right-click): view the other bones' motion relative to it.
-- **Camera views** (view bar, View → Show/hide camera views, Ctrl+K, or X-ray cameras properties): each X-ray camera's radiograph in its own 2D panel beside the 3D view, with the tracked bones projected onto it in their colours, as a filled silhouette (like Autoscoper's overlay) or a point cloud. Scroll to zoom, drag to pan, double-click to fit. The **Through X-ray** buttons still look through a camera in the 3D view.
+- **Camera views** (view bar, View → Show/hide camera views, Ctrl+K, or X-ray cameras properties): each X-ray camera's radiograph in its own 2D panel beside the 3D view, with the tracked bones projected onto it in their colours, as a **silhouette** (like Autoscoper's overlay) or a **point cloud**. The silhouette has a **fill** (with its opacity) and an **outline** in the bone's colour at full opacity (1–6 px, the same thickness at any zoom); turn either off. The outline follows the edges where the bone's surface turns away from the X-ray source, so besides the bone's outer edge it shows folds inside it, like the bone edges visible in the radiograph. Scroll to zoom, drag to pan, double-click to fit. The **Through X-ray** buttons still look through a camera in the 3D view.
 - Every slider has a box beside it to type the value (press Enter), and the timeline's frame number can be typed too.
 - Curves are labelled **Angle X/Y/Z** and **Translation X/Y/Z** (the coordinate system's axes, coloured like the 3D axes) by default; **Labels** above the curves switches to the anatomical names (Flexion, …). CSV exports follow the same order and add the anatomical name to each column.
 - **Screenshot** (Ctrl+P) and **Export video** (Ctrl+E, MP4). The export dialog sets:

@@ -123,6 +123,26 @@ class SceneSettings:
     overlay: str = "silhouette"       # bones on those panels: "silhouette", "points" or "off"
     overlay_opacity: float = 0.5
     curve_labels: str = "axes"        # curve legends: "axes" (Angle X/Y/Z) or "anatomical" (Flexion, ...)
+    overlay_fill: bool = True         # silhouette overlay: filled (at overlay_opacity) ...
+    overlay_outline: bool = True      # ... and/or outlined, in the bone's colour at full opacity (Visualiser #21)
+    outline_width: int = 2            # outline weight, screen pixels
+
+    def copy(self) -> SceneSettings:
+        return SceneSettings(**self.__dict__)
+
+    @classmethod
+    def from_dict(cls, d: dict, base: SceneSettings | None = None) -> SceneSettings:
+        s = base.copy() if base is not None else cls()
+        for k, v in (d or {}).items():
+            if hasattr(s, k):
+                setattr(s, k, v)
+        return s
+
+
+# Settings that belong to the tab rather than a trial: how the app looks (Visualiser #23). Every other
+# scene setting (X-ray display, camera views and overlay, trail, untracked frames, held-still bone, frame
+# rate, playback speed and loop) is each trial's own.
+TAB_WIDE = ("show_axes", "show_grid", "background", "curve_labels")
 
 
 @dataclass(eq=False)
@@ -176,35 +196,62 @@ class KinItem:
 
 @dataclass(eq=False)
 class Trial:
-    """One trial in a Visualiser tab: its bones (with tracking), X-ray cameras and joints (Visualiser #16).
-
-    Each trial keeps its own bones, model and cameras, so trials from different participants can sit in one
-    tab. ``fps``, ``hold_still`` and ``frame`` are the trial's own scene settings, restored when it's shown.
+    """One trial in a Visualiser tab: its bones (with tracking), X-ray cameras and joints (Visualiser #16), and
+    its own scene settings (Visualiser #23): X-ray display, camera views, trail, untracked frames, held-still
+    bone, frame rate, playback speed and loop. ``frame`` and ``view`` (the 3D viewpoint) are restored when
+    it's shown again. Each trial keeps its own bones, model and cameras, so trials from different
+    participants can sit in one tab.
     """
 
     name: str = "Trial 1"
     models: list[BoneModel] = field(default_factory=list)
     cameras: list[XrayCamera] = field(default_factory=list)
     joints: list[KinItem] = field(default_factory=list)
-    fps: float = 30.0
-    hold_still: str | None = None
+    settings: SceneSettings = field(default_factory=SceneSettings)
     frame: int = 0
+    view: list | None = None              # 3D camera position [position, focal point, view up]
     cfg_path: Path | None = None          # the Autoscoper .cfg it was imported from
     tracking_dir: Path | None = None      # the folder its tracking files were chosen from
+
+    @property
+    def fps(self) -> float:
+        return self.settings.fps
+
+    @fps.setter
+    def fps(self, v: float) -> None:
+        self.settings.fps = v
+
+    @property
+    def hold_still(self) -> str | None:
+        return self.settings.hold_still
+
+    @hold_still.setter
+    def hold_still(self, v) -> None:
+        self.settings.hold_still = v
 
     def to_dict(self) -> dict:
         return {"name": self.name, "models": [m.to_dict() for m in self.models],
                 "cameras": [c.to_dict() for c in self.cameras], "joints": [j.to_dict() for j in self.joints],
-                "fps": self.fps, "hold_still": self.hold_still, "frame": self.frame,
+                "settings": self.settings.__dict__.copy(), "frame": self.frame,
+                "view": [list(map(float, x)) for x in self.view] if self.view else None,
                 "cfg_path": str(self.cfg_path) if self.cfg_path else None,
                 "tracking_dir": str(self.tracking_dir) if self.tracking_dir else None}
 
     @classmethod
-    def from_dict(cls, d: dict) -> Trial:
+    def from_dict(cls, d: dict, base: SceneSettings | None = None) -> Trial:
+        """``base``: the tab's settings, used for anything the trial didn't save (sessions from before #23)."""
+        st = SceneSettings.from_dict(d.get("settings", {}), base)
+        if "settings" not in d:
+            st.fps = d.get("fps", st.fps)
+            st.hold_still = d.get("hold_still")
+        for k in TAB_WIDE:                      # the tab's own, whatever the trial saved
+            if base is not None:
+                setattr(st, k, getattr(base, k))
+        view = d.get("view")
         return cls(name=d.get("name", "Trial 1"), models=[BoneModel.from_dict(m) for m in d.get("models", [])],
                    cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])],
-                   joints=[KinItem.from_dict(j) for j in d.get("joints", [])], fps=d.get("fps", 30.0),
-                   hold_still=d.get("hold_still"), frame=int(d.get("frame", 0) or 0),
+                   joints=[KinItem.from_dict(j) for j in d.get("joints", [])], settings=st,
+                   frame=int(d.get("frame", 0) or 0), view=[tuple(x) for x in view] if view else None,
                    cfg_path=Path(d["cfg_path"]) if d.get("cfg_path") else None,
                    tracking_dir=Path(d["tracking_dir"]) if d.get("tracking_dir") else None)
 
@@ -241,14 +288,26 @@ class TabState:
     def __init__(self, name: str = "Untitled tab", models=None, cameras=None, joints=None,
                  settings: SceneSettings | None = None, trials: list[Trial] | None = None, active: int | None = None):
         self.name = name
-        self.settings = settings or SceneSettings()
+        self._settings = settings or SceneSettings()     # the tab's: used with no trial, and for new trials
         self.trials: list[Trial] = list(trials or [])
         if models or cameras or joints:
             self.trials.append(Trial(name="Trial 1", models=list(models or []), cameras=list(cameras or []),
-                                     joints=list(joints or []), fps=self.settings.fps,
-                                     hold_still=self.settings.hold_still))
+                                     joints=list(joints or []), settings=self._settings.copy()))
         self.active = (0 if self.trials else -1) if active is None else active
         self.originals: dict = {}      # files used from a session's data folder -> where they came from
+
+    # ---- settings (Visualiser #23)
+    @property
+    def settings(self) -> SceneSettings:
+        """The shown trial's scene settings (the tab's when there is no trial)."""
+        t = self.trial
+        return t.settings if t is not None else self._settings
+
+    def set_tab_wide(self, key: str, value) -> None:
+        """Set a setting that belongs to the tab (TAB_WIDE): the same for every trial."""
+        setattr(self._settings, key, value)
+        for t in self.trials:
+            setattr(t.settings, key, value)
 
     # ---- the trial being shown
     @property
@@ -277,7 +336,12 @@ class TabState:
 
     def add_trial(self, name: str = "Trial 1", trial: Trial | None = None) -> Trial:
         """Add a trial (a new empty one called ``name``, or ``trial``); the first one becomes the one shown."""
-        t = trial or Trial(name=name, fps=self.settings.fps)
+        if trial is None:
+            trial = Trial(name=name, settings=self.settings.copy())       # starts like the trial shown
+            trial.settings.hold_still = None
+        t = trial
+        for k in TAB_WIDE:
+            setattr(t.settings, k, getattr(self._settings, k))
         t.name = self.unique_trial_name(t.name)
         self.trials.append(t)
         self.active = max(self.active, 0)
@@ -292,36 +356,26 @@ class TabState:
 
     # ---- files
     def to_dict(self) -> dict:
-        t = self.trial
-        if t is not None:                     # the shown trial's settings live in the scene settings
-            t.fps, t.hold_still = self.settings.fps, self.settings.hold_still
         return {"version": SESSION_VERSION, "tool": "visualiser", "name": self.name,
                 "trials": [x.to_dict() for x in self.trials], "active": self.active,
-                "settings": self.settings.__dict__.copy()}
+                "settings": self._settings.__dict__.copy()}
 
     @classmethod
     def from_dict(cls, d: dict) -> TabState:
-        s = SceneSettings()
-        for k, v in d.get("settings", {}).items():
-            if hasattr(s, k):
-                setattr(s, k, v)
+        s = SceneSettings.from_dict(d.get("settings", {}))
         name = d.get("name", "Untitled tab")
         if "trials" in d:
-            trials = [Trial.from_dict(t) for t in d["trials"]]
+            trials = [Trial.from_dict(t, s) for t in d["trials"]]
             active = d.get("active", 0) if trials else -1
         elif d.get("models") or d.get("cameras") or d.get("joints"):
             # version 1: one set of bones, cameras and joints -> one trial named after the session
             trials = [Trial(name=name, models=[BoneModel.from_dict(m) for m in d.get("models", [])],
                             cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])],
-                            joints=[KinItem.from_dict(j) for j in d.get("joints", [])], fps=s.fps,
-                            hold_still=s.hold_still)]
+                            joints=[KinItem.from_dict(j) for j in d.get("joints", [])], settings=s.copy())]
             active = 0
         else:
             trials, active = [], -1
-        st = cls(name=name, settings=s, trials=trials, active=min(active, len(trials) - 1))
-        if st.trial is not None:
-            s.fps, s.hold_still = st.trial.fps, st.trial.hold_still
-        return st
+        return cls(name=name, settings=s, trials=trials, active=min(active, len(trials) - 1))
 
 
 # ---------------------------------------------------------------- saving and opening
