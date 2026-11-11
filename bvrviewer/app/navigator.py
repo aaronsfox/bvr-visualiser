@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
@@ -318,6 +318,19 @@ class Navigator(QTreeWidget):
             self.menuRequested.emit(MODELS, None, self.viewport().mapToGlobal(pos))
 
 
+def after_edit(fn):
+    """A slot that calls ``fn`` once the editor that sent the signal has finished with it.
+
+    Property-sheet callbacks often rebuild the sheet, which deletes the editor that sent the
+    signal. Doing that inside the editor's own signal (a combo box still closing its popup, a
+    line edit losing focus) is a use-after-free: on Windows it crashed the app with 0xC0000005
+    (Model Builder #5). Queuing the call runs it from the event loop instead, a moment later.
+    """
+    def slot(*args):
+        QTimer.singleShot(0, lambda: fn(*args))
+    return slot
+
+
 class PropertySheet(QWidget):
     """Two-column sheet of editable properties, rebuilt for whatever is selected in the navigator."""
 
@@ -349,13 +362,16 @@ class PropertySheet(QWidget):
         self.grid = None
         self.row_i = 0
         self.clear("")
+        self.finish()
 
     # ---- building blocks
     def clear(self, title: str, icon_color: str | None = None) -> None:
         self.title.setText(title)
-        if self.body is not None:
-            self.body.setParent(None)
-            self.body.deleteLater()
+        if self.body is not None and self.body is not self.scroll.widget():
+            self.body.deleteLater()              # cleared again before finish(): never shown
+        # The new sheet is built off-screen and swapped in by finish(), so its widgets are shown together
+        # with it, and the old one stays on screen meanwhile (rebuilding a shown sheet from a queued
+        # after_edit callback left it blank for up to a second).
         self.body = QWidget()
         self.body.setObjectName("Panel")
         self.grid = QGridLayout(self.body)
@@ -366,10 +382,16 @@ class PropertySheet(QWidget):
         # rows keep their full height (wrapped text included) and the sheet scrolls, rather than squashing
         self.grid.setSizeConstraint(QLayout.SetMinimumSize)
         self.row_i = 0
-        self.scroll.setWidget(self.body)
 
     def finish(self) -> None:
+        """Put the sheet built since clear() on screen, replacing the previous one."""
         self.grid.setRowStretch(self.row_i, 1)
+        if self.scroll.widget() is not self.body:
+            old = self.scroll.takeWidget()       # deleted once any signal it is sending has returned
+            if old is not None:
+                old.hide()
+                old.deleteLater()
+            self.scroll.setWidget(self.body)
         self._fit_wrapped()
 
     def _fit_wrapped(self) -> None:
@@ -458,10 +480,12 @@ class PropertySheet(QWidget):
     def line(self, text: str, value: str, on_done) -> QLineEdit:
         ed = QLineEdit(value)
 
+        later = after_edit(on_done)
+
         def done():
             v = ed.text().strip()
             if v:
-                on_done(v)
+                later(v)
             else:
                 ed.setText(value)
 
@@ -470,7 +494,7 @@ class PropertySheet(QWidget):
 
     def color(self, text: str, value: str, on_change) -> ColorButton:
         b = ColorButton(value)
-        b.colorChanged.connect(on_change)
+        b.colorChanged.connect(after_edit(on_change))
         box = QWidget()
         h = QHBoxLayout(box)
         h.setContentsMargins(0, 0, 0, 0)
@@ -486,7 +510,7 @@ class PropertySheet(QWidget):
         cb = QCheckBox(caption)
         cb.setChecked(bool(value))
         cb.setEnabled(enabled)
-        cb.toggled.connect(on_change)
+        cb.toggled.connect(after_edit(on_change))
         return self.row(text, cb, tip)
 
     def combo(self, text: str, items, current, on_change, tip: str | None = None) -> QComboBox:
@@ -501,7 +525,8 @@ class PropertySheet(QWidget):
                 c.model().item(c.count() - 1).setEnabled(False)
         if current in keys:
             c.setCurrentIndex(keys.index(current))
-        c.currentIndexChanged.connect(lambda _: on_change(c.currentData()))
+        data = [c.itemData(i) for i in range(c.count())]
+        c.currentIndexChanged.connect(after_edit(lambda i: on_change(data[i]) if 0 <= i < len(data) else None))
         return self.row(text, c, tip)
 
     def spin(self, text: str, value: int, lo: int, hi: int, on_change, suffix: str = "") -> QSpinBox:
@@ -510,7 +535,7 @@ class PropertySheet(QWidget):
         s.setValue(int(value))
         if suffix:
             s.setSuffix(suffix)
-        s.valueChanged.connect(on_change)
+        s.valueChanged.connect(after_edit(on_change))
         box = QWidget()
         h = QHBoxLayout(box)
         h.setContentsMargins(0, 0, 0, 0)

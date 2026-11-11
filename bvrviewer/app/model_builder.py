@@ -14,7 +14,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QRadioButton, QSlider, QSpinBox, QSplitter,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QSplitter,
     QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from pyvistaqt import QtInteractor
@@ -23,6 +23,7 @@ from vtkmodules.vtkRenderingCore import vtkCellPicker
 
 from ..core import auto_axes as AA
 from ..core import joints as J
+from ..core import method_guide as MG
 from ..core.models import BoneModel, ModelError, is_volume_file
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError, model_to_aut_from_tfm
@@ -47,11 +48,22 @@ SHORT_SOURCE = {"landmarks": "Landmarks", "staple_femur_cylinder": "Cylinder", "
                 "staple_talus_ankle": "Talocrural", "staple_talus_subtalar": "Subtalar", "aafact": "AAFACT"}
 
 
-BONE_GROUPS = (("Knee", ("femur", "tibia")),
-               ("Ankle and foot", ("tibia_distal", "fibula", "talus", "calcaneus", "navicular", "cuboid",
-                                   "medial_cuneiform", "intermediate_cuneiform", "lateral_cuneiform",
-                                   "metatarsal1", "metatarsal2", "metatarsal3", "metatarsal4", "metatarsal5")),
-               ("Any bone", ("generic",)))
+# Bone dropdown order: proximal to distal, then General
+BONE_ORDER = ("femur", "tibia", "tibia_distal", "fibula", "talus", "calcaneus", "navicular", "cuboid",
+              "medial_cuneiform", "intermediate_cuneiform", "lateral_cuneiform",
+              "metatarsal1", "metatarsal2", "metatarsal3", "metatarsal4", "metatarsal5", "generic")
+
+
+def bone_items() -> list:
+    """(key, title) for the Bone dropdowns: bone names only (Model Builder #4)."""
+    return [(k, J.SEGMENT_TYPES[k].title) for k in BONE_ORDER]
+
+
+def default_bone_name(type_key: str, path) -> str:
+    """A bone's name from its type ("Tibia" for either tibia), or the file name for a general bone."""
+    if type_key == "generic":
+        return Path(path).stem
+    return "Tibia" if type_key in ("tibia", "tibia_distal") else J.SEGMENT_TYPES[type_key].title
 
 
 def _settings():
@@ -187,6 +199,112 @@ def tool_icon(name: str, color: str = "#D5DAE3") -> QIcon:
 
 
 # ==================================================================== dialogs
+
+def guess_bone(path, fallback_side: str = "right") -> dict:
+    """What a surface file is taken to be: {"type", "side", "name", "type_guessed", "side_guessed"}."""
+    name = Path(path).name
+    typ = J.guess_segment_type(name)
+    side = _guess_side(name)
+    t = typ or "generic"
+    return {"type": t, "side": side or fallback_side, "name": default_bone_name(t, path),
+            "type_guessed": typ is not None, "side_guessed": side is not None}
+
+
+class ConfirmBonesDialog(QDialog):
+    """Check what each new surface was taken to be, and change it (Model Builder #3).
+
+    One row per file: the bone's name, type and side, guessed from the file name, with a note on how
+    each was set. Names follow the type until they are edited.
+    """
+
+    def __init__(self, parent, paths, fallback_side: str = "right"):
+        super().__init__(parent)
+        self.setWindowTitle("Add bones")
+        self.rows = []
+        v = QVBoxLayout(self)
+        v.addWidget(label("Check what each surface is. The bone and side were guessed from the file names; "
+                          "change any that are wrong. The bone decides which axes methods are offered.", "Muted"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        for c, h in enumerate(("Surface file", "Name", "Bone", "Side", "")):
+            grid.addWidget(h2(h), 0, c)
+        sides = [("right", "Right"), ("left", "Left")]
+        for r, path in enumerate(paths, 1):
+            g = guess_bone(path, fallback_side)
+            f = QLabel(Path(path).name)
+            f.setToolTip(str(path))
+            name = QLineEdit(g["name"])
+            typ = QComboBox()
+            for k, title in bone_items():
+                typ.addItem(title, k)
+            typ.setCurrentIndex(typ.findData(g["type"]))
+            side = QComboBox()
+            for k, title in sides:
+                side.addItem(title, k)
+            side.setCurrentIndex(side.findData(g["side"]))
+            how = QLabel()
+            how.setWordWrap(True)
+            row = {"path": path, "name": name, "type": typ, "side": side, "how": how, "guess": g,
+                   "auto_name": g["name"]}
+            typ.currentIndexChanged.connect(lambda _=0, row=row: self._type_changed(row))
+            side.currentIndexChanged.connect(lambda _=0, row=row: self._update_how(row))
+            for c, w in enumerate((f, name, typ, side, how)):
+                grid.addWidget(w, r, c)
+            self.rows.append(row)
+            self._type_changed(row)
+        grid.setColumnStretch(4, 1)
+        box = QWidget()
+        box.setLayout(grid)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setWidget(box)
+        v.addWidget(sc, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Add bones")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self.resize(980, min(160 + 40 * len(paths), 620))
+
+    def _type_changed(self, row) -> None:
+        k = row["type"].currentData()
+        row["side"].setEnabled(J.SEGMENT_TYPES[k].anatomical)
+        if row["name"].text().strip() in ("", row["auto_name"]):        # not edited: follow the bone
+            row["auto_name"] = default_bone_name(k, row["path"])
+            row["name"].setText(row["auto_name"])
+        self._update_how(row)
+
+    def _update_how(self, row) -> None:
+        g = row["guess"]
+        k, sd = row["type"].currentData(), row["side"].currentData()
+        if k != g["type"]:
+            t = "Bone set by you"
+        elif g["type_guessed"]:
+            t = "Bone from the file name"
+        else:
+            t = "Bone not recognised: set to General"
+        if not J.SEGMENT_TYPES[k].anatomical:
+            s = ""
+        elif sd != g["side"]:
+            s = "side set by you"
+        elif g["side_guessed"]:
+            s = "side from the file name"
+        else:
+            s = "side not in the file name: check it"
+        warn = (k == g["type"] and not g["type_guessed"]) or (s.startswith("side not") and sd == g["side"])
+        row["how"].setText(t + (f"; {s}" if s else ""))
+        row["how"].setObjectName("Warn" if warn else "Muted")
+        row["how"].setStyleSheet("")          # re-polish for the new object name
+        row["how"].style().unpolish(row["how"])
+        row["how"].style().polish(row["how"])
+
+    def values(self) -> list[dict]:
+        """[{"path", "name", "type", "side"}] in file order."""
+        return [{"path": r["path"], "name": r["name"].text().strip() or r["auto_name"],
+                 "type": r["type"].currentData(), "side": r["side"].currentData()} for r in self.rows]
+
 
 class AddJointDialog(QDialog):
     """Pick a joint definition and the two segments it connects."""
@@ -647,11 +765,18 @@ class ModelBuilderTab(QWidget):
         return it
 
     def _placeholder(self, parent, text):
-        it = self._item(text, None, color="#7A8291")
+        # the section's own kind, so right-clicking the hint opens that section's menu (Model Builder #9)
+        it = self._item(text, parent.data(0, KIND), color="#7A8291")
         f = it.font(0)
         f.setItalic(True)
         it.setFont(0, f)
         parent.addChild(it)
+
+    # "Axes: …" row in the navigator (Model Builder #8): grey italics until applied, green once applied,
+    # amber when the definition has changed since
+    AXES_ITEM: ClassVar[dict] = {"none": ("#7A8291", "Not applied yet."), "applied": ("#8FD3A9", "Applied."),
+                                 "changed": ("#F2C48D", "Changed since applied: Apply to update."),
+                                 "failed": ("#F2C48D", "Applied, but the current definition doesn't give axes.")}
 
     STATUS_MARK: ClassVar[dict] = {"applied": "✓ ", "changed": "◐ ", "failed": "◐ ", "none": "○ "}
 
@@ -702,10 +827,17 @@ class ModelBuilderTab(QWidget):
                 current = si
             if any(x is s for x in pair):
                 pair_items.append(si)
-            if auto:
-                am = AA.AUTO_METHODS.get(s.axes_source)
-                si.addChild(self._item("Axes: " + J.axes_source_title(s.axes_source), "axesinfo", s,
-                                       color="#B78AF0", tip=am.summary if am else J.AAFACT_TITLE))
+            st = self.model.status(s.name)
+            am = AA.AUTO_METHODS.get(s.axes_source)
+            color, tip = self.AXES_ITEM[st]
+            ai = self._item("Axes: " + J.axes_source_title(s.axes_source), "axesinfo", s, color=color,
+                            tip=tip + " " + (am.summary if am else J.AAFACT_TITLE if s.axes_source == "aafact"
+                                             else "Placed by hand from the landmarks below."))
+            if st == "none":
+                f = ai.font(0)
+                f.setItalic(True)
+                ai.setFont(0, f)
+            si.addChild(ai)
             for d in s.stype.landmarks:
                 done = self.model.landmark(s.name, d.key) is not None
                 if auto and not done:
@@ -981,10 +1113,7 @@ class ModelBuilderTab(QWidget):
         p.buttons([("Replace…", lambda: self.load_surface(s))])
         # 2 bone
         p.section("2  Bone")
-        items = []
-        for title, keys in BONE_GROUPS:
-            items += [(k, (f"{title} · " if title != "Any bone" else "") + J.SEGMENT_TYPES[k].title) for k in keys]
-        p.combo("Bone", items, s.type, lambda k: self.set_segment_type(s, k),
+        p.combo("Bone", bone_items(), s.type, lambda k: self.set_segment_type(s, k),
                 tip="Which bone this is: it decides the methods offered for its axes. General works for any bone.")
         if t.anatomical:
             p.combo("Side", [("right", "Right"), ("left", "Left")], s.side, lambda v: self._set_side(s, v),
@@ -995,6 +1124,12 @@ class ModelBuilderTab(QWidget):
         sources = m.axes_sources(s.name)
         p.combo("Method", sources, s.axes_source, lambda src: self.set_axes_source(s, src),
                 tip="An automatic method fitted to the surface, or landmarks you place")
+        g = MG.guide(s.axes_source, t)
+        if g.needs:
+            p.value("Needs", g.needs)
+        for i, step in enumerate(g.steps, 1):
+            p.note(f"{i}  {step}")
+        p.buttons([("Instructions…", lambda: self.show_method_instructions(s))])
         # 4 define
         p.section("4  Define")
         if s.axes_source == "landmarks":
@@ -1072,6 +1207,54 @@ class ModelBuilderTab(QWidget):
                 p.note(ref)
         p.section("")
         p.buttons([("Remove bone", lambda: self.remove_segment(s))], danger="Remove bone")
+
+    def method_instructions_html(self, s: J.Segment) -> str:
+        """Full instructions for the bone's axes method: needs, steps, cautions, how it works, references."""
+        from html import escape
+
+        g = MG.guide(s.axes_source, s.stype)
+        am = AA.AUTO_METHODS.get(s.axes_source)
+        parts = [f"<h3>{escape(J.axes_source_title(s.axes_source))}</h3>"]
+        if g.needs:
+            parts.append(f"<p><b>Needs:</b> {escape(g.needs)}</p>")
+        parts.append("<p><b>What to do</b></p><ol>" + "".join(f"<li>{escape(x)}</li>" for x in g.steps) + "</ol>")
+        if g.cautions:
+            parts.append("<p><b>Good to know</b></p><ul>" + "".join(f"<li>{escape(x)}</li>" for x in g.cautions)
+                         + "</ul>")
+        how = am.summary if am else (s.stype.axes_note if s.axes_source == "landmarks" else "")
+        if how:
+            parts.append(f"<p><b>How it works:</b> {escape(how)}</p>")
+        refs = am.references if am else (s.stype.references if s.axes_source == "landmarks" else ())
+        if s.axes_source == "aafact":
+            from ..core import aafact as AF
+            refs = (AF.PETERSON,)
+        if refs:
+            parts.append("<p><b>References</b></p><ul>" + "".join(f"<li>{escape(r)}</li>" for r in refs) + "</ul>")
+        return "".join(parts)
+
+    def show_method_instructions(self, s: J.Segment) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Instructions: {s.name}")
+        v = QVBoxLayout(dlg)
+        lab = QLabel(self.method_instructions_html(s))
+        lab.setWordWrap(True)
+        lab.setTextFormat(Qt.RichText)
+        lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        box = QWidget()
+        bl = QVBoxLayout(box)
+        bl.addWidget(lab)
+        bl.addStretch(1)
+        sc.setWidget(box)
+        v.addWidget(sc, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        dlg.resize(560, 520)
+        self._instructions = dlg          # kept for scripts and screenshots
+        dlg.show()
 
     def _props_aafact(self, s: J.Segment) -> None:
         from ..core import aafact as AF
@@ -1288,22 +1471,34 @@ class ModelBuilderTab(QWidget):
         self._rebuild_tree()
 
     # ---- bones from surfaces
-    def add_surfaces(self, paths=None, voxel_size=None) -> list:
-        """Add a bone for each surface file (asking for files if none are given). The bone's type and side are
-        guessed from the file name (e.g. AUT_Left_Femur.stl: a left femur); General if it can't be told."""
+    def add_surfaces(self, paths=None, voxel_size=None, confirm: bool | None = None, choices=None) -> list:
+        """Add a bone for each surface file (asking for files if none are given).
+
+        The bone's type and side are guessed from the file name (e.g. AUT_Left_Femur.stl: a left femur;
+        General if it can't be told), then shown in a dialog to check and change (``confirm``; on by
+        default when the files are chosen here). ``choices`` ([{"name", "type", "side"}] per file)
+        skips the guesses, as the dialog does.
+        """
+        fallback = next((x.side for x in self.model.segments if x.side in ("right", "left")), "right")
         if paths is None:
             paths, _ = QFileDialog.getOpenFileNames(self, "Add bones: choose their surfaces", "", MODEL_FILTER)
             if not paths:
                 return []
+            confirm = True if confirm is None else confirm
+        if choices is None and confirm:
+            dlg = ConfirmBonesDialog(self, paths, fallback)
+            if dlg.exec() != QDialog.Accepted:
+                return []
+            choices = dlg.values()
+        if choices is None:
+            choices = [{k: guess_bone(p, fallback)[k] for k in ("name", "type", "side")} for p in paths]
         added = []
-        for path in paths:
+        for path, ch in zip(paths, choices, strict=True):
             bm = self._build_surface(path, voxel_size)
             if bm is None:
                 continue
-            typ = J.guess_segment_type(Path(path).name) or "generic"
-            side = _guess_side(Path(path).name) or next(
-                (x.side for x in self.model.segments if x.side in ("right", "left")), "right")
-            name = J.SEGMENT_TYPES[typ].title if typ != "generic" else Path(path).stem
+            typ, side = ch["type"], ch["side"]
+            name = self.model._unique(ch["name"], {x.name for x in self.model.segments})
             seg = self.model.add_segment(typ, name, side)
             seg.surface = bm
             added.append(seg)

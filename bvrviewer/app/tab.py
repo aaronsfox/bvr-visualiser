@@ -1986,35 +1986,57 @@ class VisualiserTab(QWidget):
         if path:
             self.scene.screenshot(path)
 
-    def export_video(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Export video", f"{self.state.name}.mp4", "MP4 video (*.mp4)")
-        if not path:
-            return
-        fps, ok = QInputDialog.getInt(self, "Video frame rate", "Frames per second in the video:", 30, 1, 120)
-        if not ok:
-            return
-        import imageio.v2 as imageio
+    def export_video(self, path=None, options=None) -> bool:
+        """Export the playback as an MP4: the 3D view and/or the X-ray camera views (Visualiser #15).
+
+        Asks for the options (``video_export.VideoExportDialog``) and the file unless given.
+        """
+        from .video_export import ExportOptions, FrameComposer, VideoExportDialog
 
         n = self.scene.n_frames
-        prog = QProgressDialog("Exporting video…", "Cancel", 0, n, self)
+        ncam = sum(c.calibration is not None and c.images is not None for c in self.state.cameras)
+        if options is None:
+            last = getattr(self, "_video_options", None)
+            if last is not None:
+                last.first, last.last = min(last.first, n - 1), min(last.last, n - 1)
+            dlg = VideoExportDialog(self, n, ncam, last or ExportOptions(content="both" if ncam else "3d",
+                                                                          last=n - 1))
+            if dlg.exec() != QDialog.Accepted:
+                return False
+            options = dlg.options()
+            self._video_options = options
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(self, "Export video", f"{self.state.name}.mp4", "MP4 video (*.mp4)")
+            if not path:
+                return False
+        import imageio.v2 as imageio
+
+        frames = range(options.first, options.last + 1)
+        prog = QProgressDialog("Exporting video…", "Cancel", 0, len(frames), self)
         prog.setWindowModality(Qt.WindowModal)
         start = self.scene.frame
+        comp = FrameComposer(self, options)
+        ok = True
         try:
-            writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=8, macro_block_size=1)
-            for f in range(n):
-                if prog.wasCanceled():
-                    break
-                self.scene.update_frame(f)
-                img = self.plotter.screenshot(return_img=True)
-                h, w = img.shape[:2]
-                writer.append_data(img[: h - h % 2, : w - w % 2])
-                prog.setValue(f + 1)
-                QApplication.processEvents()
-            writer.close()
+            writer = imageio.get_writer(path, fps=options.fps, codec="libx264", quality=8, macro_block_size=1)
+            try:
+                for k, f in enumerate(frames):
+                    if prog.wasCanceled():
+                        ok = False
+                        break
+                    writer.append_data(comp.frame(f))
+                    prog.setValue(k + 1)
+                    QApplication.processEvents()
+            finally:
+                writer.close()
         except Exception as e:  # noqa: BLE001
             self._error("Video export failed", str(e))
-        prog.close()
-        self.scene.update_frame(start)
+            ok = False
+        finally:
+            comp.close()
+            prog.close()
+            self.scene.update_frame(start)
+        return ok
 
     def close_tab(self) -> None:
         self.timer.stop()

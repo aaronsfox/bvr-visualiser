@@ -563,14 +563,49 @@ def _staple_result(r, prims, quality) -> AutoResult:
     return res
 
 
+_SMOOTH_CACHE: list = []       # [(mesh, n_points, smoothed)]
+
+
+def _smoothed(mesh):
+    for m, n, sm in _SMOOTH_CACHE:
+        if m is mesh and n == mesh.n_points:
+            return sm
+    sm = mesh.smooth_taubin(n_iter=60, pass_band=0.05)
+    _SMOOTH_CACHE.insert(0, (mesh, mesh.n_points, sm))
+    del _SMOOTH_CACHE[2:]
+    return sm
+
+
 def _staple_run(fn, mesh, side, options, **kw):
+    """Run a STAPLE function; if it fails, run it again on a smoothed copy of the surface.
+
+    Surfaces made from TIF volumes are rougher than the STL models (stair-steps from the slice
+    spacing), which can leave GIBOC's articular-surface filters with nothing. Smoothing
+    (Taubin, which keeps the volume) fixes that; STL surfaces that fit first time are untouched.
+    """
     from .staple import StapleError
 
-    try:
-        return fn(_staple_tri(mesh), _staple_side(side), flip_ap=bool(options.get("flip_ap")),
+    side = _staple_side(side)
+
+    def go(m):
+        return fn(_staple_tri(m), side, flip_ap=bool(options.get("flip_ap")),
                   flip_long=bool(options.get("flip_long")), **kw)
-    except StapleError as err:
-        raise JointModelError(str(err)) from err
+
+    try:
+        return go(mesh)
+    except (StapleError, np.linalg.LinAlgError, IndexError, ValueError, FloatingPointError) as first:
+        try:
+            r = go(_smoothed(mesh))
+        except StapleError as err:
+            raise JointModelError(str(err)) from err
+        except (np.linalg.LinAlgError, IndexError, ValueError, FloatingPointError) as err:
+            raise JointModelError(
+                "The fit failed on this surface (it couldn't find the features it looks for, even after "
+                "smoothing the surface). Check the bone type and side, or use another method. "
+                f"Details: {type(err).__name__}: {err}") from first
+        r.notes = [*r.notes, ("Fitted to a smoothed copy of the surface: the original was too rough for this "
+                              "method (common for surfaces made from TIF volumes).")]
+        return r
 
 
 def staple_femur(fit):
@@ -782,8 +817,45 @@ AUTO_METHODS: dict[str, AutoMethod] = {m.key: m for m in [
 ]}
 
 
+_PART_CACHE: list = []         # [(mesh, n_points, part, (pieces dropped, share of the surface))]
+
+
+def bone_part(mesh, min_share: float = 0.02):
+    """The surface without its small loose pieces: (mesh, pieces dropped, fraction of triangles dropped).
+
+    Surfaces made from TIF partial volumes carry thousands of specks of thresholded noise
+    besides the bone. The STAPLE methods take volume and inertia over the whole surface, so
+    the specks give NaNs ("SVD did not converge") or extra cross-sections ("3 sections at the
+    largest slice"). Pieces with at least ``min_share`` of the largest piece's triangles are
+    kept, so a separate fibula stays.
+    """
+    for m, n, part, info in _PART_CACHE:
+        if m is mesh and n == mesh.n_points:
+            return (part, *info)
+    conn = mesh.connectivity("all")
+    reg = np.asarray(conn.cell_data["RegionId"])
+    counts = np.bincount(reg) if reg.size else np.zeros(1, int)
+    keep = np.nonzero(counts >= min_share * counts.max())[0]
+    if len(keep) == len(counts):
+        part, info = mesh, (0, 0.0)
+    else:
+        part = conn.remove_cells(np.nonzero(~np.isin(reg, keep))[0]).clean()
+        part.point_data.pop("RegionId", None)
+        part.cell_data.pop("RegionId", None)
+        info = (len(counts) - len(keep), float(1 - counts[keep].sum() / counts.sum()))
+    _PART_CACHE.insert(0, (mesh, mesh.n_points, part, info))
+    del _PART_CACHE[4:]
+    return (part, *info)
+
+
 def run(method_key: str, mesh, side: str, options: dict | None = None) -> AutoResult:
     if method_key not in AUTO_METHODS:
         raise JointModelError(f"Unknown automatic method {method_key!r}.")
     m = AUTO_METHODS[method_key]
-    return m.fn(mesh, side, options or {})
+    part, dropped, share = bone_part(mesh)
+    if part.n_cells == 0:
+        raise JointModelError("The surface is empty.")
+    res = m.fn(part, side, options or {})
+    if dropped:
+        res.quality["Loose pieces ignored"] = f"{dropped} ({share:.1%} of the surface)"
+    return res

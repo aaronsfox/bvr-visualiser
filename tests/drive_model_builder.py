@@ -424,4 +424,162 @@ ab.select_pair(tib_a, tal)                       # the tibia's axes aren't appli
 assert any("Apply the axes of Tibia" in w.text() for w in ab.props.findChildren(type(ab.hint)))
 shot("mb_12_pair_not_applied")
 print("ANKLE OK", flush=True)
+
+# ---- Model Builder requests 3-9 (11 Nov 2026) -------------------------------------------------------------
+from PySide6.QtWidgets import QComboBox, QLabel  # noqa: E402
+
+from bvrviewer.app.model_builder import ConfirmBonesDialog, bone_items  # noqa: E402
+
+win.open_tool("model_builder")
+pump(0.3)
+rb = win.current()
+assert rb.kind == "model_builder" and not rb.model.segments
+
+# #4: bone names only, with the two tibias told apart
+titles = [t for _, t in bone_items()]
+assert not any("·" in t for t in titles) and "Proximal tibia (knee)" in titles and "Distal tibia (ankle)" in titles
+
+# #3: what each surface was taken to be, shown to check and change
+files = [K / "Models" / "AUT_Left_Femur.stl", K / "Models" / "AUT_Left_Tibia.stl",
+         A / "SOL001A_tib_aligned.stl", Path("scan_0042.stl")]
+dlg = ConfirmBonesDialog(rb, files)
+dlg.show()
+pump(0.3)
+dlg.grab().save(str(OUT / "mb_20_confirm_bones.png"))
+v = dlg.values()
+assert [(x["name"], x["type"], x["side"]) for x in v[:2]] == [("Femur", "femur", "left"), ("Tibia", "tibia", "left")]
+assert v[3]["type"] == "generic" and v[3]["name"] == "scan_0042"
+assert "not recognised" in dlg.rows[3]["how"].text()
+row = dlg.rows[2]                                   # the ankle's tibia guesses as a knee tibia: change it
+row["type"].setCurrentIndex(row["type"].findData("tibia_distal"))
+assert dlg.values()[2]["type"] == "tibia_distal" and dlg.values()[2]["name"] == "Tibia"
+assert "set by you" in row["how"].text()
+row["name"].setText("Shank")
+row["type"].setCurrentIndex(row["type"].findData("talus"))
+assert dlg.values()[2]["name"] == "Shank"           # an edited name stays
+dlg.close()
+segs = rb.add_surfaces(files[:2], choices=[{"name": "Femur", "type": "femur", "side": "left"},
+                                           {"name": "Knee tibia", "type": "tibia", "side": "left"}])
+assert [s.name for s in segs] == ["Femur", "Knee tibia"]
+fem3, tib3 = segs
+pump(0.3)
+
+
+def nav_item(text):
+    it = rb.tree.findItems(text, Qt.MatchContains | Qt.MatchRecursive)
+    return it[0] if it else None
+
+
+# #8: the Axes row is grey italics until applied, green once applied, amber after a change
+ax = nav_item("Axes: GIBOC-Cylinder")
+assert ax.foreground(0).color().name().upper() == "#7A8291" and ax.font(0).italic()
+assert rb.apply_axes(fem3)
+ax = nav_item("Axes: GIBOC-Cylinder")
+assert ax.foreground(0).color().name().upper() == "#8FD3A9" and not ax.font(0).italic()
+rb._toggle_option(fem3, "flip_ap")
+fem3.auto_update = False
+rb._toggle_option(fem3, "flip_ap")
+rb._toggle_option(fem3, "flip_ap")
+if rb.model.status("Femur") == "changed":
+    assert nav_item("Axes: GIBOC-Cylinder").foreground(0).color().name().upper() == "#F2C48D"
+fem3.auto_update = True
+rb._toggle_option(fem3, "flip_ap")
+pump(0.2)
+
+# #9: right-clicking the hint rows opens their section's menu
+from bvrviewer.app import model_builder as MBm  # noqa: E402
+
+ph = nav_item("Ctrl+click two bones")
+
+assert ph.data(0, MBm.KIND) == "joints"
+acts = [a.text() for a in rb.build_menu(ph.data(0, MBm.KIND)).actions()]
+assert acts == ["Add joint…"], acts
+
+
+# #5: change dropdowns with real clicks in their popups (the sheet is rebuilt after each one)
+def prop_widget(label_text):
+    g = rb.props.grid
+    for i in range(g.count()):
+        w = g.itemAt(i).widget()
+        if isinstance(w, QLabel) and w.text() == label_text:
+            r, _c, _, _ = g.getItemPosition(i)
+            return g.itemAtPosition(r, 1).widget()
+    return None
+
+
+def pick(label_text, text):
+    c = prop_widget(label_text)
+    assert isinstance(c, QComboBox), label_text
+    idx = c.findText(text, Qt.MatchContains)
+    assert idx >= 0, (text, [c.itemText(i) for i in range(c.count())])
+    view = c.view()
+    for _ in range(100):                 # the last popup has finished closing
+        if not view.window().isVisible():
+            break
+        pump(0.02)
+    c.showPopup()
+    for _ in range(100):
+        pump(0.02)
+        if view.window().isVisible():
+            break
+    pump(0.3)
+    view.scrollTo(view.model().index(idx, 0))
+    pump(0.2)
+    QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, view.visualRect(view.model().index(idx, 0)).center())
+    pump(0.6)
+    now = prop_widget(label_text)
+    assert text in now.currentText(), (label_text, text, now.currentText())
+
+
+rb.select("segment", fem3)
+pump(0.3)
+pick("Method", "Landmarks")
+assert fem3.axes_source == "landmarks"
+pump(0.2)
+win.grab().save(str(OUT / "mb_21_landmarks_steps.png"))
+pick("Method", "GIBOC-Spheres")
+assert fem3.axes_source == "staple_femur_spheres"
+pick("Bone", "General")
+assert fem3.type == "generic"
+pick("Bone", "Femur")
+assert fem3.type == "femur"
+pick("Side", "Right")
+assert fem3.side == "right"
+pick("Side", "Left")
+
+# #6: what each method needs and what to do, under the Method dropdown, and the full instructions
+assert prop_widget("Needs") is not None and "distal femur" in prop_widget("Needs").text()
+win.grab().save(str(OUT / "mb_22_method_steps.png"))
+rb.show_method_instructions(fem3)
+pump(0.3)
+rb._instructions.grab().save(str(OUT / "mb_23_instructions.png"))
+html = rb.method_instructions_html(fem3)
+assert "What to do" in html and "Modenese" in html, html[:300]
+rb._instructions.close()
+rb.select("segment", tib3)
+rb.set_axes_source(tib3, "staple_tibia_ellipse")
+assert "Plateau or Kai" in rb.method_instructions_html(tib3)
+
+# #7: automatic methods on surfaces made from the knee sample's TIF partial volumes
+tifs = rb.add_surfaces([K / "Volumes" / "Left_Femur.tif", K / "Volumes" / "Left_Tibia.tif"],
+                       voxel_size=(0.223, 0.223, 0.625),
+                       choices=[{"name": "Femur (TIF)", "type": "femur", "side": "left"},
+                                {"name": "Tibia (TIF)", "type": "tibia", "side": "left"}])
+ftif, ttif = tifs
+for s, methods in ((ftif, ("staple_femur_cylinder", "staple_femur_spheres", "staple_femur_ellipsoids")),
+                   (ttif, ("staple_tibia_kai", "staple_tibia_plateau", "staple_tibia_ellipse",
+                           "staple_tibia_centroids"))):
+    for meth in methods:
+        rb.set_axes_source(s, meth)
+        assert rb.apply_axes(s) and s.acs is not None, (meth, s.error)
+        assert "Loose pieces ignored" in s.auto.quality, s.auto.quality
+        print("TIF", s.name, meth, "ok", s.auto.quality["Loose pieces ignored"], flush=True)
+rb.set_axes_source(ftif, "staple_femur_kai")
+assert not rb.apply_axes(ftif) and "whole femur" in ftif.error
+rb.set_axes_source(ftif, "staple_femur_cylinder")
+rb.apply_axes(ftif)
+rb.select("segment", ttif)
+pump(0.3)
+win.grab().save(str(OUT / "mb_24_tif_tibia_applied.png"))
+print("REQUESTS OK", flush=True)
 win.close()

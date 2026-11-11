@@ -20,7 +20,7 @@ class XrayCamera:
     visible: bool = True
     name: str = "X-ray"
     show_plane: bool = True          # radiograph on its detector plane in the 3D scene
-    show_source: bool = True         # X-ray source marker
+    show_source: bool = False        # X-ray source marker (off for new cameras: Visualiser #14)
     show_beams: bool = False         # lines from the source to the image corners
     store_path: Path | None = None   # display copies saved with the session (core.radiograph_store)
 

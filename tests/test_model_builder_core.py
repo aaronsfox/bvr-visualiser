@@ -136,3 +136,64 @@ def test_joints_that_fit_two_bones():
     assert m.joint_types_for("Calcaneus", "Tibia")[0][0] == "ankle_complex_isb"
     general = m.joint_types_for("X", "Talus")
     assert [k for k, *_ in general] == ["jcs_zxy", "cardan_xyz"] and general[0][1:] == ("X", "Talus")
+
+
+# ---------- Model Builder #3, #4, #6 (11 Nov 2026)
+
+def test_guess_bone_names_and_flags():
+    from bvrviewer.app.model_builder import guess_bone
+
+    g = guess_bone("AUT_Left_Tibia.stl")
+    assert (g["type"], g["side"], g["name"], g["type_guessed"], g["side_guessed"]) == \
+        ("tibia", "left", "Tibia", True, True)
+    g = guess_bone("tib_distal.stl", fallback_side="left")
+    assert (g["type"], g["name"], g["side"], g["side_guessed"]) == ("tibia_distal", "Tibia", "left", False)
+    g = guess_bone("scan_0042.stl")
+    assert (g["type"], g["name"], g["type_guessed"]) == ("generic", "scan_0042", False)
+
+
+def test_bone_dropdown_lists_bone_names_only():
+    from bvrviewer.app.model_builder import bone_items
+
+    items = bone_items()
+    assert [k for k, _ in items] == list(dict.fromkeys(k for k, _ in items))        # each bone once
+    assert {k for k, _ in items} == set(J.SEGMENT_TYPES)
+    titles = dict(items)
+    assert titles["tibia"] == "Proximal tibia (knee)" and titles["tibia_distal"] == "Distal tibia (ankle)"
+    assert not any("·" in t for t in titles.values())
+    m = J.KinematicModel()
+    assert m.add_segment("tibia_distal").name == "Tibia"                                # names stay short
+
+
+@pytest.mark.parametrize("type_key", list(J.SEGMENT_TYPES))
+def test_every_axes_method_has_instructions(type_key):
+    from bvrviewer.core import method_guide as MG
+
+    m = J.KinematicModel()
+    s = m.add_segment(type_key)
+    for key, _title in m.axes_sources(s.name):
+        g = MG.guide(key, s.stype)
+        assert g.needs and len(g.steps) >= 2, (type_key, key)
+        assert any("Apply" in x for x in g.steps), (type_key, key)
+
+
+def test_partial_tibia_caution_for_unstable_methods():
+    from bvrviewer.core import method_guide as MG
+
+    t = J.SEGMENT_TYPES["tibia"]
+    for k in ("staple_tibia_ellipse", "staple_tibia_centroids"):
+        assert any("Plateau or Kai" in c for c in MG.guide(k, t).cautions)
+    for k in ("staple_tibia_plateau", "staple_tibia_kai"):
+        assert not any("Plateau or Kai" in c for c in MG.guide(k, t).cautions)
+
+
+def test_side_kept_when_a_bone_goes_through_general():
+    m = J.KinematicModel()
+    f = m.add_segment("femur", "Femur", "left")
+    m.set_segment_type("Femur", "generic")
+    assert f.side == "none"
+    m.set_segment_type("Femur", "femur")
+    assert f.side == "left"
+    c = m.add_segment("generic", "Calc")                  # loaded as General, then said to be a calcaneus
+    m.set_segment_type("Calc", "calcaneus")
+    assert c.side == "left"                               # the other bones' side

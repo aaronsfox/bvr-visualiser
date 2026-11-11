@@ -299,6 +299,9 @@ def TriOpenMesh(TRsup: Tri, TRin: Tri, nbElmts) -> Tri:
 
 def TriConnectedPatch(TR: Tri, PtsInitial) -> Tri:
     """The part of TR connected (through shared edges) to the vertices nearest PtsInitial."""
+    if TR.n_faces == 0:
+        raise StapleError("An articular surface came out empty: the surface around it is too rough or "
+                          "isn't where the method expects it.")
     nodes = np.unique(TR.nearestNeighbor(PtsInitial))
     faces = TR.vertexAttachments(nodes)
     ncomp, lab = sparse.csgraph.connected_components(TR._face_adj(), directed=False)
@@ -409,6 +412,9 @@ def TriInertiaPpties(Tr: Tri):
         (d2 * (x0 * g0z + x1 * g1z + x2 * g2z)).sum()])
     intg *= np.array([1 / 6, 1 / 24, 1 / 24, 1 / 24, 1 / 60, 1 / 60, 1 / 60, 1 / 120, 1 / 120, 1 / 120])
     mass = intg[0]
+    if not np.isfinite(mass) or abs(mass) < 1e-9:
+        # an open or flat piece (e.g. a sliver left by a cut) encloses no volume
+        raise StapleError("A surface piece encloses no volume, so its inertia can't be computed.")
     C = np.array([intg[1], intg[2], intg[3]]) / mass
     I = np.zeros((3, 3))
     I[0, 0] = intg[5] + intg[6] - mass * (C[[1, 2]] @ C[[1, 2]])

@@ -87,6 +87,16 @@ when `whole=False` is passed:
     with a whole-bone model; the knee's flexion axis (femur Z) is unaffected. The femur's hip frame is
     not produced.
 
+Robustness (11 Nov 2026, for surfaces made from TIF partial volumes; outside `staple/` unless noted):
+
+15. Before any STAPLE function runs, `auto_axes.bone_part` drops loose pieces of the surface smaller
+    than 2% of the largest piece (thresholding noise), which otherwise gave NaN mass properties.
+16. If a STAPLE function fails, `auto_axes._staple_run` runs it once more on a Taubin-smoothed copy of
+    the surface (60 iterations, pass band 0.05) and adds a note saying so.
+17. `TriInertiaPpties` raises `StapleError` for a piece that encloses no volume (e.g. a sliver left by a
+    cut), so `TriSplitObjects` gives it zero volume instead of failing in `eigh`; `TriConnectedPatch`
+    raises `StapleError` for an empty surface instead of an `IndexError`.
+
 ## Validation
 
 `tests/test_staple.py` checks the translation against the joint frames in STAPLE's own reference

@@ -307,7 +307,7 @@ SEGMENT_TYPES: dict[str, SegmentType] = {t.key: t for t in [
     ), "isb_femur", ("staple_femur_cylinder", "staple_femur_spheres", "staple_femur_ellipsoids", "staple_femur_kai"),
         True,
         "Origin at the epicondyle midpoint; Y towards the superior point; Z right; X anterior.", (WU2002,)),
-    SegmentType("tibia", "Tibia", (
+    SegmentType("tibia", "Proximal tibia (knee)", (
         LandmarkDef("MC", "Medial condyle", "Most medial point of the medial tibial condyle (plateau rim).",
                     ("point", "region")),
         LandmarkDef("LC", "Lateral condyle", "Most lateral point of the lateral tibial condyle (plateau rim).",
@@ -319,7 +319,7 @@ SEGMENT_TYPES: dict[str, SegmentType] = {t.key: t for t in [
                       "aafact"),
         True,
         "Origin at the condyle midpoint; Y from the distal point to the origin; Z right; X anterior.", (WU2002,)),
-    SegmentType("tibia_distal", "Tibia (distal: ankle)", (
+    SegmentType("tibia_distal", "Distal tibia (ankle)", (
         LandmarkDef("MM", "Medial malleolus", "Most distal point (tip) of the medial malleolus.", ("point", "region")),
         LandmarkDef("LM", "Lateral malleolus", "Most distal point (tip) of the lateral malleolus. If the fibula isn't "
                     "part of this surface, use the lateral edge of the tibial plafond.", ("point", "region")),
@@ -612,7 +612,8 @@ class KinematicModel:
 
     def add_segment(self, type_key: str, name: str | None = None, side: str = "right") -> Segment:
         t = SEGMENT_TYPES[type_key]
-        seg = Segment(name=self._unique(name or t.title, {s.name for s in self.segments}), type=type_key,
+        seg = Segment(name=self._unique(name or ("Tibia" if type_key in ("tibia", "tibia_distal") else t.title),
+                                       {s.name for s in self.segments}), type=type_key,
                       side=side if t.anatomical else "none")
         seg.axes_source = t.auto_methods[0] if t.auto_methods else "landmarks"
         seg.applied = not self.require_apply
@@ -631,7 +632,14 @@ class KinematicModel:
         keep = {d.key for d in t.landmarks}
         s.type = type_key
         s.landmarks = {k: v for k, v in s.landmarks.items() if k in keep}
-        s.side = (s.side if s.side in ("right", "left") else "right") if t.anatomical else "none"
+        if s.side in ("right", "left"):
+            s._last_side = s.side
+        if not t.anatomical:
+            s.side = "none"
+        elif s.side not in ("right", "left"):
+            # back from General: the side it had, else the other bones' side, else right
+            others = [x.side for x in self.segments if x is not s and x.side in ("right", "left")]
+            s.side = getattr(s, "_last_side", None) or (others[0] if others else "right")
         s.axes_source = t.auto_methods[0] if t.auto_methods else "landmarks"
         s.auto_options, s.imported = {}, None
         s.applied = not self.require_apply

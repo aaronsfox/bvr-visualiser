@@ -207,19 +207,23 @@ class CameraViews(QWidget):
             s = self._shapes[id(m)] = _BoneShape(m)
         return s
 
-    def update_frame(self, frame: int) -> None:
-        if not self.isVisible():
-            return
-        self._sync_cameras()
+    def render_args(self) -> tuple:
+        """(models, shapes, lut, overlay, opacity) for CameraView.update_view, as the panels draw them."""
         st = self.scene.state.settings
         models = [m for m in self.scene.state.models if m.tracking is not None and self._shape(m) is not None]
         live = {id(m) for m in self.scene.state.models}
         for k in [k for k in self._shapes if k not in live]:
             del self._shapes[k]
         shapes = {id(m): self._shapes[id(m)] for m in models}
-        lut = self.scene._lut()
+        return models, shapes, self.scene._lut(), st.overlay, st.overlay_opacity
+
+    def update_frame(self, frame: int) -> None:
+        if not self.isVisible():
+            return
+        self._sync_cameras()
+        args = self.render_args()
         for view in self.views:
-            view.update_view(frame, models, shapes, lut, st.overlay, st.overlay_opacity)
+            view.update_view(frame, *args)
 
     def fit_all(self) -> None:
         for view in self.views:

@@ -152,3 +152,42 @@ def test_model_with_automatic_axes_and_scan_reference(tmp_path):
     flex = [r["angles"][0] for r in ok]
     print("flexion at frame 1 by method pair:", np.round(flex, 1))
     assert np.ptp(flex) < 15
+
+
+# ---------- Model Builder #7: surfaces made from TIF partial volumes (11 Nov 2026)
+
+def test_bone_part_drops_loose_specks_but_keeps_large_pieces():
+    bone = pv.Cylinder(radius=10, height=80, resolution=60).triangulate().clean().subdivide(3)
+    fibula = pv.Cylinder(center=(25, 0, 0), radius=4, height=60, resolution=30).triangulate().clean().subdivide(2)
+    specks = [pv.Sphere(radius=0.4, center=(40 + 2 * i, 0, 0), theta_resolution=4, phi_resolution=4)
+              for i in range(30)]
+    mesh = bone.merge([fibula, *specks]).clean()
+    part, dropped, share = AA.bone_part(mesh)
+    assert dropped == 30 and 0 < share < 0.2
+    assert part.n_cells == bone.n_cells + fibula.n_cells
+    same, n, _ = AA.bone_part(bone)
+    assert same is bone and n == 0
+
+
+@sample
+@pytest.mark.parametrize("bone, methods", [
+    ("Femur", ("staple_femur_cylinder", "staple_femur_spheres", "staple_femur_ellipsoids")),
+    ("Tibia", ("staple_tibia_kai", "staple_tibia_plateau", "staple_tibia_ellipse", "staple_tibia_centroids"))])
+def test_staple_methods_on_tif_surfaces(bone, methods):
+    """The knee sample's TIF partial volumes: thousands of noise specks and a rougher surface than the STLs.
+    Every GIBOC/Kai method runs, and the robust ones agree with their result on the STL."""
+    from bvrviewer.core.models import BoneModel
+
+    K = SAMPLE / "Knee_SampleData"
+    bm = BoneModel(name=bone, path=K / "Volumes" / f"Left_{bone}.tif", voxel_size=(0.223, 0.223, 0.625))
+    bm.build()
+    stl = pv.read(K / "Models" / f"AUT_Left_{bone}.stl")
+    for key in methods:
+        r = AA.run(key, bm.mesh, "left")
+        assert "Loose pieces ignored" in r.quality
+        if key in ("staple_tibia_ellipse", "staple_tibia_centroids"):
+            continue                    # unstable on a partial tibia (see method_guide); only that it runs
+        ref = AA.run(key, stl, "left").acs
+        for k in range(3):
+            assert _angle(r.acs[:3, k], ref[:3, k]) < 5, (key, k)
+        assert np.linalg.norm(r.acs[:3, 3] - ref[:3, 3]) < 5, key
