@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .models import BoneModel
 
-SESSION_VERSION = 1
+SESSION_VERSION = 2              # 2: trials (Visualiser #16)
 
 
 @dataclass
@@ -90,7 +90,7 @@ class XrayCamera:
                 **({"radiographs": str(self.store_path)} if self.store_path else {})}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "XrayCamera":
+    def from_dict(cls, d: dict) -> XrayCamera:
         return cls(calibration_path=Path(d["calibration_path"]), source_kind=d["source_kind"],
                    source=[Path(p) for p in d["source"]], first_image=0,
                    visible=d.get("visible", True), name=d.get("name", "X-ray"),
@@ -152,7 +152,7 @@ class KinItem:
                 "seg_reference": self.seg_reference}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "KinItem":
+    def from_dict(cls, d: dict) -> KinItem:
         if "joint_key" in d:                          # version-1 sessions held joints of a template model
             names = {"femur": "Femur", "tibia": "Tibia", "proximal": "Proximal bone", "distal": "Distal bone"}
             return cls(model_path=Path(d["model_path"]), kind="joint",
@@ -174,38 +174,166 @@ class KinItem:
         return [self.model_map.get(n) for n in self.segment_names()]
 
 
-@dataclass
-class TabState:
-    name: str = "Untitled tab"
+@dataclass(eq=False)
+class Trial:
+    """One trial in a Visualiser tab: its bones (with tracking), X-ray cameras and joints (Visualiser #16).
+
+    Each trial keeps its own bones, model and cameras, so trials from different participants can sit in one
+    tab. ``fps``, ``hold_still`` and ``frame`` are the trial's own scene settings, restored when it's shown.
+    """
+
+    name: str = "Trial 1"
     models: list[BoneModel] = field(default_factory=list)
     cameras: list[XrayCamera] = field(default_factory=list)
-    settings: SceneSettings = field(default_factory=SceneSettings)
-    joints: list[KinItem] = field(default_factory=list)     # segments and joints from models
-    originals: dict = field(default_factory=dict)  # files used from a session's data folder -> where they came from
+    joints: list[KinItem] = field(default_factory=list)
+    fps: float = 30.0
+    hold_still: str | None = None
+    frame: int = 0
+    cfg_path: Path | None = None          # the Autoscoper .cfg it was imported from
+    tracking_dir: Path | None = None      # the folder its tracking files were chosen from
 
     def to_dict(self) -> dict:
+        return {"name": self.name, "models": [m.to_dict() for m in self.models],
+                "cameras": [c.to_dict() for c in self.cameras], "joints": [j.to_dict() for j in self.joints],
+                "fps": self.fps, "hold_still": self.hold_still, "frame": self.frame,
+                "cfg_path": str(self.cfg_path) if self.cfg_path else None,
+                "tracking_dir": str(self.tracking_dir) if self.tracking_dir else None}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Trial:
+        return cls(name=d.get("name", "Trial 1"), models=[BoneModel.from_dict(m) for m in d.get("models", [])],
+                   cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])],
+                   joints=[KinItem.from_dict(j) for j in d.get("joints", [])], fps=d.get("fps", 30.0),
+                   hold_still=d.get("hold_still"), frame=int(d.get("frame", 0) or 0),
+                   cfg_path=Path(d["cfg_path"]) if d.get("cfg_path") else None,
+                   tracking_dir=Path(d["tracking_dir"]) if d.get("tracking_dir") else None)
+
+
+class _NoTrialList(list):
+    """Stands in for a list of the trial being shown when there is no trial: empty to read, and adding to it
+    first adds a trial ("Trial 1"), so code written for one set of bones keeps working."""
+
+    def __init__(self, state, key):
+        super().__init__()
+        self._state, self._key = state, key
+
+    def _real(self) -> list:
+        return getattr(self._state.trial or self._state.add_trial("Trial 1"), self._key)
+
+    def append(self, x):
+        self._real().append(x)
+
+    def extend(self, xs):
+        self._real().extend(xs)
+
+    def insert(self, i, x):
+        self._real().insert(i, x)
+
+
+class TabState:
+    """A Visualiser tab: its trials (one shown at a time) and the tab-wide scene settings.
+
+    ``models``, ``cameras`` and ``joints`` are those of the trial being shown (when there is no trial they read
+    as empty, and adding to them first adds "Trial 1"). Older code and sessions that hold one set
+    of bones, cameras and joints become a single trial.
+    """
+
+    def __init__(self, name: str = "Untitled tab", models=None, cameras=None, joints=None,
+                 settings: SceneSettings | None = None, trials: list[Trial] | None = None, active: int | None = None):
+        self.name = name
+        self.settings = settings or SceneSettings()
+        self.trials: list[Trial] = list(trials or [])
+        if models or cameras or joints:
+            self.trials.append(Trial(name="Trial 1", models=list(models or []), cameras=list(cameras or []),
+                                     joints=list(joints or []), fps=self.settings.fps,
+                                     hold_still=self.settings.hold_still))
+        self.active = (0 if self.trials else -1) if active is None else active
+        self.originals: dict = {}      # files used from a session's data folder -> where they came from
+
+    # ---- the trial being shown
+    @property
+    def trial(self) -> Trial | None:
+        return self.trials[self.active] if 0 <= self.active < len(self.trials) else None
+
+    def _list(self, key):
+        t = self.trial
+        return getattr(t, key) if t is not None else _NoTrialList(self, key)
+
+    def _set_list(self, key, value):
+        setattr(self.trial or self.add_trial("Trial 1"), key, list(value))
+
+    models = property(lambda self: self._list("models"), lambda self, v: self._set_list("models", v))
+    cameras = property(lambda self: self._list("cameras"), lambda self, v: self._set_list("cameras", v))
+    joints = property(lambda self: self._list("joints"), lambda self, v: self._set_list("joints", v))
+
+    def unique_trial_name(self, name: str) -> str:
+        names = {t.name for t in self.trials}
+        if name not in names:
+            return name
+        k = 2
+        while f"{name} ({k})" in names:
+            k += 1
+        return f"{name} ({k})"
+
+    def add_trial(self, name: str = "Trial 1", trial: Trial | None = None) -> Trial:
+        """Add a trial (a new empty one called ``name``, or ``trial``); the first one becomes the one shown."""
+        t = trial or Trial(name=name, fps=self.settings.fps)
+        t.name = self.unique_trial_name(t.name)
+        self.trials.append(t)
+        self.active = max(self.active, 0)
+        return t
+
+    def trial_of(self, obj) -> Trial | None:
+        """The trial holding a bone, camera, joint or trial."""
+        for t in self.trials:
+            if obj is t or any(obj is x for x in (*t.models, *t.cameras, *t.joints)):
+                return t
+        return None
+
+    # ---- files
+    def to_dict(self) -> dict:
+        t = self.trial
+        if t is not None:                     # the shown trial's settings live in the scene settings
+            t.fps, t.hold_still = self.settings.fps, self.settings.hold_still
         return {"version": SESSION_VERSION, "tool": "visualiser", "name": self.name,
-                "models": [m.to_dict() for m in self.models],
-                "cameras": [c.to_dict() for c in self.cameras],
-                "joints": [j.to_dict() for j in self.joints],
+                "trials": [x.to_dict() for x in self.trials], "active": self.active,
                 "settings": self.settings.__dict__.copy()}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "TabState":
+    def from_dict(cls, d: dict) -> TabState:
         s = SceneSettings()
         for k, v in d.get("settings", {}).items():
             if hasattr(s, k):
                 setattr(s, k, v)
-        return cls(name=d.get("name", "Untitled tab"),
-                   models=[BoneModel.from_dict(m) for m in d.get("models", [])],
-                   cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])], settings=s,
-                   joints=[KinItem.from_dict(j) for j in d.get("joints", [])])
+        name = d.get("name", "Untitled tab")
+        if "trials" in d:
+            trials = [Trial.from_dict(t) for t in d["trials"]]
+            active = d.get("active", 0) if trials else -1
+        elif d.get("models") or d.get("cameras") or d.get("joints"):
+            # version 1: one set of bones, cameras and joints -> one trial named after the session
+            trials = [Trial(name=name, models=[BoneModel.from_dict(m) for m in d.get("models", [])],
+                            cameras=[XrayCamera.from_dict(c) for c in d.get("cameras", [])],
+                            joints=[KinItem.from_dict(j) for j in d.get("joints", [])], fps=s.fps,
+                            hold_still=s.hold_still)]
+            active = 0
+        else:
+            trials, active = [], -1
+        st = cls(name=name, settings=s, trials=trials, active=min(active, len(trials) - 1))
+        if st.trial is not None:
+            s.fps, s.hold_still = st.trial.fps, st.trial.hold_still
+        return st
 
 
 # ---------------------------------------------------------------- saving and opening
 # Path fields of a session (dict form), with the data-folder subfolder each kind of file is copied to.
 def _path_fields(d: dict):
-    """(holder, key, kind) for every file path in a session dict."""
+    """(holder, key, kind) for every file path in a session dict (every trial's, or a version-1 session's)."""
+    for t in d.get("trials", []):
+        yield from _path_fields(t)
+        if t.get("cfg_path"):
+            yield t, "cfg_path", "config"
+        if t.get("tracking_dir"):
+            yield t, "tracking_dir", "folder"
     for m in d.get("models", []):
         yield m, "path", "bones"
         yield m, "tfm_path", "transforms"
@@ -248,7 +376,7 @@ def session_files(state: TabState) -> list[Path]:
     out = []
     for holder, key, kind in _path_fields(state.to_dict()):
         v = holder[key]
-        if v and kind not in ("radiographs", "saved radiographs") and Path(v) not in out:
+        if v and kind not in ("radiographs", "saved radiographs", "folder") and Path(v) not in out:
             out.append(Path(v))
     return out
 
@@ -276,7 +404,8 @@ def save_session(state: TabState, path: str | Path, radiographs: bool = False, a
     d = state.to_dict()
     originals: dict[str, str] = {}
     report = {"data_folder": None, "files": 0, "radiographs": 0, "bytes": 0}
-    cams = [c for c in state.cameras if c.images is not None] if radiographs else []
+    all_cams = [(t, c) for t in state.trials for c in t.cameras]
+    cams = [c for _t, c in all_cams if c.images is not None] if radiographs else []
     copies = session_files(state) if all_files else []
     total = len(copies) + sum(len(c.images) for c in cams)
     done = 0
@@ -294,7 +423,7 @@ def save_session(state: TabState, path: str | Path, radiographs: bool = False, a
         used: set[Path] = set()
         for holder, key, kind in _path_fields(d):
             v = holder[key]
-            if not v or kind in ("radiographs", "saved radiographs"):
+            if not v or kind in ("radiographs", "saved radiographs", "folder"):
                 continue
             src = Path(v)
             if src not in where:
@@ -316,11 +445,14 @@ def save_session(state: TabState, path: str | Path, radiographs: bool = False, a
             rel = _rel(where[src], base)
             holder[key] = rel
             originals[rel] = state.originals.get(str(src), str(src))
-    for cam, cd in zip(state.cameras, d["cameras"]):
+    cam_dicts = [cd for td in d["trials"] for cd in td["cameras"]]
+    several = len(state.trials) > 1
+    for (trial, cam), cd in zip(all_cams, cam_dicts, strict=True):
         cd.pop("radiographs", None)
-        if cam not in cams:
+        if not any(cam is c for c in cams):
             continue
-        dst = data / "radiographs" / f"{_safe(cam.name)}{SUFFIX}"
+        stem = f"{_safe(trial.name)} - {_safe(cam.name)}" if several else _safe(cam.name)
+        dst = data / "radiographs" / f"{stem}{SUFFIX}"
         cur = getattr(cam.images, "_store", None)
         if cur is not None and cam.images.store_kind == "session" and cur.path.resolve() == dst.resolve():
             tick(f"{cam.name}: already saved", len(cam.images))          # re-saving the same session

@@ -42,9 +42,47 @@ Adding a tool: describe it in `bvrviewer/app/tools.py` (it then appears on the S
 
 ## Using the Visualiser
 
-The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** lists what's in the tab under **Bones**, **X-ray cameras**, **Joints** and **Scene**. Below it, **Properties** shows the settings of whatever is selected there. The 3D view and timeline are on the right. **Right-click** any level or item in the navigator for its actions.
+The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** lists the tab's **Trials**, each with its own **Bones**, **X-ray cameras** and **Joints**, then the **Scene**. Below it, **Properties** shows the settings of whatever is selected there. The 3D view and timeline are on the right. **Right-click** any level or item in the navigator for its actions.
 
-1. **Open a Visualiser tab** from the Start page (or File → New tab → Visualiser, Ctrl+T; any tool can be opened this way, or from "+ New tab"). Each tab starts empty.
+### Trials
+
+A tab holds any number of **trials**. Each trial has its own bones (with their tracking), X-ray cameras, coordinate systems and joints, so trials from different participants can sit in one tab. **One trial is shown at a time**: the 3D view, camera views, timeline and curves all show it. Its frame, frame rate and held-still bone are kept with it.
+
+- **A new tab** shows only **+ Add trial…** in the navigator. Click it, or use the buttons in the view, or File → **Import trial…** (Ctrl+I) / **Empty trial…**:
+  - **Import trial…** opens the Trial setup wizard (below).
+  - **Empty trial…** asks for a name; then add bones, tracking and cameras from the navigator as described further down.
+- **Show a trial:** double-click it, or select it and press **Show**. Selecting anything inside another trial (a bone, a camera) also shows that trial. The shown trial has a filled green dot. Trials you switch away from keep everything they've loaded, so switching back is instant. A trial's radiographs are read the first time it's shown.
+- **Right-click a trial** for:
+  - **Show this trial**;
+  - **Configure…**: the setup dialog, as tabs, to change its name, bones, tracking files and cameras;
+  - **Duplicate for another trial…**: the wizard, starting from this trial's bones, coordinate systems, joints and camera calibrations, so you only choose the new tracking folder and radiographs;
+  - **Rename** and **Remove trial**.
+- Commands such as Add bone, Load model, Add X-ray camera and Export video act on the trial shown. Adding bones to a tab without trials first adds "Trial 1".
+- **Saving** a session saves every trial. Sessions saved before trials existed open as one trial named after the session.
+
+**Trial setup wizard.** Four pages, filled in automatically where possible and all editable; **Back** / **Next**, then **Add trial**. Configure… shows the same pages as tabs, with **Apply**.
+1. **Source:**
+   - the trial's name;
+   - what to **start from**: an Autoscoper **.cfg** (its volumes become the bones, with their voxel size and flip, and its calibrations and radiograph folders become the X-ray cameras, exactly as the .cfg lists them), **another trial** in the tab, or **nothing**;
+   - the **tracking folder** (found next to the .cfg when there is one, e.g. `Tracking` or `Tracking_SAM`);
+   - an optional **Model Builder model**, whose coordinate systems and joints are added for the bones it matches (by surface file, then by name: e.g. Femur on `AUT_Left_Femur.stl` → bone `Left_Femur`). If the bone's surface isn't the file the model was built on, you're reminded to check they share a model space.
+
+   The trial is named after what its tracking files share (`T0019_jog0001_tib.tra`, … → `T0019_jog0001`), unless you've typed a name.
+2. **Bones:** one row per bone:
+   - include (untick to leave it out), name, surface (with the voxel size for TIFs), colour;
+   - **tracking file**: matched by name after removing the part all the files share (`T0019_jog0001_tib.tra` → `tib`). Choose another, "(none)", or **Other file…** from the dropdown;
+   - **Check**: frames and tracked frames per file, in amber when a file's frame count differs from the other bones', when two bones use the same file, or when the format looks wrong.
+
+   **Tracking format…** sets how the files were saved from Autoscoper (applies to every bone); unused tracking files are listed. **+ Add bone…** adds surfaces, and ✕ removes a row.
+3. **X-ray cameras:**
+   - one row per camera: include, name, calibration (format and image size), radiograph folder (number and size of images; **Folder…** to change it), and **Marker** (off by default);
+   - **Preview** draws the bones, at their first tracked frame, on that camera's first radiograph: if they sit on their shadows, the calibration, images and tracking match;
+   - **Radiographs:** read them all when the trial is first shown (recommended), or read each one as its frame is shown.
+4. **Review:** a summary, anything to fix first (missing files, a voxel size, a name already used, a camera without its radiographs) and anything to check (in amber).
+
+### Bones, tracking and cameras by hand
+
+1. **Open a Visualiser tab** from the Start page (or File → New tab → Visualiser, Ctrl+T; any tool can be opened this way, or from "+ New tab"), and add a trial (above).
 2. **Add a bone:** right-click **Bones → Add bone…** (or File → Add bone). STL, OBJ, PLY, VTK or TIF; you can select several at once. Each bone is listed by name, which starts as its file name.
    - Or **load a model** built in the Model Builder: right-click **Bones → Load model…** (or File → Load model, Ctrl+M). This brings in all of the model's bones (from the surface files it was built on; bones already in the tab with the same surface file are reused), each with its coordinate system, and all its joints. Then load each bone's tracking for the trial.
    - **TIF partial volumes** ask for the voxel size, which TIFs don't store. Type it in, or read it from the trial's `.cfg`. The surface is built from the edge of the masked volume, which reproduces SlicerAutoscoperM's `AUT_*.stl` meshes. TIF bones can also be shown as a volume rendering (Display as: Volume).
@@ -60,6 +98,8 @@ The Visualiser tab is laid out like OpenSim. On the left, the **Navigator** list
 
 | Select… | Properties | Right-click |
 |---|---|---|
+| **Trials** | number of trials, the one shown | Import trial, Empty trial |
+| a **trial** | name, shown or not, bones, frames, cameras, joints, the .cfg and tracking folder it came from; Show, Configure…, Duplicate…, Remove | show, configure, duplicate for another trial, rename, remove |
 | **Bones** | count, frames | Add bone, Load model, Show all, Hide all |
 | a **bone** | name, colour, opacity, visible, display; hold this bone still; surface file details | load tracking, load coordinate system, hold still, show/hide, rename, replace surface file, .tfm or voxel size, remove |
 | its **Tracking** | file, rows, trial frames it covers, untracked frames, format | load file / load new file, refresh current file, format and frames, hold still, remove |
@@ -235,7 +275,7 @@ STAPLE_REPO=/path/to/msk-STAPLE pytest tests/test_staple.py   # the STAPLE trans
 
 `BVR_SAMPLE_DATA` is a folder holding the three unzipped SlicerAutoscoperM sample datasets (`2025-02-19-Wrist`, `2025-01-12-Ankle`, `Knee_SampleData`). Download them from https://github.com/BrownBiomechanics/Autoscoper/releases/tag/sample-data.
 
-`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_assessor.py` simulates three raters (two sessions each) from the ankle sample's tracking, fills the grid (leaving one gap), and checks the Assessor Evaluation tab in every mode, including the N/A results, exports and the project file. `tests/drive_radiographs.py` reads a 300-frame, two-camera trial from a simulated slow drive (progress bar, Skip, the local cache, a session saved with its radiographs and files and opened without the originals). `tests/test_calibration_mayacam1.py` checks MayaCam 1.x against an independent re-implementation of Autoscoper's camera model. `tests/drive_requests.py` checks the features from `feature_requests/REQUESTS_VISUALISER.md` (tab menus, typed slider values, curve labels, the tracking prompt, Tracking/Axes rows, frame offsets, camera views) on the wrist data. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep; it also checks the Add bones dialog, changing dropdowns by clicking in their popups, the method instructions, the navigator's Axes row colours and the STAPLE methods on the knee sample's TIF volumes. `tests/drive_video_export.py` exports the ankle jog in each layout and checks the videos. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
+`tests/drive_gui.py` drives the real window on the wrist and ankle data and saves screenshots. `tests/drive_assessor.py` simulates three raters (two sessions each) from the ankle sample's tracking, fills the grid (leaving one gap), and checks the Assessor Evaluation tab in every mode, including the N/A results, exports and the project file. `tests/drive_radiographs.py` reads a 300-frame, two-camera trial from a simulated slow drive (progress bar, Skip, the local cache, a session saved with its radiographs and files and opened without the originals). `tests/test_calibration_mayacam1.py` checks MayaCam 1.x against an independent re-implementation of Autoscoper's camera model. `tests/drive_requests.py` checks the features from `feature_requests/REQUESTS_VISUALISER.md` (tab menus, typed slider values, curve labels, the tracking prompt, Tracking/Axes rows, frame offsets, camera views) on the wrist data. `tests/drive_model_builder.py` builds a knee model (bones with automatic and landmark axes, the joint, the method comparison and reference poses, then loading it in the Visualiser) on the knee sample by clicking and painting in the viewport, then checks the joint angles in a Visualiser tab against a known flexion sweep; it also checks the Add bones dialog, changing dropdowns by clicking in their popups, the method instructions, the navigator's Axes row colours and the STAPLE methods on the knee sample's TIF volumes. `tests/drive_video_export.py` exports the ankle jog in each layout and checks the videos. `tests/drive_trials.py` checks trials: the empty tab, the Trial setup wizard on the ankle and knee samples (matching, checks, camera preview, review), Duplicate, a Model Builder model, switching trials, Configure…, and saving and reopening a session with three trials. `python -m bvrviewer --selftest SAMPLE_DIR out.png` checks that a build can load and render the wrist sample.
 
 ## Building the app
 
@@ -254,4 +294,6 @@ The Linux build is about 1.1 GB unzipped, most of it VTK.
 - Calibration: MayaCam 2.0 and 1.x. VTK camera (.json) files are detected and reported as unsupported.
 - `VolumeFlip` values other than 0 0 0 are applied but haven't been tested against real data.
 - Units in .tra files can't be detected; they default to Autoscoper's mm and degrees.
+- Trials keep what they've loaded while hidden, so memory adds up across trials: each TIF bone keeps its volume (for volume display; about 250 MB per bone for the ankle sample's volumes) and each camera up to 1.2 GB of radiograph display copies. Surfaces are shared between trials with the same file and settings (e.g. a duplicated trial). Remove trials you no longer need.
+- Only one trial is shown at a time; showing several together (e.g. different raters) is planned (Visualiser #18). Tracking files holding several bones aren't split by the wizard yet (#19).
 - The through-X-ray view frames the image approximately (bones and image always line up exactly).

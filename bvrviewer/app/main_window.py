@@ -106,6 +106,8 @@ class MainWindow(QMainWindow):
         self._act(f, "Start page", self.show_start, "Ctrl+Shift+T")
         self._new_tab_menu(f.addMenu("New tab"), with_shortcuts=True)
         f.addSeparator()
+        self._act(f, "Import trial…", self._vis("import_trial"), "Ctrl+I")
+        self._act(f, "Empty trial…", self._vis("add_empty_trial"))
         self._act(f, "Add bone…", self._vis("add_models"), "Ctrl+O")
         self._act(f, "Load model…", self._vis("load_full_model"), "Ctrl+M")
         self._act(f, "Open saved session…", self.open_session, "Ctrl+Shift+O")
@@ -181,7 +183,7 @@ class MainWindow(QMainWindow):
 
     def open_session(self) -> None:
         tab = self.current()
-        if not isinstance(tab, VisualiserTab) or tab.state.models or tab.state.cameras:
+        if not isinstance(tab, VisualiserTab) or tab.state.trials:
             tab = self.new_visualiser_tab()
         tab.open_session()
 
@@ -216,7 +218,7 @@ class MainWindow(QMainWindow):
                                          QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
                 if r == QMessageBox.Cancel or (r == QMessageBox.Save and not tab.save_model()):
                     return
-        elif getattr(tab.state, "models", None) and QMessageBox.question(
+        elif (getattr(tab.state, "trials", None) or getattr(tab.state, "models", None)) and QMessageBox.question(
                 self, "Close tab", f"Close “{tab.state.name}”? Unsaved settings will be lost.") != QMessageBox.Yes:
             return
         tab.close_tab()

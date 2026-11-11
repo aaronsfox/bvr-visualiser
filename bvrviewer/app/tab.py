@@ -17,14 +17,17 @@ from pyvistaqt import QtInteractor
 from ..core import joints as J
 from ..core.config import read_cfg
 from ..core.models import PALETTE, BoneModel, ModelError, is_volume_file
-from ..core.session import KinItem, TabState, XrayCamera, load_session, save_session
+from ..core.session import KinItem, TabState, Trial, XrayCamera, load_session, save_session
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError
 from .camera_views import OVERLAYS, CameraViews
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
 from .joint_panel import JointCurves, SegmentMapDialog, curve_labels, guess_segment_map, write_csv, zeroed
 from .model_builder import add_triad
-from .navigator import AXES, CAMERA, CAMERAS, JOINT, JOINTS, MODEL, MODELS, SCENE, TRACKING, Navigator, PropertySheet
+from .navigator import (
+    ADD_TRIAL, AXES, CAMERA, CAMERAS, JOINT, JOINTS, MODEL, MODELS, SCENE, TRACKING, TRIAL, TRIALS, Navigator,
+    PropertySheet,
+)
 from .panels import Timeline, h2, label
 from .scene import SceneController
 
@@ -60,8 +63,8 @@ class _Relay(QObject):
 
 
 class EmptyState(QFrame):
-    addModel = Signal()
-    loadModel = Signal()
+    importTrial = Signal()
+    emptyTrial = Signal()
     openSession = Signal()
 
     def __init__(self):
@@ -70,22 +73,22 @@ class EmptyState(QFrame):
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignCenter)
         box = QWidget()
-        box.setMaximumWidth(560)
+        box.setMaximumWidth(580)
         v = QVBoxLayout(box)
         v.setSpacing(18)
-        title = QLabel("Build up this tab one bone at a time")
+        title = QLabel("Add a trial to start")
         title.setObjectName("Big")
         title.setWordWrap(True)
         v.addWidget(title)
-        v.addWidget(label("Everything in the tab is listed in the navigator on the left. Right-click an item "
-                          "there for its actions, and select it to edit its properties below."))
+        v.addWidget(label("A trial holds its bones (with their tracking), X-ray cameras and joints. A tab can hold "
+                          "several trials, listed in the navigator on the left; one is shown at a time."))
         for n, head, body in [
-            (1, "Add a bone", "Right-click Bones (or use the button below). STL surfaces or TIF partial volumes; "
-                              "the file name becomes the bone's name, which you can change. Or load a model from the "
-                              "Model Builder to bring in all its bones, coordinate systems and joints at once."),
-            (2, "Load its tracking file", "Right-click Tracking under the bone and choose Load file…. You're "
-                                          "asked how it was saved from Autoscoper (pre-filled from the file)."),
-            (3, "Set how it looks", "Select the bone to change its colour, opacity and display in Properties."),
+            (1, "Import a trial", "Choose the trial's Autoscoper .cfg (its bones and X-ray cameras) and the folder "
+                                  "with its tracking files. You then check each bone's tracking file and colour, and "
+                                  "the cameras, before the trial is built."),
+            (2, "Or add an empty trial", "Give it a name, then add bones, tracking and cameras yourself from the "
+                                         "navigator (right-click Bones or X-ray cameras)."),
+            (3, "Add more trials", "Use + Add trial… in the navigator. Double-click a trial to show it."),
         ]:
             r = QHBoxLayout()
             num = QLabel(str(n))
@@ -101,24 +104,34 @@ class EmptyState(QFrame):
             r.addLayout(col, 1)
             v.addLayout(r)
         r = QHBoxLayout()
-        add = QPushButton("+  Add bone (STL / TIF)")
-        add.setObjectName("Primary")
-        add.setMinimumHeight(40)
-        add.clicked.connect(self.addModel.emit)
-        lm = QPushButton("Load model…")
-        lm.setMinimumHeight(40)
-        lm.setToolTip("A model from the Model Builder: its bones, coordinate systems and joints")
-        lm.clicked.connect(self.loadModel.emit)
+        imp = QPushButton("+  Import trial…")
+        imp.setObjectName("Primary")
+        imp.setMinimumHeight(40)
+        imp.setToolTip("From an Autoscoper .cfg and its tracking files")
+        imp.clicked.connect(self.importTrial.emit)
+        emp = QPushButton("Empty trial…")
+        emp.setMinimumHeight(40)
+        emp.setToolTip("A trial with a name only: add its bones and cameras yourself")
+        emp.clicked.connect(self.emptyTrial.emit)
         op = QPushButton("Open saved session…")
         op.setMinimumHeight(40)
         op.clicked.connect(self.openSession.emit)
-        r.addWidget(add)
-        r.addWidget(lm)
+        r.addWidget(imp)
+        r.addWidget(emp)
         r.addWidget(op)
         r.addStretch(1)
         v.addLayout(r)
-        v.addWidget(label("Tip: select several files at once and each is added as a bone."))
+        self.trial_note = label("")
+        self.trial_note.setVisible(False)
+        v.addWidget(self.trial_note)
         outer.addWidget(box)
+
+    def set_trial(self, name: str | None) -> None:
+        """Note when the shown trial exists but has no bones yet."""
+        self.trial_note.setVisible(bool(name))
+        if name:
+            self.trial_note.setText(f"“{name}” has no bones yet: right-click Bones under it in the navigator to add "
+                                    "one, or use Configure… on the trial.")
 
 
 PCT = (100, 0, "%")     # slider value box for 0–1 fractions shown as percentages
@@ -149,6 +162,7 @@ class VisualiserTab(QWidget):
         self._joint_actors: dict = {}                   # id(item) -> [(actor list, model, acs)]
         self._kin_models: dict = {}                     # model file path -> KinematicModel
         self.tracking_format: dict | None = None        # tracking options remembered for this tab (not saved)
+        self._scene_trial: Trial | None = None          # the trial whose bones and cameras are in the 3D scene
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -218,8 +232,8 @@ class VisualiserTab(QWidget):
 
         self.stack = QStackedWidget()
         self.empty = EmptyState()
-        self.empty.addModel.connect(self.add_models)
-        self.empty.loadModel.connect(self.load_full_model)
+        self.empty.importTrial.connect(lambda: self.import_trial())
+        self.empty.emptyTrial.connect(lambda: self.add_empty_trial())
         self.empty.openSession.connect(self.open_session)
         self.stack.addWidget(self.empty)
         self.plotter = QtInteractor(self.stack)
@@ -270,7 +284,7 @@ class VisualiserTab(QWidget):
         self.nav.visibilityToggled.connect(self._toggle_visible)
         self.nav.axesToggled.connect(self._toggle_axes)
         self.nav.renamed.connect(self._rename)
-        self.nav.activated.connect(lambda _k, cam: self.set_xray_view(self.state.cameras.index(cam)))
+        self.nav.activated.connect(self._nav_activated)
         for key, fn in [(Qt.Key_Space, lambda: self.timeline.play.toggle()),
                         (Qt.Key_Right, lambda: self.timeline.step(1)), (Qt.Key_Left, lambda: self.timeline.step(-1))]:
             sc = QShortcut(QKeySequence(key), self)
@@ -293,6 +307,8 @@ class VisualiserTab(QWidget):
         from .dialogs import cache_settings
 
         cams = [c for c in cams if c.images is not None]
+        for c in cams:
+            c._read_once = True                     # (a trial's cameras are read the first time it's shown)
         mode, limit = cache_settings()
         for c in cams:                              # a copy in the local cache, if the originals are unchanged
             im = c.images
@@ -479,6 +495,7 @@ class VisualiserTab(QWidget):
         """Bring the navigator, properties, timeline and view buttons in line with the state."""
         has = bool(self.state.models)
         self.stack.setCurrentIndex(1 if has else 0)
+        self.empty.set_trial(self.state.trial.name if self.state.trial is not None and not has else None)
         self.view_bar.setVisible(has)
         self.hint.setVisible(has)
         self.timeline.set_count(self.scene.n_frames)
@@ -489,6 +506,10 @@ class VisualiserTab(QWidget):
             self.sel_kind, self.sel_obj = CAMERAS, None
         if self.sel_kind == JOINT and not any(j is self.sel_obj for j in self.state.joints):
             self.sel_kind, self.sel_obj = JOINTS, None
+        if self.sel_kind == TRIAL and not any(t is self.sel_obj for t in self.state.trials):
+            self.sel_kind, self.sel_obj = TRIALS, None
+        if self.sel_kind in (MODELS, CAMERAS, JOINTS) and self.sel_obj is not self.state.trial:
+            self.sel_kind, self.sel_obj = (TRIALS, None) if self.state.trial is None else (self.sel_kind, None)
         self.refresh_joints()
         self.nav.rebuild(self.state, self.sel_kind, self.sel_obj)
         self.show_properties()
@@ -546,7 +567,30 @@ class VisualiserTab(QWidget):
         self.frame_info.setText(txt)
 
     # ---------------------------------------------------------------- navigator
+    def _trial_for(self, kind: str, obj) -> Trial | None:
+        """The trial a navigator item belongs to (None for Trials, Add trial and Scene)."""
+        if kind in (MODELS, CAMERAS, JOINTS, TRIAL):
+            return obj
+        if kind in (MODEL, TRACKING, AXES, CAMERA, JOINT):
+            return self.state.trial_of(obj)
+        return None
+
+    def _nav_activated(self, kind: str, obj) -> None:
+        if kind == TRIAL:
+            self.show_trial(obj)
+        elif kind == CAMERA:
+            if self.state.trial_of(obj) is not self.state.trial:
+                self.show_trial(self.state.trial_of(obj), select=(CAMERA, obj))
+            self.set_xray_view(self.state.cameras.index(obj))
+
     def _nav_selected(self, kind: str, obj) -> None:
+        t = self._trial_for(kind, obj)
+        if kind != TRIAL and t is not None and t is not self.state.trial:
+            # an item of a trial that isn't shown: show that trial, then select the item
+            QTimer.singleShot(0, lambda: self.show_trial(t, select=(kind, obj)))
+            return
+        if kind in (MODELS, CAMERAS, JOINTS):
+            obj = None                              # the shown trial's section
         self.sel_kind, self.sel_obj = kind, obj
         if kind in (MODEL, TRACKING) and obj is not self.selected:
             self.select(obj, from_nav=True)
@@ -572,6 +616,15 @@ class VisualiserTab(QWidget):
             self.show_properties()
 
     def _rename(self, obj, name: str) -> None:
+        if isinstance(obj, Trial):
+            name = name.strip()
+            if name and name != obj.name:
+                others = TabState(trials=[t for t in self.state.trials if t is not obj])
+                obj.name = others.unique_trial_name(name)
+            self.nav.refresh_obj(TRIAL, obj)
+            if obj is self.sel_obj:
+                self.props.title.setText(obj.name)
+            return
         if isinstance(obj, KinItem):
             obj.label = name
             self.nav.refresh_obj(JOINT, obj)
@@ -599,6 +652,11 @@ class VisualiserTab(QWidget):
             self.props.title.setText(name)
 
     def _show_menu(self, kind: str, obj, pos) -> None:
+        t = self._trial_for(kind, obj)
+        if kind != TRIAL and t is not None and t is not self.state.trial:
+            self.show_trial(t, select=(kind, obj))
+        if kind in (MODELS, CAMERAS, JOINTS):
+            obj = None
         menu = self.build_menu(kind, obj)
         if not menu.isEmpty():
             menu.exec(pos)
@@ -617,7 +675,18 @@ class VisualiserTab(QWidget):
             menu.addAction(a)
             return a
 
-        if kind == MODELS:
+        if kind in (TRIALS, ADD_TRIAL):
+            add("Import trial…", lambda: self.import_trial())
+            add("Empty trial…", lambda: self.add_empty_trial())
+        elif kind == TRIAL:
+            t: Trial = obj
+            add("Show this trial", lambda: self.show_trial(t), enabled=t is not self.state.trial)
+            add("Configure…", lambda: self.configure_trial(t))
+            add("Duplicate for another trial…", lambda: self.duplicate_trial(t))
+            menu.addSeparator()
+            add("Rename", lambda: self.nav.start_rename(TRIAL, t))
+            add("Remove trial", lambda: self.remove_trial(t))
+        elif kind == MODELS:
             add("Add bone…", self.add_models)
             add("Load model (bones, coordinate systems, joints)…", self.load_full_model)
             menu.addSeparator()
@@ -735,9 +804,53 @@ class VisualiserTab(QWidget):
             self._props_joint(obj)
         elif kind == JOINTS:
             self._props_joints()
+        elif kind == TRIAL and obj is not None:
+            self._props_trial(obj)
+        elif kind in (TRIALS, ADD_TRIAL) or self.state.trial is None:
+            self._props_trials()
         else:
             self._props_models()
         p.finish()
+
+    def _props_trials(self) -> None:
+        p = self.props
+        p.clear("Trials")
+        n = len(self.state.trials)
+        p.value("Trials", str(n) if n else "None yet")
+        if self.state.trial is not None:
+            p.value("Shown", self.state.trial.name)
+        p.note("A trial holds its bones (with tracking), X-ray cameras and joints. One trial is shown at a time: "
+               "double-click a trial in the navigator to show it.")
+        p.buttons([("Import trial…", lambda: self.import_trial()), ("Empty trial…", lambda: self.add_empty_trial())],
+                  primary="Import trial…")
+
+    def _props_trial(self, t: Trial) -> None:
+        p = self.props
+        shown = t is self.state.trial
+        p.clear(t.name, icon_color="#8FD3A9" if shown else None)
+        p.line("Name", t.name, lambda v: self._rename(t, v))
+        p.value("Status", "Shown" if shown else "Not shown", kind="Ok" if shown else "Muted")
+        tracked = sum(1 for m in t.models if m.tracking is not None)
+        p.value("Bones", f"{len(t.models)} ({tracked} with tracking)" if t.models else "None")
+        frames = max((m.tracking.n_frames for m in t.models if m.tracking is not None), default=0)
+        if frames:
+            p.value("Frames", str(frames))
+        p.value("X-ray cameras", str(len(t.cameras)) if t.cameras else "None")
+        p.value("Joints", str(len(t.joints)) if t.joints else "None")
+        if t.cfg_path:
+            p.value("Imported from", Path(t.cfg_path).name, tip=str(t.cfg_path))
+        if t.tracking_dir:
+            p.value("Tracking folder", Path(t.tracking_dir).name, tip=str(t.tracking_dir))
+        items = [] if shown else [("Show", lambda: self.show_trial(t))]
+        items += [("Configure…", lambda: self.configure_trial(t)),
+                  ("Duplicate…", lambda: self.duplicate_trial(t)),
+                  ("Remove", lambda: self.remove_trial(t))]
+        btns = p.buttons(items, danger="Remove", primary=None if shown else "Show")
+        for b, tip in zip(btns, ([] if shown else ["Show this trial"]) +
+                          ["Change its name, bones, tracking files and cameras",
+                           ("A new trial with the same bones, coordinate systems, joints and camera calibrations, "
+                            "for another trial's tracking and radiographs"), "Remove this trial from the tab"]):
+            b.setToolTip(tip)
 
     def _props_models(self) -> None:
         p = self.props
@@ -978,8 +1091,9 @@ class VisualiserTab(QWidget):
         built, errors = res
         first = not self.state.models
         for m in built:
-            self.state.models.append(m)
+            self.state.models.append(m)          # (adds "Trial 1" first in a tab without trials)
             self.scene.add_model(m)
+        self._scene_trial = self.state.trial
         if built:
             self.select(built[-1], refresh=False)
             self.sel_kind, self.sel_obj = MODEL, built[-1]
@@ -1270,6 +1384,7 @@ class VisualiserTab(QWidget):
             self._read_radiographs([dlg.result_camera])
             self.state.cameras.append(dlg.result_camera)
             self.scene.add_camera(dlg.result_camera)
+            self._scene_trial = self.state.trial
             self.sel_kind, self.sel_obj = CAMERA, dlg.result_camera
             self.refresh_all()
             self.scene.update_frame(self.scene.frame)
@@ -1304,6 +1419,296 @@ class VisualiserTab(QWidget):
         self.refresh_all()
         self.scene.update_frame(self.scene.frame)
 
+    # ---------------------------------------------------------------- trials (Visualiser #16, #17)
+    def show_trial(self, t: Trial, select: tuple | None = None) -> None:
+        """Show this trial: its bones, cameras and joints in the 3D view, camera views, timeline and curves.
+
+        The trial shown before keeps everything it has loaded (surfaces, tracking, radiographs), so showing
+        it again is instant; its frame, frame rate and held-still bone are kept with it. A trial's
+        radiographs are read (with the progress bar) the first time it is shown.
+        """
+        st = self.state
+        if not any(x is t for x in st.trials):
+            return
+        if t is not self._scene_trial:
+            self.timeline.play.setChecked(False)
+            old = self._scene_trial
+            if old is not None:
+                if old is st.trial:
+                    old.fps, old.hold_still, old.frame = st.settings.fps, st.settings.hold_still, self.scene.frame
+                for m in old.models:
+                    self.scene.remove_model(m)
+                for c in old.cameras:
+                    self.scene.remove_camera(c)
+            st.active = next(i for i, x in enumerate(st.trials) if x is t)
+            self._scene_trial = t
+            st.settings.fps, st.settings.hold_still = t.fps, t.hold_still
+            self._sync_timeline_settings()
+            self.selected = None
+            self.curve_joint = None
+            self.scene.selected = None
+            if self.scene.view_mode != "3d":
+                self.scene.view_mode = "3d"
+            for m in t.models:
+                if m.mesh is not None:
+                    self.scene.add_model(m)
+            unread = [c for c in t.cameras if c.images is not None and not getattr(c, "_read_once", False)]
+            if unread:
+                self._read_radiographs(unread)
+            for c in t.cameras:
+                if c.images is not None:
+                    self.scene.add_camera(c)
+            for m in t.models:
+                self.scene.refresh_model_style(m)
+        self.sel_kind, self.sel_obj = select if select is not None else (TRIAL, t)
+        if self.sel_kind in (MODELS, CAMERAS, JOINTS):
+            self.sel_obj = None
+        if self.sel_kind in (MODEL, TRACKING) and self.sel_obj is not None:
+            self.selected = self.sel_obj
+            self.scene.selected = self.sel_obj
+        self.refresh_all()
+        frame = min(t.frame, max(self.scene.n_frames - 1, 0))
+        self.timeline.slider.setValue(frame)
+        self.scene.update_frame(frame)
+        if t.models:
+            self.scene.zoom_to_bones()
+
+    def import_trial(self, start_from: Trial | None = None) -> bool:
+        """Open the Trial setup wizard (Visualiser #17) and add the trial it sets up."""
+        from .trial_wizard import TrialSetupDialog
+
+        dlg = TrialSetupDialog(self, mode="new", trials=self.state.trials, start_from=start_from,
+                               taken_names=[t.name for t in self.state.trials])
+        self._trial_dialog = dlg                # (kept for scripts and screenshots)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        self.add_trial_from_draft(dlg.draft)
+        return True
+
+    def duplicate_trial(self, t: Trial) -> bool:
+        """A new trial with this trial's bones, coordinate systems, joints and camera calibrations: the wizard
+        opens on it to choose the new tracking files and radiographs."""
+        return self.import_trial(start_from=t)
+
+    def add_trial_from_draft(self, draft, then=None) -> Trial:
+        """Build and show the trial a Trial setup draft describes (then add its model's axes and joints)."""
+        t = draft.to_trial()
+        t.name = self.state.unique_trial_name(t.name)
+        if not draft.read_radiographs:
+            for c in t.cameras:
+                c._read_once = True           # read as each frame is shown
+
+        def loaded():
+            if draft.model_path:
+                self.apply_model_to_trial(draft.model_path)
+            if then:
+                then()
+
+        self.load_trial(t, then=loaded)
+        return t
+
+    def apply_model_to_trial(self, path) -> list[str]:
+        """Give the shown trial's bones the coordinate systems of a Model Builder model's bones with matching
+        names (or surface files), and add the model's joints between them. Returns the bones given axes."""
+        from ..core.trial import match_segments
+
+        try:
+            self._kin_models.pop(str(Path(path).resolve()), None)
+            km = self._kin_model(path)
+        except Exception as e:  # noqa: BLE001
+            self._error("Couldn't open the model", str(e))
+            return []
+        models = list(self.state.models)
+        smap = guess_segment_map(km, models)
+        rest = [sg for sg in km.segments if sg.acs is not None and sg.name not in smap]
+        free = [m.name for m in models if m.name not in smap.values()]
+        smap.update(match_segments([(sg.name, Path(sg.surface.path).stem if sg.surface else sg.name) for sg in rest],
+                                   free))
+        done = []
+        for sname, mname in smap.items():
+            m = self._model_named(mname)
+            if m is None or km.segment(sname).acs is None:
+                continue
+            m.axes_path, m.axes_segment, m.axes_model = Path(path), sname, km
+            m.axes_reference, m.axes_zero = "first", None
+            done.append(mname)
+        if any(j.proximal in smap and j.distal in smap for j in km.joints):
+            self.load_joint_model_file(path, segment_map=smap, ask=False)
+        else:
+            self.refresh_all()
+        return done
+
+    def configure_trial(self, t: Trial) -> bool:
+        """Change a trial in the Trial setup dialog: its name, bones (surfaces, colours, tracking files), cameras."""
+        from ..core.trial import draft_from_trial
+        from .trial_wizard import TrialSetupDialog
+
+        draft = draft_from_trial(t)
+        draft.read_radiographs = True
+        dlg = TrialSetupDialog(self, draft, mode="configure", trials=self.state.trials,
+                               taken_names=[x.name for x in self.state.trials if x is not t])
+        self._trial_dialog = dlg
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        self.apply_trial_draft(t, dlg.draft)
+        return True
+
+    def apply_trial_draft(self, t: Trial, d, then=None) -> None:
+        """Bring a trial in line with an edited draft. Bones and cameras whose files are unchanged keep what
+        they have loaded (surfaces, radiographs); only new or changed files are read."""
+        from ..core import trial as TR
+
+        shown = t is self._scene_trial
+        models, rebuild, retrack = [], [], []
+        renamed = {}
+        for b in (x for x in d.bones if x.include):
+            src = b.source
+            if src is not None and TR.same_surface(b, src):
+                m = src
+                if m.name != b.name:
+                    renamed[m.name] = b.name
+                m.name, m.color = b.name, b.color
+                new_trk = (Path(b.tracking_path) if b.tracking_path else None, dict(b.tracking_overrides),
+                           b.tracking_volume, b.tracking_offset)
+                if new_trk != (Path(m.tracking_path) if m.tracking_path else None, dict(m.tracking_overrides),
+                               m.tracking_volume, m.tracking_offset):
+                    m.tracking_path, m.tracking_overrides, m.tracking_volume, m.tracking_offset = new_trk
+                    m.tracking = None
+                    retrack.append(m)
+            else:
+                m = TR.bone_model(b)
+                if src is not None and src.name != b.name:
+                    renamed[src.name] = b.name
+                rebuild.append(m)
+            models.append(m)
+        removed = [m for m in t.models if not any(m is x for x in models)]
+        cams, new_cams = [], []
+        for c in (x for x in d.cameras if x.include):
+            src = c.source_cam
+            if src is not None and Path(src.calibration_path) == Path(c.calibration_path) and \
+                    [Path(p) for p in src.source] == TR.camera_source(c) and src.source_kind == c.source_kind:
+                src.name, src.show_source = c.name, c.show_source
+                cams.append(src)
+            else:
+                cam = TR.camera(c)
+                new_cams.append(cam)
+                cams.append(cam)
+        gone_cams = [c for c in t.cameras if not any(c is x for x in cams)]
+        for jl in t.joints:                          # joints refer to bones by name
+            for r, n in list(jl.model_map.items()):
+                if n in renamed:
+                    jl.model_map[r] = renamed[n]
+        if t.hold_still in renamed:
+            t.hold_still = renamed[t.hold_still]
+        if shown and self.state.settings.hold_still in renamed:
+            self.state.settings.hold_still = renamed[self.state.settings.hold_still]
+        t.name = self.state.unique_trial_name(d.name) if d.name != t.name else t.name
+        t.tracking_dir = d.tracking_dir
+        if shown:
+            for m in removed + rebuild:
+                self.scene.remove_model(m)
+        for c in gone_cams:
+            self.scene.forget_camera(c)
+
+        def work():
+            errors = []
+            for m in rebuild:
+                try:
+                    if m.mesh is None:
+                        m.build()
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{m.name}: {e}")
+            for m in rebuild + retrack:
+                if m.tracking_path:
+                    try:
+                        m.load_tracking()
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(f"{m.name} tracking: {e}")
+            return errors
+
+        def done(res, err):
+            problems = [str(err)] if err else list(res)
+            t.models = [m for m in models if m.mesh is not None]
+            ok = []
+            for cam in cams:
+                if any(cam is x for x in new_cams):
+                    try:
+                        cam.build()
+                    except Exception as e:  # noqa: BLE001
+                        problems.append(f"{cam.name}: {e}")
+                        continue
+                ok.append(cam)
+            t.cameras = ok
+            for m in t.models:
+                if m.has_axes and m.axes_model is None:
+                    try:
+                        m.axes_model = self._kin_model(m.axes_path)
+                    except Exception as e:  # noqa: BLE001
+                        problems.append(f"{m.name} coordinate system: {e}")
+            if shown:
+                st = self.state.settings
+                t.fps, t.hold_still, t.frame = st.fps, st.hold_still, self.scene.frame
+                self._scene_trial = None              # put the trial's bones and cameras back in the scene
+                self.show_trial(t, select=(TRIAL, t))
+            else:
+                self.refresh_all()
+            if problems:
+                self._error("Some files couldn't be used", "\n".join(problems))
+            if then:
+                then()
+
+        if rebuild or retrack:
+            self._run(f"{t.name}: loading changes", work, done)
+        else:
+            done([], None)
+
+    @staticmethod
+    def _surface_key(m: BoneModel) -> tuple:
+        """What a bone's built surface depends on (bones with the same key can share it)."""
+        return (str(Path(m.path).resolve()), tuple(m.voxel_size or ()), tuple(m.flip), m.threshold,
+                str(m.tfm_path) if m.tfm_path else None)
+
+    def add_empty_trial(self, name: str | None = None) -> Trial | None:
+        """Add a trial with a name only (asked for unless given), and show it."""
+        if name is None:
+            name, ok = QInputDialog.getText(self, "Empty trial", "Trial name:",
+                                            text=self.state.unique_trial_name(f"Trial {len(self.state.trials) + 1}"))
+            if not ok or not name.strip():
+                return None
+        t = self.state.add_trial(name.strip())
+        self.show_trial(t)
+        return t
+
+    def remove_trial(self, t: Trial, ask: bool = True) -> None:
+        """Remove a trial and everything in it (its files are untouched)."""
+        if ask and QMessageBox.question(
+                self, "Remove trial", f"Remove “{t.name}” and its {len(t.models)} bones, {len(t.cameras)} X-ray "
+                                      "cameras and joints from this tab? (The files aren't changed.)") \
+                != QMessageBox.Yes:
+            return
+        st = self.state
+        shown = t is st.trial
+        if t is self._scene_trial:
+            for m in t.models:
+                self.scene.remove_model(m)
+            self._scene_trial = None
+        for c in t.cameras:
+            self.scene.forget_camera(c)
+        i = next(k for k, x in enumerate(st.trials) if x is t)
+        st.trials.pop(i)
+        if not shown and i < st.active:
+            st.active -= 1                     # the shown trial moved up one place
+        if not st.trials:
+            st.active = -1
+            self.sel_kind, self.sel_obj = TRIALS, None
+            self.refresh_all()
+            self.scene.update_frame(0)
+        elif shown:
+            st.active = -1
+            self.show_trial(st.trials[min(i, len(st.trials) - 1)])
+        else:
+            self.refresh_all()
+
     def import_cfg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Autoscoper trial configuration", "", "Config (*.cfg)")
         if path:
@@ -1328,6 +1733,7 @@ class VisualiserTab(QWidget):
         for cam in cams:
             self.state.cameras.append(cam)
             self.scene.add_camera(cam)
+            self._scene_trial = self.state.trial
         if cams:
             self.sel_kind, self.sel_obj = CAMERAS, None
         self.refresh_all()
@@ -1391,66 +1797,132 @@ class VisualiserTab(QWidget):
             self.load_session_file(path)
 
     def load_session_file(self, path: str) -> None:
+        """Open a saved session: its trials are added to this tab, and the one shown when it was saved is shown."""
         try:
             st = load_session(path)
         except Exception as e:  # noqa: BLE001
             self._error("Couldn't open the session", str(e))
             return
-        self.state.name = st.name
-        self.titleChanged.emit(st.name)
-        for k, v in st.settings.__dict__.items():
-            setattr(self.state.settings, k, v)
-        self._sync_timeline_settings()
-        self.curves.set_style(self.state.settings.curve_labels)
-        cams = st.cameras
+        if not self.state.trials:
+            self.state.name = st.name
+            self.titleChanged.emit(st.name)
+            for k, v in st.settings.__dict__.items():
+                setattr(self.state.settings, k, v)
+            self._sync_timeline_settings()
+            self.curves.set_style(self.state.settings.curve_labels)
+        self.state.originals.update(st.originals)
+        trials, shown = st.trials, st.trial
+        problems: list[str] = []
 
-        def add_cams():
-            problems, built = [], []
-            for cam in cams:
+        def step(k: int) -> None:
+            if k == len(trials):
+                if shown is not None:
+                    self.show_trial(shown)
+                else:
+                    self.refresh_all()
+                if problems:
+                    self._error("Some files couldn't be used as saved", "\n".join(problems))
+                return
+            self.load_trial(trials[k], problems, then=lambda: step(k + 1), show=False)
+
+        step(0)
+
+    def load_trial(self, t: Trial, problems: list | None = None, then=None, show: bool = True) -> None:
+        """Read a trial's files and add it to the tab.
+
+        Its bones and their tracking are read on a worker thread; then its X-ray cameras (calibration and
+        image list), the bones' coordinate systems and the joints. Files that can't be used are left out
+        and listed in ``problems`` (or shown when it isn't given). Radiographs are read when the trial is
+        first shown.
+        """
+        report = problems is None
+        problems = [] if problems is None else problems
+        models = list(t.models)
+        loaded = {self._surface_key(m): m for x in self.state.trials for m in x.models if m.mesh is not None}
+        for m in models:                    # a surface already loaded in this tab (e.g. a duplicated trial) is shared
+            same = loaded.get(self._surface_key(m)) if m.mesh is None else None
+            if same is not None:
+                m.mesh, m.image_data, m.surface_note = same.mesh, same.image_data, same.surface_note
+
+        def work():
+            built, errors = [], []
+            for m in models:
+                try:
+                    if m.mesh is None:              # (a duplicated bone shares its surface)
+                        m.build()
+                    if m.tracking_path:
+                        try:
+                            m.load_tracking()
+                        except (TrackingError, OSError, ValueError) as e:
+                            errors.append(f"{t.name} · {m.name} tracking: {e}")
+                    built.append(m)
+                except (ModelError, TrackingError, TransformFileError, OSError, ValueError) as e:
+                    errors.append(f"{t.name} · {m.path.name}: {e}")
+            return built, errors
+
+        def done(res, err):
+            if err:
+                problems.append(f"{t.name}: {err}")
+                built = []
+            else:
+                built, errors = res
+                problems.extend(errors)
+            t.models = built
+            cams = []
+            for cam in t.cameras:
                 try:
                     cam.build()
-                    built.append(cam)
+                    cams.append(cam)
+                    if cam.note:
+                        problems.append(f"{t.name} · {cam.name}: {cam.note}")
                 except Exception as e:  # noqa: BLE001
-                    problems.append(f"{cam.name}: {e}")
-            self._read_radiographs(built)
-            problems.extend(f"{cam.name}: {cam.note}" for cam in built if cam.note)
-            for cam in built:
-                self.state.cameras.append(cam)
-                self.scene.add_camera(cam)
-            for m in self.state.models:                  # coordinate systems on the models
+                    problems.append(f"{t.name} · {cam.name}: {e}")
+            t.cameras = cams
+            for m in t.models:                       # coordinate systems on the bones
                 if m.has_axes:
                     try:
                         m.axes_model = self._kin_model(m.axes_path)
                         m.axes_model.segment(m.axes_segment)
                     except Exception as e:  # noqa: BLE001
-                        problems.append(f"{m.name} coordinate system: {e}")
-            for jl in st.joints:
+                        problems.append(f"{t.name} · {m.name} coordinate system: {e}")
+            joints = []
+            for jl in t.joints:
                 if jl.kind == "segment":                # older sessions listed segments separately
-                    m = self._model_named(jl.model_map.get(jl.name))
+                    m = next((x for x in t.models if x.name == jl.model_map.get(jl.name)), None)
                     if m is not None and not m.has_axes:
                         try:
-                            self.set_axes(m, jl.model_path, jl.name, warn=False)
+                            km = self._kin_model(jl.model_path)
+                            km.segment(jl.name)
+                            m.axes_path, m.axes_segment, m.axes_model = Path(jl.model_path), jl.name, km
                             m.axes_visible = jl.visible
                         except Exception as e:  # noqa: BLE001
-                            problems.append(f"{m.name} coordinate system: {e}")
+                            problems.append(f"{t.name} · {m.name} coordinate system: {e}")
                     continue
                 try:
                     jl.model = self._kin_model(jl.model_path)
                     for n in jl.segment_names():          # checks the segment / joint still exists
                         jl.model.segment(n)
                     jl.label = jl.label or jl.name
-                    self.state.joints.append(jl)
+                    joints.append(jl)
                 except Exception as e:  # noqa: BLE001
-                    problems.append(f"{jl.name or jl.model_path.name}: {e}")
-            self.refresh_all()
-            self.scene.update_frame(0)
-            if problems:
-                self._error("Some files couldn't be used as saved", "\n".join(problems))
+                    problems.append(f"{t.name} · {jl.name or jl.model_path.name}: {e}")
+            t.joints = joints
+            if not any(x is t for x in self.state.trials):
+                self.state.add_trial(trial=t)
+            if show:
+                self.show_trial(t)
+            else:
+                self.refresh_all()
+            if report and problems:
+                self._error("Some files couldn't be used", "\n".join(problems))
+            if then:
+                then()
 
-        if st.models:
-            self._build_models(st.models, then=add_cams)
+        if models:
+            names = ", ".join(m.path.name for m in models[:3]) + (" …" if len(models) > 3 else "")
+            self._run(f"{t.name}: loading {names}", work, done)
         else:
-            add_cams()
+            done(([], []), None)
 
     # ---------------------------------------------------------------- coordinate systems and joints
     MODEL_FILE_FILTER = "Model from the Model Builder (*.bvrmodel.json *.json)"

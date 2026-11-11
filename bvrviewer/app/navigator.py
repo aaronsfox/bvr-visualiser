@@ -1,6 +1,7 @@
 """Navigator tree (what's in the tab) and the properties sheet (settings of the selected item).
 
-Laid out like OpenSim: the navigator lists Models, X-ray cameras and Scene; right-clicking a level
+Laid out like OpenSim: the navigator lists the Trials (each with its Bones, X-ray cameras and Joints) and
+the Scene; right-clicking a level
 or an item offers its actions; selecting an item fills the properties sheet below it.
 """
 
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.models import BoneModel
-from ..core.session import KinItem, TabState, XrayCamera
+from ..core.session import KinItem, TabState, Trial, XrayCamera
 from .panels import ColorButton, h2, label
 
 KIND_ROLE = Qt.UserRole
@@ -27,6 +28,8 @@ OBJ_ROLE = Qt.UserRole + 1
 MODELS, MODEL, TRACKING, CAMERAS, CAMERA, SCENE = "models", "model", "tracking", "cameras", "camera", "scene"
 JOINTS, JOINT = "joints", "joint"
 AXES = "axes"
+TRIALS, TRIAL, ADD_TRIAL = "trials", "trial", "add_trial"      # Visualiser #16
+SHOWN_COLOUR = "#8FD3A9"
 
 
 def _dot_icon(color: str, size: int = 14, ring: bool = False) -> QIcon:
@@ -54,7 +57,7 @@ class Navigator(QTreeWidget):
     visibilityToggled = Signal(object, bool)        # model, camera or joint
     axesToggled = Signal(object, bool)              # model whose coordinate-system axes are shown/hidden
     renamed = Signal(object, str)                   # model or camera, new name
-    activated = Signal(str, object)                 # double-click on a camera: view through it
+    activated = Signal(str, object)                 # double-click: a camera (view through it) or a trial (show it)
 
     def __init__(self):
         super().__init__()
@@ -70,41 +73,93 @@ class Navigator(QTreeWidget):
         self.currentItemChanged.connect(self._current_changed)
         self.itemChanged.connect(self._item_changed)
         self.itemDoubleClicked.connect(self._double_clicked)
+        self.itemClicked.connect(self._clicked)
         self._building = False
-        self.roots: dict[str, QTreeWidgetItem] = {}
-        bold = QFont()
-        bold.setBold(True)
-        for kind, text in [(MODELS, "Bones"), (CAMERAS, "X-ray cameras"), (JOINTS, "Joints"), (SCENE, "Scene")]:
+        self._shown: Trial | None = None
+        self.roots: dict[str, QTreeWidgetItem] = {}      # Trials, Scene, and the shown trial's sections
+        for kind, text in [(TRIALS, "Trials"), (SCENE, "Scene")]:
             it = QTreeWidgetItem([text])
             it.setData(0, KIND_ROLE, kind)
-            it.setFont(0, bold)
+            it.setFont(0, self._bold())
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.addTopLevelItem(it)
             it.setExpanded(True)
             self.roots[kind] = it
-        self.roots[MODELS].setToolTip(0, "Right-click to add a bone, or load a model")
-        self.roots[CAMERAS].setToolTip(0, "Optional. Right-click to add an X-ray camera")
-        self.roots[JOINTS].setToolTip(0, "Optional. Right-click to add joints from a model")
+        self.roots[TRIALS].setToolTip(0, "Each trial holds its bones, X-ray cameras and joints; one is shown at a "
+                                         "time. Double-click a trial to show it. Right-click to add one")
         self.roots[SCENE].setToolTip(0, "Axes, grid, background, motion trail, untracked frames")
 
+    @staticmethod
+    def _bold() -> QFont:
+        f = QFont()
+        f.setBold(True)
+        return f
+
     # ---- building
+    SECTIONS = ((MODELS, "Bones", "Right-click to add a bone, or load a model"),
+                (CAMERAS, "X-ray cameras", "Optional. Right-click to add an X-ray camera"),
+                (JOINTS, "Joints", "Optional. Right-click to add joints from a model"))
+
     def rebuild(self, state: TabState, select_kind: str | None = None, select_obj=None) -> None:
-        """Rebuild the item lists from the tab's state, keeping expansion and the selection."""
+        """Rebuild the trials and their items from the tab's state, keeping expansion and the selection."""
         self._building = True
-        expanded = {id(self._obj(it)) for it in self._all_items() if it.isExpanded() and self._obj(it) is not None}
-        first_build = not any(self._obj(it) is not None for it in self._all_items())
-        for root in (self.roots[MODELS], self.roots[CAMERAS], self.roots[JOINTS]):
-            root.takeChildren()
-        n_models, n_cams = len(state.models), len(state.cameras)
-        self.roots[MODELS].setText(0, f"Bones ({n_models})" if n_models else "Bones")
-        self.roots[CAMERAS].setText(0, f"X-ray cameras ({n_cams})" if n_cams else "X-ray cameras")
+        expanded = {(self._kind(it), id(self._obj(it))) for it in self._all_items()
+                    if it.isExpanded() and self._obj(it) is not None}
+        known = {id(self._obj(it)) for it in self._all_items() if self._kind(it) == TRIAL}
+        self.roots[TRIALS].takeChildren()
+        for k in (MODELS, CAMERAS, JOINTS):
+            self.roots.pop(k, None)
+        was_shown, self._shown = self._shown, state.trial
+        n = len(state.trials)
+        self.roots[TRIALS].setText(0, f"Trials ({n})" if n else "Trials")
+        for t in state.trials:
+            ti = QTreeWidgetItem([t.name])
+            self._set(ti, TRIAL, t)
+            ti.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+            self.roots[TRIALS].addChild(ti)
+            self.refresh_item(ti)
+            secs = {}
+            for kind, text, tip in self.SECTIONS:
+                si = QTreeWidgetItem([text])
+                self._set(si, kind, t)
+                si.setFont(0, self._bold())
+                si.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                si.setToolTip(0, tip)
+                ti.addChild(si)
+                secs[kind] = si
+            new = id(t) not in known
+            self._fill(t, secs, expanded, first_build=new)
+            if t is self._shown:
+                self.roots.update(secs)
+            # the shown trial is open; one that has just stopped being shown is closed; others stay as they were
+            ti.setExpanded(t is self._shown or ((TRIAL, id(t)) in expanded and t is not was_shown))
+            for kind, si in secs.items():
+                si.setExpanded(new or (kind, id(t)) in expanded or t is not self._shown)
+        add = QTreeWidgetItem(["+  Add trial…"])
+        self._set(add, ADD_TRIAL, None)
+        add.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        add.setForeground(0, QBrush(QColor("#4F9CF9")))
+        add.setToolTip(0, "Import a trial (from an Autoscoper .cfg and its tracking files), or add an empty one by "
+                          "name")
+        self.roots[TRIALS].addChild(add)
+        self.roots[SCENE].setHidden(not state.trials)
+        self._building = False
+        if select_kind is not None:
+            self.select(select_kind, select_obj)
+
+    def _fill(self, t: Trial, secs: dict, expanded: set, first_build: bool) -> None:
+        """One trial's bones (with tracking and axes), cameras and joints, under its section items."""
+        n_models, n_cams, n_j = len(t.models), len(t.cameras), len(t.joints)
+        secs[MODELS].setText(0, f"Bones ({n_models})" if n_models else "Bones")
+        secs[CAMERAS].setText(0, f"X-ray cameras ({n_cams})" if n_cams else "X-ray cameras")
+        secs[JOINTS].setText(0, f"Joints ({n_j})" if n_j else "Joints")
         if not n_models:
-            self._placeholder(self.roots[MODELS], "Right-click Bones to add one, or load a model")
-        for m in state.models:
+            self._placeholder(secs[MODELS], "Right-click Bones to add one, or load a model")
+        for m in t.models:
             it = QTreeWidgetItem([m.name])
             self._set(it, MODEL, m)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable | Qt.ItemIsUserCheckable)
-            self.roots[MODELS].addChild(it)
+            secs[MODELS].addChild(it)
             self.refresh_item(it)
             child = QTreeWidgetItem([""])
             self._set(child, TRACKING, m)
@@ -116,28 +171,23 @@ class Navigator(QTreeWidget):
             axes.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
             it.addChild(axes)
             self.refresh_item(axes)
-            it.setExpanded(first_build or id(m) in expanded or m.tracking is None)
+            it.setExpanded(first_build or (MODEL, id(m)) in expanded or m.tracking is None)
         if not n_cams:
-            self._placeholder(self.roots[CAMERAS], "Optional: right-click to add")
-        for cam in state.cameras:
+            self._placeholder(secs[CAMERAS], "Optional: right-click to add")
+        for cam in t.cameras:
             it = QTreeWidgetItem([cam.name])
             self._set(it, CAMERA, cam)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable | Qt.ItemIsUserCheckable)
-            self.roots[CAMERAS].addChild(it)
+            secs[CAMERAS].addChild(it)
             self.refresh_item(it)
-        n_j = len(state.joints)
-        self.roots[JOINTS].setText(0, f"Joints ({n_j})" if n_j else "Joints")
         if not n_j:
-            self._placeholder(self.roots[JOINTS], "Optional: right-click to add a joint")
-        for jl in state.joints:
+            self._placeholder(secs[JOINTS], "Optional: right-click to add a joint")
+        for jl in t.joints:
             it = QTreeWidgetItem([jl.label])
             self._set(it, JOINT, jl)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable | Qt.ItemIsUserCheckable)
-            self.roots[JOINTS].addChild(it)
+            secs[JOINTS].addChild(it)
             self.refresh_item(it)
-        self._building = False
-        if select_kind is not None:
-            self.select(select_kind, select_obj)
 
     def _placeholder(self, root: QTreeWidgetItem, text: str) -> None:
         it = QTreeWidgetItem([text])
@@ -173,6 +223,8 @@ class Navigator(QTreeWidget):
     def item_for(self, kind: str, obj=None) -> QTreeWidgetItem | None:
         if obj is None and kind in self.roots:
             return self.roots[kind]
+        if obj is None and kind in (MODELS, CAMERAS, JOINTS):
+            return None
         for it in self._all_items():
             if self._kind(it) == kind and self._obj(it) is obj:
                 return it
@@ -184,7 +236,19 @@ class Navigator(QTreeWidget):
             return
         was, self._building = self._building, True
         kind, obj = self._kind(it), self._obj(it)
-        if kind == MODEL:
+        if kind == TRIAL:
+            t: Trial = obj
+            shown = t is self._shown
+            it.setText(0, t.name)
+            it.setFont(0, self._bold())
+            it.setIcon(0, _dot_icon(SHOWN_COLOUR, ring=not shown))
+            it.setForeground(0, QBrush(QColor("#E6E8EC" if shown else "#A9AFBA")))
+            frames = max((m.tracking.n_frames for m in t.models if m.tracking is not None), default=0)
+            what = f"{len(t.models)} bones · {len(t.cameras)} X-ray cameras · {len(t.joints)} joints"
+            what += f" · {frames} frames" if frames else ""
+            it.setToolTip(0, f"{t.name}: {'shown' if shown else 'not shown: double-click to show it'}\n{what}\n"
+                             "Right-click for Show, Configure…, Duplicate, Rename and Remove.")
+        elif kind == MODEL:
             m: BoneModel = obj
             it.setText(0, m.name)
             it.setIcon(0, _dot_icon(m.color))
@@ -290,6 +354,13 @@ class Navigator(QTreeWidget):
                 if on != obj.axes_visible:
                     self.axesToggled.emit(obj, on)
             return
+        if kind == TRIAL:
+            text = it.text(0).strip()
+            if text and text != obj.name:
+                self.renamed.emit(obj, text)
+            elif not text:
+                self.refresh_item(it)
+            return
         if kind not in (MODEL, CAMERA, JOINT):
             return
         on = it.checkState(0) == Qt.Checked
@@ -303,8 +374,13 @@ class Navigator(QTreeWidget):
             self.refresh_item(it)
 
     def _double_clicked(self, it: QTreeWidgetItem, _col: int) -> None:
-        if self._kind(it) == CAMERA:
-            self.activated.emit(CAMERA, self._obj(it))
+        if self._kind(it) in (CAMERA, TRIAL):
+            self.activated.emit(self._kind(it), self._obj(it))
+
+    def _clicked(self, it: QTreeWidgetItem, _col: int) -> None:
+        if self._kind(it) == ADD_TRIAL:            # a button-like row: its menu opens on a click
+            r = self.visualItemRect(it)
+            self.menuRequested.emit(ADD_TRIAL, None, self.viewport().mapToGlobal(r.bottomLeft()))
 
     def _context(self, pos: QPoint) -> None:
         it = self.itemAt(pos)
@@ -315,7 +391,7 @@ class Navigator(QTreeWidget):
             self.setCurrentItem(it)
             self.menuRequested.emit(self._kind(it), self._obj(it), self.viewport().mapToGlobal(pos))
         else:                                   # empty space below the tree
-            self.menuRequested.emit(MODELS, None, self.viewport().mapToGlobal(pos))
+            self.menuRequested.emit(TRIALS, None, self.viewport().mapToGlobal(pos))
 
 
 def after_edit(fn):
