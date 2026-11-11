@@ -8,6 +8,7 @@ This document tracks feature requests, suggestions and bug fixes for the BVR Mot
 
 - Add each new request as a new row at the bottom of the table, with the date it was requested (d/mm/yyyy), the status `Request`, and a new number (#).
 - Change the status to `Implementing` while it is being worked on, and to `Completed` once it is in the code.
+- Use the status `TODO` for something to come back to later rather than build now (e.g. an idea that came up while reviewing another request). A TODO row says what is needed and why it is deferred; change it to `Request` when it should be reviewed and built.
 - When a request is completed, the **Notes** column records how it was implemented (what changed, where, and the commit).
 - To keep a line break inside a cell, use `<br>`. Every row must stay on one line.
 
