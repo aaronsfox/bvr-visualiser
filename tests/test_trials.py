@@ -193,7 +193,7 @@ def test_each_trial_has_its_own_settings_but_the_tab_wide_ones_are_shared():
 def test_trial_settings_saved_with_each_trial(tmp_path):
     st = TabState()
     a = st.add_trial("A")
-    a.settings.overlay_fill, a.settings.outline_width, a.settings.camera_views = False, 4, True
+    a.settings.overlay_fill, a.settings.point_density, a.settings.camera_views = False, 0.3, True
     a.view = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
     b = st.add_trial("B")
     b.settings.xray_distance = 300
@@ -202,7 +202,7 @@ def test_trial_settings_saved_with_each_trial(tmp_path):
     save_session(st, p)
     st2 = load_session(p)
     a2, b2 = st2.trials
-    assert (a2.settings.overlay_fill, a2.settings.outline_width, a2.settings.camera_views) == (False, 4, True)
+    assert (a2.settings.overlay_fill, a2.settings.point_density, a2.settings.camera_views) == (False, 0.3, True)
     assert a2.view[0] == (1.0, 2.0, 3.0) and b2.settings.xray_distance == 300 and a2.settings.xray_distance == 120
     assert a2.settings.curve_labels == b2.settings.curve_labels == "anatomical"
 
@@ -216,22 +216,20 @@ def test_trials_saved_before_their_own_settings_use_the_tabs(tmp_path):
     assert (t.settings.xray_distance, t.settings.fps, t.settings.hold_still) == (250, 500, "tib")
 
 
-# ---------------------------------------------------------------- outline on the camera views (Visualiser #21)
-def test_contour_edges_outline_a_sphere():
+# ---------------------------------------------------------------- thinning the point cloud (Visualiser #24)
+def test_even_order_spreads_any_share_of_the_points_evenly():
     import numpy as np
-    import pyvista as pv
+    from scipy.spatial import cKDTree
 
-    from bvrviewer.app.camera_views import _BoneShape
+    from bvrviewer.app.camera_views import even_order
 
-    m = BoneModel(name="ball", path=Path("ball.stl"))
-    m.mesh = pv.Sphere(radius=10, theta_resolution=40, phi_resolution=40)
-    shape = _BoneShape(m)
-    src = np.array([0.0, 0.0, 500.0])                      # X-ray source on the z axis
-    edges = shape.contour_edges(np.eye(4), src)
-    assert 30 < len(edges) < 400
-    mid = shape.tri_points[edges].mean(axis=1)
-    # on a sphere the contour is the circle where the surface is edge-on to the source: |z| small, radius ~10
-    assert np.all(np.abs(np.linalg.norm(mid[:, :2], axis=1) - 10) < 1.5) and np.all(np.abs(mid[:, 2]) < 2.0)
-    moved = np.eye(4)
-    moved[:3, 3] = [0, 0, -100]                            # the bone moves: the contour follows
-    assert len(shape.contour_edges(moved, src))
+    rng = np.random.default_rng(3)
+    pts = rng.normal(size=(3000, 3))
+    pts = 20 * pts / np.linalg.norm(pts, axis=1, keepdims=True)          # points on a 20 mm sphere
+    o = even_order(pts)
+    assert sorted(o.tolist()) == list(range(len(pts)))
+    for share in (0.05, 0.2):
+        k = int(share * len(pts))
+        gap_even = cKDTree(pts[o[:k]]).query(pts)[0].max()
+        gap_random = cKDTree(pts[rng.permutation(len(pts))[:k]]).query(pts)[0].max()
+        assert gap_even < 0.75 * gap_random, (share, gap_even, gap_random)

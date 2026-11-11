@@ -113,9 +113,9 @@ assert dlg.preview.pixmap() is not None and "3 bones" in dlg.preview_note.text()
 # #22: display settings for the trial
 dlg.disp["xray_distance"].setValue(200)
 dlg.disp["camera_views"].setChecked(True)
-dlg.disp["overlay_fill"].setChecked(False)
-assert not dlg.disp["overlay_opacity"].isEnabled() and dlg.disp["outline_width"].isEnabled()
-dlg.disp["outline_width"].setValue(3)
+dlg.disp["overlay"].setCurrentIndex(dlg.disp["overlay"].findData("points"))
+assert dlg.disp["point_density"].isEnabled() and not dlg.disp["overlay_fill"].isEnabled()
+dlg.disp["point_density"].setValue(25)
 shot(dlg, "tr_03_wizard_cameras")
 dlg.steps.setCurrentRow(3)
 pump(0.3)
@@ -140,12 +140,24 @@ wait(lambda: tab.state.trial is t1 and len(tab.state.models) == 3 and len(tab.sc
      what="ankle trial")
 pump(1)
 s1 = t1.settings
-assert (s1.xray_distance, s1.camera_views, s1.overlay_fill, s1.outline_width) == (200, True, False, 3)
+assert (s1.xray_distance, s1.camera_views, s1.overlay, s1.point_density) == (200, True, "points", 0.25)
 assert tab.cam_views.isVisible()
 v0 = tab.cam_views.views[0]
 pump(0.5)
-assert v0.outlines and all(it.isVisible() for it in v0.outlines.values())          # #21: outline only
+n_quarter = sum(len(it.data) for it in v0.items.values())            # #24: a quarter of the points, evenly
+tab._set("point_density", 1.0)
+pump(0.3)
+n_all = sum(len(it.data) for it in v0.items.values())
+assert abs(n_quarter / n_all - 0.25) < 0.02, (n_quarter, n_all)
+tab._set("point_density", 0.25)
+tab._set("overlay", "silhouette")                                      # #21: the fill can be hidden
+tab._set("overlay_fill", False)
+pump(0.3)
 assert not any(it.isVisible() for it in v0.items.values())
+tab._set("overlay_fill", True)
+pump(0.3)
+assert all(it.isVisible() for it in v0.items.values())
+tab._set("overlay", "points")
 assert [m.name for m in t1.models] == ["cal", "tal", "tib"] and t1.models[2].color == "#E07A9A"
 assert all(m.tracking is not None for m in t1.models) and tab.scene.n_frames == 19
 assert all(c.show_source is False for c in t1.cameras)

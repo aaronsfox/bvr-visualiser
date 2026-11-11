@@ -659,8 +659,7 @@ class TrialSetupDialog(QDialog):
         self.disp["overlay"] = ov
         check(5, "Show fill", "overlay_fill", lambda: self._display_enable())
         slider(6, "Fill opacity", "overlay_opacity", 5, 100, 100, pct)
-        check(7, "Show outline (in the bone's colour)", "overlay_outline", lambda: self._display_enable())
-        slider(8, "Outline weight", "outline_width", 1, 6, 1, lambda x: f"{x:.0f} px")
+        slider(7, "Points shown (point cloud)", "point_density", 5, 100, 100, pct)
         ov.currentIndexChanged.connect(lambda _i: (d.__setitem__("overlay", ov.currentData()), self._display_enable()))
         self._display_enable()
         return g
@@ -670,8 +669,8 @@ class TrialSetupDialog(QDialog):
         for k, v in values.items():
             w = self.disp.get(k)
             if isinstance(w, QSlider):
-                w.setValue(round(v * (100 if k in ("xray_opacity", "xray_bone_opacity", "overlay_opacity")
-                                          else 1)))
+                w.setValue(round(v * (100 if k in ("xray_opacity", "xray_bone_opacity", "overlay_opacity",
+                                                   "point_density") else 1)))
             elif isinstance(w, QCheckBox):
                 w.setChecked(bool(v))
             elif isinstance(w, QComboBox):
@@ -683,9 +682,8 @@ class TrialSetupDialog(QDialog):
         d, w = self.display, self.disp
         sil = d["overlay"] == "silhouette"
         w["overlay_fill"].setEnabled(sil)
-        w["overlay_outline"].setEnabled(sil)
         w["overlay_opacity"].setEnabled(d["overlay"] == "points" or (sil and d["overlay_fill"]))
-        w["outline_width"].setEnabled(sil and d["overlay_outline"])
+        w["point_density"].setEnabled(d["overlay"] == "points")
 
     def _fill_cameras(self) -> None:
         g = self.cam_grid

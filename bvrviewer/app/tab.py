@@ -1118,15 +1118,13 @@ class VisualiserTab(QWidget):
             if s.overlay_fill:
                 p.slider("Fill opacity", s.overlay_opacity, 5, 100, 100, _fmt_pct,
                          lambda v: self._set("overlay_opacity", v), spin=PCT)
-            p.check("Outline", s.overlay_outline, lambda on: (self._set("overlay_outline", on), self.show_properties()),
-                    caption="Show outline", tip="The bone's outline in its colour, at full opacity, plus the edges "
-                                                "inside it where the surface turns away from the X-ray source")
-            if s.overlay_outline:
-                p.slider("Outline weight", s.outline_width, 1, 6, 1, lambda x: f"{x:.0f} px",
-                         lambda v: self._set("outline_width", int(round(v))), spin=(1, 0, " px"))
         elif s.overlay == "points":
             p.slider("Point opacity", s.overlay_opacity, 5, 100, 100, _fmt_pct,
                      lambda v: self._set("overlay_opacity", v), spin=PCT)
+            dens = p.slider("Points shown", s.point_density, 5, 100, 100, _fmt_pct,
+                            lambda v: self._set("point_density", v), spin=PCT)
+            dens.setToolTip("All of each bone's points at 100%; fewer, still spread evenly over the bone, as you "
+                            "lower it")
         p.section("Image")
         p.slider("Brightness", s.brightness, -100, 100, 100, lambda x: f"{x:+.2f}", lambda v: self._set("brightness", v),
                  spin=(1, 2, ""))

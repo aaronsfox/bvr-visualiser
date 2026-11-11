@@ -123,9 +123,8 @@ class SceneSettings:
     overlay: str = "silhouette"       # bones on those panels: "silhouette", "points" or "off"
     overlay_opacity: float = 0.5
     curve_labels: str = "axes"        # curve legends: "axes" (Angle X/Y/Z) or "anatomical" (Flexion, ...)
-    overlay_fill: bool = True         # silhouette overlay: filled (at overlay_opacity) ...
-    overlay_outline: bool = True      # ... and/or outlined, in the bone's colour at full opacity (Visualiser #21)
-    outline_width: int = 2            # outline weight, screen pixels
+    overlay_fill: bool = True         # silhouette overlay: show the fill (at overlay_opacity) (Visualiser #21)
+    point_density: float = 1.0        # point-cloud overlay: share of the points shown, evenly thinned (Visualiser #24)
 
     def copy(self) -> SceneSettings:
         return SceneSettings(**self.__dict__)

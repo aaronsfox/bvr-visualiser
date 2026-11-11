@@ -21,7 +21,7 @@ TRACKING_SUFFIXES = (".tra",)
 
 # Display settings the Trial setup dialog sets for a trial (Visualiser #22); each trial has its own (#23)
 DISPLAY_KEYS = ("xray_opacity", "xray_distance", "xray_bone_opacity", "camera_views", "overlay", "overlay_fill",
-                "overlay_opacity", "overlay_outline", "outline_width")
+                "overlay_opacity", "point_density")
 
 
 def display_of(settings) -> dict:
