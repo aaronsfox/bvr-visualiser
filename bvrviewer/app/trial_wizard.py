@@ -40,6 +40,7 @@ from ..core import trial as TR
 from ..core.models import PALETTE, BoneModel
 from ..core.tracking import load_tracking
 from .panels import ColorButton, h2, label
+from .style import C
 
 PAGES = ("Source", "Bones", "X-ray cameras", "Review")
 NONE, OTHER = "__none__", "__other__"
@@ -146,6 +147,8 @@ class TrialSetupDialog(QDialog):
             self.start_from_trial(start_from)
         self._fill_bones()
         self._fill_cameras()
+        if self.mode == "new" and start_from is None:
+            self._default_overlay()
         self.steps.setCurrentRow(0)
 
     # ================================================================ page 1: source
@@ -267,6 +270,7 @@ class TrialSetupDialog(QDialog):
         self._update_tracking_note()
         self._fill_bones()
         self._fill_cameras()
+        self._default_overlay()
 
     def start_from_trial(self, t) -> None:
         """Start from another trial: its bones (with their settings, coordinate systems and joints) and camera
@@ -458,6 +462,7 @@ class TrialSetupDialog(QDialog):
         if ps:
             self.draft.match()
             self._fill_bones()
+            self._default_overlay()
 
     def add_bone_file(self, path, match: bool = True) -> TR.BoneDraft:
         p = Path(path)
@@ -660,6 +665,10 @@ class TrialSetupDialog(QDialog):
         check(5, "Show fill", "overlay_fill", lambda: self._display_enable())
         slider(6, "Fill opacity", "overlay_opacity", 5, 100, 100, pct)
         slider(7, "Points shown (point cloud)", "point_density", 5, 100, 100, pct)
+        slider(8, "DRR opacity", "drr_opacity", 5, 100, 100, pct)
+        slider(9, "DRR brightness", "drr_brightness", 10, 400, 100, lambda x: f"{x:.2f}×")
+        self._overlay_chosen = False
+        ov.activated.connect(lambda _i: setattr(self, "_overlay_chosen", True))
         ov.currentIndexChanged.connect(lambda _i: (d.__setitem__("overlay", ov.currentData()), self._display_enable()))
         self._display_enable()
         return g
@@ -670,7 +679,7 @@ class TrialSetupDialog(QDialog):
             w = self.disp.get(k)
             if isinstance(w, QSlider):
                 w.setValue(round(v * (100 if k in ("xray_opacity", "xray_bone_opacity", "overlay_opacity",
-                                                   "point_density") else 1)))
+                                                   "point_density", "drr_opacity", "drr_brightness") else 1)))
             elif isinstance(w, QCheckBox):
                 w.setChecked(bool(v))
             elif isinstance(w, QComboBox):
@@ -682,8 +691,20 @@ class TrialSetupDialog(QDialog):
         d, w = self.display, self.disp
         sil = d["overlay"] == "silhouette"
         w["overlay_fill"].setEnabled(sil)
-        w["overlay_opacity"].setEnabled(d["overlay"] == "points" or (sil and d["overlay_fill"]))
+        w["overlay_opacity"].setEnabled(d["overlay"] in ("points", "drr") or (sil and d["overlay_fill"]))
         w["point_density"].setEnabled(d["overlay"] == "points")
+        w["drr_opacity"].setEnabled(d["overlay"] == "drr")
+        w["drr_brightness"].setEnabled(d["overlay"] == "drr")
+
+    def _default_overlay(self) -> None:
+        """DRR for a trial with TIF bones, silhouette otherwise (Visualiser #25), unless one was chosen here."""
+        if not hasattr(self, "disp") or self._overlay_chosen:
+            return
+        tif = any(b.is_volume for b in self.draft.bones if b.include)
+        if tif and self.display["overlay"] != "drr":
+            self.set_display({"overlay": "drr"})
+        elif not tif and self.display["overlay"] == "drr":
+            self.set_display({"overlay": "silhouette"})
 
     def _fill_cameras(self) -> None:
         g = self.cam_grid
@@ -933,12 +954,12 @@ class TrialSetupDialog(QDialog):
         probs, warns = self.problems(), self.warnings()
         html = ""
         if probs:
-            html += "<p style='color:#F28B82'><b>To fix before the trial can be added:</b><br>" + \
+            html += f"<p style='color:{C('#F28B82')}'><b>To fix before the trial can be added:</b><br>" + \
                     "<br>".join(probs) + "</p>"
         if warns:
-            html += "<p style='color:#F2C48D'><b>Check:</b><br>" + "<br>".join(warns) + "</p>"
+            html += f"<p style='color:{C('#F2C48D')}'><b>Check:</b><br>" + "<br>".join(warns) + "</p>"
         if not probs and not warns:
-            html = "<p style='color:#8FD3A9'>Everything is ready.</p>"
+            html = f"<p style='color:{C('#8FD3A9')}'>Everything is ready.</p>"
         self.issues.setText(html)
         last = self.steps.currentRow() == len(PAGES) - 1 if hasattr(self, "steps") else False
         if hasattr(self, "finish"):

@@ -1,16 +1,103 @@
-"""Dark theme matching the design mock-up."""
+"""Colour palettes: Dark (the default, matching the design mock-up) and Light (General #1).
+
+The UI is written in the Dark palette's colours. The Light palette is a table from each of those colours to its
+light counterpart (``LIGHT``): the stylesheet and icons are rewritten through it, and colours set in code go
+through ``C()``. Colours not in the table (bones, axes, curves, 3D markers, radiograph backgrounds) are the
+same in both. ``set_palette`` switches while the app runs: the stylesheet is reapplied and ``theme().changed``
+tells open tabs to redraw what they colour themselves.
+"""
+
+import re
 
 ACCENT = "#4F9CF9"
+PALETTES = (("dark", "Dark"), ("light", "Light"))
+
+# Dark colour -> Light colour, for the UI only
+LIGHT = {
+    # backgrounds
+    "#121419": "#F4F5F7", "#171A20": "#FFFFFF", "#1C1F26": "#FFFFFF", "#0E1014": "#E8EBEF", "#0B0D11": "#EDEFF2",
+    "#232731": "#FFFFFF", "#2A2F3B": "#EEF1F5", "#2A3A52": "#DCE8FB", "#232A36": "#E6EEFB", "#20242C": "#F5F8FD",
+    "#262A33": "#DDE1E7", "#1F232B": "#EEF1F5", "#14171C": "#FFFFFF", "#1A1D24": "#F1F3F6", "#2A2116": "#FFF4E5",
+    "#2A3140": "#DCE3EE",
+    # borders
+    "#343946": "#CDD2DA", "#3A3F4B": "#C4CAD3", "#4A5160": "#9AA2AE", "#6B7280": "#8A93A0", "#3A404C": "#C4CAD3",
+    "#3D5A80": "#8DB5EE", "#6B4A1F": "#E3B26B", "#5A3434": "#E6A5A5",
+    # text
+    "#E6E8EC": "#1C2028", "#C3C8D2": "#3E4552", "#A3AAB8": "#5B6372", "#A9AFBA": "#6B7381", "#8A92A1": "#6B7381",
+    "#7A8291": "#8A92A0", "#5E6573": "#9AA1AC", "#5A6170": "#A9AFB9", "#D5DAE3": "#3E4552", "#FFFFFF": "#0B1220",
+    "#07080B": "#9AA1AC",
+    # status and accent
+    "#8FD3A9": "#2E8B57", "#F2C48D": "#B26B00", "#F0A3A3": "#C0392B", "#F28B82": "#C0392B", "#5CC8A8": "#1F8F78",
+    "#5E8F72": "#6B9C80", "#B78AF0": "#7A4FC9", "#3B6E52": "#7CC79A", "#4F9CF9": "#2F7DE1", "#6AAEFB": "#4A90E8",
+    "#7DB5FB": "#1F6FD1", "#0B1220": "#FFFFFF",
+}
+_LIGHT = {k.upper(): v for k, v in LIGHT.items()}
+_palette = "dark"
+_HEX = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
-def apply_theme(app) -> None:
-    """Dark theme everywhere.
+def palette() -> str:
+    """The palette in use: "dark" or "light"."""
+    return _palette
 
-    The Fusion style plus a dark palette stops Windows' native style from painting light
-    backgrounds behind widgets the stylesheet doesn't cover (such as the strip behind the tabs).
+
+def C(colour: str) -> str:
+    """A UI colour (written as its Dark-palette value) in the palette in use. Other colours pass unchanged;
+    a #RRGGBBAA colour keeps its alpha."""
+    if _palette != "light" or not isinstance(colour, str) or not colour.startswith("#"):
+        return colour
+    return _LIGHT.get(colour[:7].upper(), colour[:7]) + colour[7:]
+
+
+def _recolour(text: str) -> str:
+    return _HEX.sub(lambda m: C(m.group(0)), text) if _palette == "light" else text
+
+
+class _Theme:
+    """Holds the ``changed`` signal (made once a QApplication exists)."""
+
+    obj = None
+
+
+def theme():
+    """An object whose ``changed(str)`` signal fires after the palette changes."""
+    if _Theme.obj is None:
+        from PySide6.QtCore import QObject, Signal
+
+        class Theme(QObject):
+            changed = Signal(str)
+
+        _Theme.obj = Theme()
+    return _Theme.obj
+
+
+def saved_palette() -> str:
+    from PySide6.QtCore import QSettings
+
+    name = QSettings("BVR", "BVR Motion Viewer").value("appearance/palette", "dark")
+    return name if name in dict(PALETTES) else "dark"
+
+
+def set_palette(app, name: str) -> None:
+    """Switch palette now, everywhere, and remember it."""
+    from PySide6.QtCore import QSettings
+
+    QSettings("BVR", "BVR Motion Viewer").setValue("appearance/palette", name)
+    apply_theme(app, name)
+
+
+def apply_theme(app, name: str | None = None) -> None:
+    """The palette everywhere: ``name``, or the one chosen last time (Settings → Preferences).
+
+    The Fusion style plus a full QPalette stops Windows' native style from painting its own backgrounds
+    behind widgets the stylesheet doesn't cover (such as the strip behind the tabs).
     """
+    global _palette
     from PySide6.QtGui import QColor, QPalette
 
+    name = name if name in dict(PALETTES) else saved_palette()
+    changed = name != _palette
+    _palette = name
     app.setStyle("Fusion")
     pal = QPalette()
     for role, colour in [
@@ -21,11 +108,13 @@ def apply_theme(app) -> None:
         (QPalette.Link, "#7DB5FB"), (QPalette.BrightText, "#FFFFFF"), (QPalette.Mid, "#343946"),
         (QPalette.Dark, "#0E1014"), (QPalette.Light, "#343946"), (QPalette.Shadow, "#07080B"),
     ]:
-        pal.setColor(role, QColor(colour))
+        pal.setColor(role, QColor(C(colour)))
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
-        pal.setColor(QPalette.Disabled, role, QColor("#5A6170"))
+        pal.setColor(QPalette.Disabled, role, QColor(C("#5A6170")))
     app.setPalette(pal)
-    app.setStyleSheet(QSS + _indicator_qss())
+    app.setStyleSheet(_recolour(QSS + _indicator_qss()))
+    if changed:
+        theme().changed.emit(name)
 
 
 _ICONS = {
@@ -49,9 +138,10 @@ def _icon_dir():
     import tempfile
     from pathlib import Path
 
-    d = Path(tempfile.gettempdir()) / "bvrviewer-icons-v1"
+    d = Path(tempfile.gettempdir()) / f"bvrviewer-icons-v1-{_palette}"
     d.mkdir(exist_ok=True)
     for name, svg in _ICONS.items():
+        svg = _recolour(svg)
         p = d / f"{name}.svg"
         if not p.exists() or p.read_text() != svg:
             p.write_text(svg)

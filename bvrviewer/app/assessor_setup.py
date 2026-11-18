@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from ..core import assessment as A
 from .panels import label, small_button
+from .style import C
 
 GREEN, TEAL, AMBER, GREY, RED = "#8FD3A9", "#5CC8A8", "#F2C48D", "#5E6573", "#F0A3A3"
 EMPTY_BG = "#1A1D24"
@@ -134,7 +135,7 @@ class TrackingGrid(QTableWidget):
             f = QFont()
             f.setBold(True)
             h.setFont(f)
-            h.setForeground(QBrush(QColor(GREEN)))
+            h.setForeground(QBrush(QColor(C(GREEN))))
             h.setToolTip("The reference (criterion) tracking, e.g. bead-based")
         for r, (who, ses) in enumerate(self.slots):
             for c, bone in enumerate(self.bones):
@@ -144,17 +145,17 @@ class TrackingGrid(QTableWidget):
                 where = f"{p.row_label(who, ses)} · {bone}" + (f" · {trial}" if len(p.trials()) > 1 else "")
                 if e is None:
                     it.setText("+")
-                    it.setForeground(QBrush(QColor(GREY)))
-                    it.setBackground(QBrush(QColor(EMPTY_BG)))
+                    it.setForeground(QBrush(QColor(C(GREY))))
+                    it.setBackground(QBrush(QColor(C(EMPTY_BG))))
                     it.setToolTip(f"{where}\nNo file yet: double-click to choose one, or drop a file here")
                 elif e.tracking is None:
                     it.setText(f"⚠ {e.path.name}")
-                    it.setForeground(QBrush(QColor(RED)))
+                    it.setForeground(QBrush(QColor(C(RED))))
                     it.setToolTip(f"{where}\n{e.path}\n{e.error}")
                 else:
                     t = e.tracking
                     it.setText(e.path.name)
-                    it.setForeground(QBrush(QColor(AMBER if t.warnings else GREEN)))
+                    it.setForeground(QBrush(QColor(C(AMBER if t.warnings else GREEN))))
                     extra = (f", first row = frame {t.offset + 1}" if t.offset else "") + \
                             (f", {t.n_untracked} untracked" if t.n_untracked else "")
                     it.setToolTip(f"{where}\n{e.path}\n{t.n_rows} rows{extra}\n{t.fmt.describe()}"

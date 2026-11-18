@@ -642,3 +642,31 @@ class CacheDialog(QDialog):
         s.setValue("radiographs/cache_limit_gb", self.limit.value())
         self.RS.prune_cache(int(self.limit.value() * 1e9))
         super().accept()
+
+
+class PreferencesDialog(QDialog):
+    """Settings → Preferences: app-wide choices, applied as soon as they change (General #1)."""
+
+    def __init__(self, parent):
+        from PySide6.QtWidgets import QApplication
+
+        from .style import PALETTES, palette, set_palette
+
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.setMinimumWidth(420)
+        v = QVBoxLayout(self)
+        form = QFormLayout()
+        self.palette = QComboBox()
+        for k, t in PALETTES:
+            self.palette.addItem(t, k)
+        self.palette.setCurrentIndex(max(self.palette.findData(palette()), 0))
+        self.palette.setToolTip("Colours of the app's panels, menus and text. Bones, axes, curves and the "
+                                "radiographs keep their own colours. Changes straight away; remembered next time.")
+        self.palette.currentIndexChanged.connect(
+            lambda _i: set_palette(QApplication.instance(), self.palette.currentData()))
+        form.addRow("Colour palette", self.palette)
+        v.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)

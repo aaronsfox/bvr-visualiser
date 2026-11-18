@@ -212,6 +212,10 @@ assert tab.cam_views.isVisible() and len(tab.cam_views.views) == 2
 tab.timeline.slider.setValue(20)
 pump(1.0)
 view = tab.cam_views.views[0]
+if any(m.drr is not None for m in tab.state.models):     # TIF bones start as DRRs (#25)
+    assert tab.state.settings.overlay == "drr" and view.drr_item.isVisible()
+    tab._set("overlay", "silhouette")
+    pump(0.5)
 # the silhouette of each bone lies on the image and inside where the bone projects
 for m in tab.state.models:
     item = view.items[id(m)]

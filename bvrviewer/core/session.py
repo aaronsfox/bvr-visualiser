@@ -125,6 +125,9 @@ class SceneSettings:
     curve_labels: str = "axes"        # curve legends: "axes" (Angle X/Y/Z) or "anatomical" (Flexion, ...)
     overlay_fill: bool = True         # silhouette overlay: show the fill (at overlay_opacity) (Visualiser #21)
     point_density: float = 1.0        # point-cloud overlay: share of the points shown, evenly thinned (Visualiser #24)
+    drr_opacity: float = 0.7          # DRR overlay of TIF bones (Visualiser #25): opacity at full DRR value,
+    drr_brightness: float = 1.0       # brightness (1: full where the bone is thickest),
+    drr_cutoff: float = 0.0           # and cutoff (0–1 of the volume's range, as Autoscoper's X-ray cutoff)
 
     def copy(self) -> SceneSettings:
         return SceneSettings(**self.__dict__)

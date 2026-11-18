@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
@@ -12,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.session import SceneSettings
+from .style import C
 
 
 def h2(text: str) -> QLabel:
@@ -75,14 +75,14 @@ class CoverageStrip(QWidget):
     def paintEvent(self, e):  # noqa: N802
         p = QPainter(self)
         w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor("#262A33"))
+        p.fillRect(0, 0, w, h, QColor(C("#262A33")))
         if self.valid is None:
             return
         n = self.n
         for i in range(n):
             ok = i < len(self.valid) and self.valid[i]
             x0, x1 = int(w * i / n), int(w * (i + 1) / n)
-            p.fillRect(x0, 0, max(x1 - x0, 1), h, QColor("#3B6E52" if ok else "#D9822B"))
+            p.fillRect(x0, 0, max(x1 - x0, 1), h, QColor(C("#3B6E52") if ok else C("#D9822B")))
 
 
 class Timeline(QWidget):

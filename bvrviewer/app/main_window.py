@@ -65,6 +65,9 @@ class MainWindow(QMainWindow):
         self.tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)     # the Start page can't be closed
         self.tabs.tabBar().setTabButton(0, QTabBar.LeftSide, None)
         self._menus()
+        from .style import theme
+
+        theme().changed.connect(self._restyle)
 
     def _act(self, menu, text, fn, shortcut=None):
         a = QAction(text, self)
@@ -131,8 +134,22 @@ class MainWindow(QMainWindow):
         self._act(r, "Import cameras from .cfg…", self._vis("import_cfg"))
         r.addSeparator()
         self._act(r, "Radiograph cache…", self.cache_settings)
+        s = mb.addMenu("&Settings")
+        self._act(s, "Preferences…", self.preferences, "Ctrl+,")
         h = mb.addMenu("&Help")
         self._act(h, "About", self.about)
+
+    def preferences(self) -> None:
+        from .dialogs import PreferencesDialog
+
+        PreferencesDialog(self).exec()
+
+    def _restyle(self, _name: str = "") -> None:
+        """The palette changed: open tabs redraw what they colour themselves."""
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if hasattr(w, "restyle"):
+                w.restyle()
 
     def cache_settings(self) -> None:
         from .dialogs import CacheDialog

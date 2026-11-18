@@ -113,7 +113,9 @@ assert dlg.preview.pixmap() is not None and "3 bones" in dlg.preview_note.text()
 # #22: display settings for the trial
 dlg.disp["xray_distance"].setValue(200)
 dlg.disp["camera_views"].setChecked(True)
+assert dlg.display["overlay"] == "drr" and dlg.disp["drr_opacity"].isEnabled()   # #25: TIF bones -> DRR by default
 dlg.disp["overlay"].setCurrentIndex(dlg.disp["overlay"].findData("points"))
+assert dlg.disp["point_density"].isEnabled() and not dlg.disp["drr_opacity"].isEnabled()
 assert dlg.disp["point_density"].isEnabled() and not dlg.disp["overlay_fill"].isEnabled()
 dlg.disp["point_density"].setValue(25)
 shot(dlg, "tr_03_wizard_cameras")
@@ -157,7 +159,16 @@ assert not any(it.isVisible() for it in v0.items.values())
 tab._set("overlay_fill", True)
 pump(0.3)
 assert all(it.isVisible() for it in v0.items.values())
+tab._set("overlay", "drr")                                             # #25: DRRs over the radiograph
+pump(0.3)
+assert all(m.drr is not None for m in t1.models)
+assert v0.drr_item.isVisible() and v0.drr_item.image is not None
+assert not any(it.isVisible() for it in v0.items.values())
+img = v0.drr_item.image
+assert img.ndim == 3 and img.shape[2] == 4 and img[..., 3].max() > 0
 tab._set("overlay", "points")
+pump(0.3)
+assert not v0.drr_item.isVisible()
 assert [m.name for m in t1.models] == ["cal", "tal", "tib"] and t1.models[2].color == "#E07A9A"
 assert all(m.tracking is not None for m in t1.models) and tab.scene.n_frames == 19
 assert all(c.show_source is False for c in t1.cameras)

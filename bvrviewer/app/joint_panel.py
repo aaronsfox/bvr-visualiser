@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from .panels import label
+from .style import C
 
 CURVE_COLOURS = ("#E5534B", "#57AB5A", "#539BF5")
 AXIS_COLOURS = {"X": CURVE_COLOURS[0], "Y": CURVE_COLOURS[1], "Z": CURVE_COLOURS[2],    # as the 3D axes
@@ -157,15 +158,12 @@ class JointCurves(QWidget):
         self.plots = []
         self.cursors = []
         for unit in ("deg", "mm"):
-            pw = pg.PlotWidget(background="#14171C")
+            pw = pg.PlotWidget()
             pw.setMenuEnabled(False)
             pw.showGrid(x=True, y=True, alpha=0.15)
-            pw.setLabel("left", "Angle (°)" if unit == "deg" else "Translation (mm)", color="#A3AAB8")
-            pw.setLabel("bottom", "Frame", color="#A3AAB8")
-            for ax in ("left", "bottom"):
-                pw.getAxis(ax).setTextPen("#A3AAB8")
-                pw.getAxis(ax).setPen("#3A404C")
-            pw.addLegend(offset=(6, 4), labelTextColor="#C3C8D2", brush=pg.mkBrush("#1C1F26CC"))
+            pw.addLegend(offset=(6, 4))
+            pw._unit = unit
+            self._style_plot(pw)
             cur = pg.InfiniteLine(angle=90, pen=pg.mkPen("#F0A04B", width=1.5))
             pw.addItem(cur)
             pw.scene().sigMouseClicked.connect(lambda ev, w=pw: self._clicked(ev, w))
@@ -176,6 +174,24 @@ class JointCurves(QWidget):
         self.data = None
         self.title_text = ""
         self.frame = 0
+
+    def _style_plot(self, pw) -> None:
+        """Background, axes and legend in the palette in use."""
+        pw.setBackground(C("#14171C"))
+        pw.setLabel("left", "Angle (°)" if pw._unit == "deg" else "Translation (mm)", color=C("#A3AAB8"))
+        pw.setLabel("bottom", "Frame", color=C("#A3AAB8"))
+        for ax in ("left", "bottom"):
+            pw.getAxis(ax).setTextPen(C("#A3AAB8"))
+            pw.getAxis(ax).setPen(C("#3A404C"))
+        legend = pw.plotItem.legend
+        if legend is not None:
+            legend.setBrush(pg.mkBrush(C("#1C1F26CC")))
+            legend.setLabelTextColor(C("#C3C8D2"))
+
+    def restyle(self) -> None:
+        """Redraw the plots in the palette in use (General #1)."""
+        for pw in self.plots:
+            self._style_plot(pw)
 
     @property
     def style(self) -> str:

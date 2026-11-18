@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pyvista as pv
@@ -31,6 +31,7 @@ from .dialogs import VoxelDialog
 from .navigator import PropertySheet
 from .panels import h2, label
 from .scene import BACKGROUNDS
+from .style import C
 
 MODEL_FILTER = "Bone models (*.stl *.STL *.tif *.tiff *.TIF *.obj *.ply *.vtk *.vtp);;All files (*)"
 JOINT_MODEL_FILTER = "Model (*.bvrmodel.json *.json)"
@@ -152,7 +153,7 @@ def tool_icon(name: str, color: str = "#D5DAE3") -> QIcon:
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    pen = QPen(QColor(color), 3.2)
+    pen = QPen(QColor(C(color)), 3.2)
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
     p.setPen(pen)
@@ -743,6 +744,13 @@ class ModelBuilderTab(QWidget):
         pl.render()
 
     # ================================================================ navigator
+    def restyle(self) -> None:
+        """Redraw what this tab colours itself, after the palette changes (General #1)."""
+        for name, b in self.tool_buttons.items():
+            b.setIcon(tool_icon(name))
+        self.undo_btn.setIcon(tool_icon("undo"))
+        self.refresh(rebuild_view=False)
+
     def refresh(self, rebuild_view: bool = True) -> None:
         self._rebuild_tree()
         self.show_properties()
@@ -759,7 +767,7 @@ class ModelBuilderTab(QWidget):
             f.setBold(True)
             it.setFont(0, f)
         if color:
-            it.setForeground(0, QBrush(QColor(color)))
+            it.setForeground(0, QBrush(QColor(C(color))))
         if tip:
             it.setToolTip(0, tip)
         return it
@@ -1301,6 +1309,7 @@ class ModelBuilderTab(QWidget):
 
     def import_aafact(self, s: J.Segment, path: str | None = None) -> bool:
         from PySide6.QtWidgets import QFileDialog
+
         from ..core import aafact as AF
         if path is None:
             path, _ = QFileDialog.getOpenFileName(self, "AAFACT results", "", "AAFACT results (*.xlsx);;All files (*)")
@@ -1318,7 +1327,9 @@ class ModelBuilderTab(QWidget):
 
     def run_aafact(self, s: J.Segment) -> bool:
         import tempfile
+
         from PySide6.QtGui import QGuiApplication
+
         from ..core import aafact as AF
         if s.mesh is None:
             QMessageBox.information(self, "Run AAFACT", "Load this bone's surface first.")

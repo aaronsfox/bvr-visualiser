@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from ..core.models import BoneModel
 from ..core.session import KinItem, TabState, Trial, XrayCamera
 from .panels import ColorButton, h2, label
+from .style import C
 
 KIND_ROLE = Qt.UserRole
 OBJ_ROLE = Qt.UserRole + 1
@@ -138,7 +139,7 @@ class Navigator(QTreeWidget):
         add = QTreeWidgetItem(["+  Add trial…"])
         self._set(add, ADD_TRIAL, None)
         add.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-        add.setForeground(0, QBrush(QColor("#4F9CF9")))
+        add.setForeground(0, QBrush(QColor(C("#4F9CF9"))))
         add.setToolTip(0, "Import a trial (from an Autoscoper .cfg and its tracking files), or add an empty one by "
                           "name")
         self.roots[TRIALS].addChild(add)
@@ -192,7 +193,7 @@ class Navigator(QTreeWidget):
     def _placeholder(self, root: QTreeWidgetItem, text: str) -> None:
         it = QTreeWidgetItem([text])
         it.setFlags(Qt.ItemIsEnabled)
-        it.setForeground(0, QBrush(QColor("#7A8291")))
+        it.setForeground(0, QBrush(QColor(C("#7A8291"))))
         f = it.font(0)
         f.setItalic(True)
         it.setFont(0, f)
@@ -241,8 +242,8 @@ class Navigator(QTreeWidget):
             shown = t is self._shown
             it.setText(0, t.name)
             it.setFont(0, self._bold())
-            it.setIcon(0, _dot_icon(SHOWN_COLOUR, ring=not shown))
-            it.setForeground(0, QBrush(QColor("#E6E8EC" if shown else "#A9AFBA")))
+            it.setIcon(0, _dot_icon(C(SHOWN_COLOUR), ring=not shown))
+            it.setForeground(0, QBrush(QColor(C("#E6E8EC") if shown else C("#A9AFBA"))))
             frames = max((m.tracking.n_frames for m in t.models if m.tracking is not None), default=0)
             what = f"{len(t.models)} bones · {len(t.cameras)} X-ray cameras · {len(t.joints)} joints"
             what += f" · {frames} frames" if frames else ""
@@ -254,17 +255,17 @@ class Navigator(QTreeWidget):
             it.setIcon(0, _dot_icon(m.color))
             it.setCheckState(0, Qt.Checked if m.visible else Qt.Unchecked)
             it.setToolTip(0, f"{m.path}\nTick to show, untick to hide. Right-click for actions.")
-            it.setForeground(0, QBrush(QColor("#E6E8EC" if m.visible else "#7A8291")))
+            it.setForeground(0, QBrush(QColor(C("#E6E8EC") if m.visible else C("#7A8291"))))
         elif kind == TRACKING:
             m = obj
             if m.tracking is not None:
                 t = m.tracking
                 gaps = f", {t.n_untracked} untracked" if t.n_untracked else ""
                 start = f", from frame {t.offset + 1}" if t.offset else ""
-                self._active(it, f"Tracking · {t.path.name} ({t.n_rows} rows{start}{gaps})", "#8FD3A9")
+                self._active(it, f"Tracking · {t.path.name} ({t.n_rows} rows{start}{gaps})", C("#8FD3A9"))
                 it.setToolTip(0, f"{t.path}\nRight-click to load a new file or refresh this one.")
             elif m.tracking_path is not None:
-                self._active(it, f"Tracking · {Path(m.tracking_path).name} (couldn't be read)", "#F2C48D")
+                self._active(it, f"Tracking · {Path(m.tracking_path).name} (couldn't be read)", C("#F2C48D"))
                 it.setToolTip(0, f"{m.tracking_path}\nRight-click to load a new file or try refreshing.")
             else:
                 self._inactive(it, "Tracking")
@@ -275,7 +276,7 @@ class Navigator(QTreeWidget):
             if m.has_axes:
                 ok = m.acs is not None
                 self._active(it, f"Axes · {m.axes_segment} ({Path(m.axes_path).name})" + ("" if ok else " not found"),
-                             "#5CC8A8" if ok else "#F2C48D")
+                             C("#5CC8A8") if ok else C("#F2C48D"))
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(0, Qt.Checked if m.axes_visible else Qt.Unchecked)
                 it.setToolTip(0, f"Coordinate system from {m.axes_path}\nTick to show the axes. Select for this "
@@ -288,20 +289,20 @@ class Navigator(QTreeWidget):
         elif kind == CAMERA:
             cam: XrayCamera = obj
             it.setText(0, cam.name)
-            it.setIcon(0, _dot_icon("#F2C48D", ring=True))
+            it.setIcon(0, _dot_icon(C("#F2C48D"), ring=True))
             it.setCheckState(0, Qt.Checked if cam.visible else Qt.Unchecked)
             n = len(cam.images) if cam.images else 0
             it.setToolTip(0, f"{cam.calibration_path.name}\n{n} images · double-click to view through it")
-            it.setForeground(0, QBrush(QColor("#E6E8EC" if cam.visible else "#7A8291")))
+            it.setForeground(0, QBrush(QColor(C("#E6E8EC") if cam.visible else C("#7A8291"))))
         elif kind == JOINT:
             jl: KinItem = obj
             it.setText(0, jl.label)
-            it.setIcon(0, _dot_icon("#5CC8A8" if jl.kind == "segment" else "#B78AF0"))
+            it.setIcon(0, _dot_icon(C("#5CC8A8") if jl.kind == "segment" else C("#B78AF0")))
             it.setCheckState(0, Qt.Checked if jl.visible else Qt.Unchecked)
             bones = " · ".join(str(n) for n in jl.tab_models()) if jl.model is not None else ""
             what = "Segment" if jl.kind == "segment" else "Joint"
             it.setToolTip(0, f"{what} from {jl.model_path.name}\n{bones}\nTick to show the axes.")
-            it.setForeground(0, QBrush(QColor("#E6E8EC" if jl.visible else "#7A8291")))
+            it.setForeground(0, QBrush(QColor(C("#E6E8EC") if jl.visible else C("#7A8291"))))
         self._building = was
 
     @staticmethod
@@ -320,7 +321,7 @@ class Navigator(QTreeWidget):
         f = QFont()
         f.setItalic(True)
         it.setFont(0, f)
-        it.setForeground(0, QBrush(QColor("#5E6573")))
+        it.setForeground(0, QBrush(QColor(C("#5E6573"))))
 
     def refresh_obj(self, kind: str, obj) -> None:
         self.refresh_item(self.item_for(kind, obj))

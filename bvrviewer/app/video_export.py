@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .style import C
+
 CONTENTS = (("3d", "3D view only"), ("both", "3D view and X-ray cameras"), ("cams", "X-ray cameras only"))
 LAYOUTS = (("row", "Side by side"), ("main", "Main view large, the others stacked beside it"), ("grid", "Grid"))
 SIZES = ((1280, 720), (1920, 1080), (2560, 1440), (3840, 2160), (1080, 1080))
@@ -169,15 +171,15 @@ class VideoExportDialog(QDialog):
         # a small sketch of the layout
         W, H = 240, round(240 * o.height / o.width)
         img = QImage(W, H, QImage.Format_RGB32)
-        img.fill(QColor("#0B0D11"))
+        img.fill(QColor(C("#0B0D11")))
         p = QPainter(img)
         f = QFont()
         f.setPixelSize(11)
         p.setFont(f)
         names = (["3D"] if o.content != "cams" else []) + [f"Camera {i + 1}" for i in range(n - (o.content != "cams"))]
         for name, r in zip(names, tile_rects(n, o.layout, W, H, 3)):
-            p.fillRect(r, QColor("#2A3140" if name == "3D" else "#3A3F4B"))
-            p.setPen(QColor("#C3C8D2"))
+            p.fillRect(r, QColor(C("#2A3140") if name == "3D" else C("#3A3F4B")))
+            p.setPen(QColor(C("#C3C8D2")))
             p.drawText(r, Qt.AlignCenter, name)
         p.end()
         from PySide6.QtGui import QPixmap

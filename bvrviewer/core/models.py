@@ -175,6 +175,7 @@ class BoneModel:
     # runtime only
     mesh: object = field(default=None, repr=False)
     image_data: object = field(default=None, repr=False)
+    drr: object = field(default=None, repr=False)        # core.drr.DrrVolume of a TIF bone (Visualiser #25)
     tracking: object = field(default=None, repr=False)
     axes_model: object = field(default=None, repr=False)     # the loaded KinematicModel
     surface_note: str = ""
@@ -209,6 +210,9 @@ class BoneModel:
             vol = apply_flips(load_volume_array(self.path), self.flip)
             self.mesh, self.surface_note = volume_surface(vol, self.voxel_size, self.threshold)
             self.image_data = volume_image_data(vol, self.voxel_size)
+            from .drr import prepare
+
+            self.drr = prepare(vol, self.voxel_size)           # reduced once, for quick DRRs while playing
         else:
             mesh = load_surface(self.path)
             if self.tfm_path:
@@ -219,6 +223,7 @@ class BoneModel:
             mesh = mesh.compute_normals(auto_orient_normals=False, split_vertices=False)
             self.mesh = mesh
             self.image_data = None
+            self.drr = None
 
     def load_tracking(self):
         """(Re)read the tracking file with this bone's format, volume and frame offset."""

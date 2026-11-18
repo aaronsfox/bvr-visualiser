@@ -42,7 +42,7 @@ from ..core.session import (
 )
 from ..core.tracking import TrackingError, load_tracking
 from ..core.transforms import TransformFileError
-from .camera_views import OVERLAYS, CameraViews
+from .camera_views import OVERLAYS, CameraViews, overlays_for
 from .dialogs import AddCameraDialog, FormatDialog, VoxelDialog
 from .joint_panel import (
     JointCurves,
@@ -71,6 +71,7 @@ from .navigator import (
 )
 from .panels import Timeline, h2, label
 from .scene import SceneController
+from .style import C
 
 MODEL_FILTER = "Bone models (*.stl *.STL *.tif *.tiff *.TIF *.obj *.ply *.vtk *.vtp);;All files (*)"
 
@@ -940,7 +941,7 @@ class VisualiserTab(QWidget):
     def _props_trial(self, t: Trial) -> None:
         p = self.props
         shown = t is self.state.trial
-        p.clear(t.name, icon_color="#8FD3A9" if shown else None)
+        p.clear(t.name, icon_color=C("#8FD3A9") if shown else None)
         p.line("Name", t.name, lambda v: self._rename(t, v))
         p.value("Status", "Shown" if shown else "Not shown", kind="Ok" if shown else "Muted")
         tracked = sum(1 for m in t.models if m.tracking is not None)
@@ -1111,8 +1112,25 @@ class VisualiserTab(QWidget):
         p.section("Camera views (2D)")
         p.check("Show", s.camera_views, lambda on: self.set_camera_views(on), caption="Beside the 3D view",
                 tip="Each camera's radiograph in its own 2D panel, with the bones projected onto it")
-        p.combo("Bones drawn as", OVERLAYS, s.overlay, lambda v: (self._set("overlay", v), self.show_properties()))
-        if s.overlay == "silhouette":
+        choices = overlays_for(self.state.models)
+        if s.overlay not in [k for k, _ in choices]:
+            choices = OVERLAYS
+        p.combo("Bones drawn as", choices, s.overlay, lambda v: (self._set("overlay", v), self.show_properties()))
+        if s.overlay == "drr":
+            p.slider("DRR opacity", s.drr_opacity, 5, 100, 100, _fmt_pct, lambda v: self._set("drr_opacity", v),
+                     spin=PCT)
+            br = p.slider("DRR brightness", s.drr_brightness, 10, 400, 100, lambda x: f"{x:.2f}×",
+                          lambda v: self._set("drr_brightness", v), spin=(1, 2, "×"))
+            br.setToolTip("1×: full colour where the bone is thickest; raise it to bring out thinner bone")
+            cut = p.slider("DRR cutoff", s.drr_cutoff, 0, 95, 100, lambda x: f"{x:.2f}",
+                           lambda v: self._set("drr_cutoff", v), spin=(1, 2, ""))
+            cut.setToolTip("Leave out the volume's fainter values (0: none; 0.5: the lower half of its range), like "
+                           "Autoscoper's X-ray cutoff, to show denser bone only")
+            if any(getattr(m, "drr", None) is None for m in self.state.models):
+                p.note("Bones that aren't TIF volumes are drawn as silhouettes.")
+                p.slider("Silhouette opacity", s.overlay_opacity, 5, 100, 100, _fmt_pct,
+                         lambda v: self._set("overlay_opacity", v), spin=PCT)
+        elif s.overlay == "silhouette":
             p.check("Fill", s.overlay_fill, lambda on: (self._set("overlay_fill", on), self.show_properties()),
                     caption="Show fill")
             if s.overlay_fill:
@@ -1217,9 +1235,12 @@ class VisualiserTab(QWidget):
             return
         built, errors = res
         first = not self.state.models
+        first = not self.state.models
         for m in built:
             self.state.models.append(m)          # (adds "Trial 1" first in a tab without trials)
             self.scene.add_model(m)
+        if first and any(m.drr is not None for m in built) and self.state.settings.overlay == "silhouette":
+            self.state.settings.overlay = "drr"      # TIF bones are drawn as DRRs by default (Visualiser #25)
         self._scene_trial = self.state.trial
         if built:
             self.select(built[-1], refresh=False)
@@ -1602,6 +1623,13 @@ class VisualiserTab(QWidget):
         elif t.models:
             self.scene.zoom_to_bones()
 
+    def restyle(self) -> None:
+        """Redraw what this tab colours itself, after the palette changes (General #1)."""
+        self.curves.restyle()
+        self.refresh_all()
+        for w in self.findChildren(QWidget):     # widgets that paint themselves (coverage bar, timeline)
+            w.update()
+
     def _use_trial_settings(self) -> None:
         """Point the timeline, scene and curves at the shown trial's settings (Visualiser #23)."""
         self.timeline.s = self.state.settings
@@ -1983,7 +2011,7 @@ class VisualiserTab(QWidget):
         for m in models:                    # a surface already loaded in this tab (e.g. a duplicated trial) is shared
             same = loaded.get(self._surface_key(m)) if m.mesh is None else None
             if same is not None:
-                m.mesh, m.image_data, m.surface_note = same.mesh, same.image_data, same.surface_note
+                m.mesh, m.image_data, m.surface_note, m.drr = same.mesh, same.image_data, same.surface_note, same.drr
 
         cams_in = list(t.cameras)
         n_steps = len(models) + (1 if cams_in else 0)

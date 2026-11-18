@@ -21,7 +21,7 @@ TRACKING_SUFFIXES = (".tra",)
 
 # Display settings the Trial setup dialog sets for a trial (Visualiser #22); each trial has its own (#23)
 DISPLAY_KEYS = ("xray_opacity", "xray_distance", "xray_bone_opacity", "camera_views", "overlay", "overlay_fill",
-                "overlay_opacity", "point_density")
+                "overlay_opacity", "point_density", "drr_opacity", "drr_brightness")
 
 
 def display_of(settings) -> dict:
@@ -142,7 +142,7 @@ def bone_model(b: BoneDraft) -> BoneModel:
                     "axes_visible", "axes_reference", "axes_zero"):
             setattr(m, key, getattr(src, key))
         if same_surface(b, src) and src.mesh is not None:
-            m.mesh, m.image_data, m.surface_note = src.mesh, src.image_data, src.surface_note
+            m.mesh, m.image_data, m.surface_note, m.drr = src.mesh, src.image_data, src.surface_note, src.drr
     if b.axes_path is not None:
         m.axes_path, m.axes_segment = Path(b.axes_path), b.axes_segment
     return m

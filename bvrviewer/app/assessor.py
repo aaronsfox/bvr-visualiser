@@ -51,6 +51,7 @@ from .assess_plots import apply_style, draw_distributions, draw_over_frames
 from .assessor_setup import FactorList, TrackingGrid
 from .dialogs import FormatDialog
 from .panels import label, small_button
+from .style import C
 
 SURFACES = "Surfaces (*.stl *.obj *.ply *.vtk *.vtp *.tif *.tiff);;All files (*)"
 
@@ -697,6 +698,12 @@ class AssessorTab(QWidget):
         self._changed()
 
     # ================================================================ refresh
+    def restyle(self) -> None:
+        """Redraw what this tab colours itself, after the palette changes (General #1)."""
+        self._refresh_tables()
+        if hasattr(self, "grid") and getattr(self, "_trial", None) is not None:
+            self.grid.fill(self.project, self._trial)
+
     def refresh_tables(self, *_):
         """Redraw the set-up from the project. The analysis controls ignore changes while this runs, so it
         always lets them go again, even if something fails part-way."""
@@ -718,13 +725,13 @@ class AssessorTab(QWidget):
             s = b.surface
             si = QTableWidgetItem(Path(s.path).name if s is not None else "none")
             si.setToolTip(str(s.path) if s is not None else "Optional: double-click to load a surface")
-            si.setForeground(QColor("#8FD3A9" if s is not None else "#5E6573"))
+            si.setForeground(QColor(C("#8FD3A9") if s is not None else C("#5E6573")))
             self.bones_table.setItem(r, 1, si)
             ax = (f"{b.axes_segment} ({Path(b.axes_path).name})" if b.acs is not None
                   else ("not found" if b.axes_path else "none"))
             ai = QTableWidgetItem(ax)
             ai.setToolTip(b.axes_path or "Optional: double-click to take coordinate systems from a model")
-            ai.setForeground(QColor("#5CC8A8" if b.acs is not None else ("#F2C48D" if b.axes_path else "#5E6573")))
+            ai.setForeground(QColor(C("#5CC8A8") if b.acs is not None else (C("#F2C48D") if b.axes_path else C("#5E6573"))))
             self.bones_table.setItem(r, 2, ai)
         self.lists["assessor"].set_items(p.raters())
         self.lists["session"].set_items(p.sessions())
@@ -917,15 +924,15 @@ class AssessorTab(QWidget):
                 if c >= len(head):
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 if row.na:
-                    it.setForeground(QColor("#5E6573"))
+                    it.setForeground(QColor(C("#5E6573")))
                 if row.note:
                     it.setToolTip(row.note)
                 self.summary.setItem(r, c, it)
             self.summary.setItem(r, len(vals), _item(row.note))
             if row.na:
-                self.summary.item(r, len(vals)).setForeground(QColor("#5E6573"))
+                self.summary.item(r, len(vals)).setForeground(QColor(C("#5E6573")))
             if s.get("pct_over", 0) > 0:
-                self.summary.item(r, len(head) + len(cols) - 1).setForeground(QColor("#F2C48D"))
+                self.summary.item(r, len(head) + len(cols) - 1).setForeground(QColor(C("#F2C48D")))
         self.summary.resizeColumnsToContents()
 
     def redraw(self, *_):

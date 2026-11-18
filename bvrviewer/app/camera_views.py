@@ -30,7 +30,13 @@ from .panels import label
 MAX_POINTS = 4000           # surface points drawn per bone in point-cloud mode
 MAX_TRIANGLES = 6000        # triangles projected per bone in silhouette mode
 
-OVERLAYS = [("silhouette", "Silhouette"), ("points", "Point cloud"), ("off", "Off")]
+OVERLAYS = [("drr", "DRR (TIF bones)"), ("silhouette", "Silhouette"), ("points", "Point cloud"), ("off", "Off")]
+
+
+def overlays_for(models) -> list:
+    """The overlay choices for these bones: DRR only when some are TIF volumes (Visualiser #25)."""
+    has_drr = any(getattr(m, "drr", None) is not None for m in models)
+    return [o for o in OVERLAYS if o[0] != "drr" or has_drr]
 
 
 def even_order(pts: np.ndarray) -> np.ndarray:
@@ -130,6 +136,9 @@ class CameraView(QWidget):
         self.vb.setMenuEnabled(False)
         self.image = pg.ImageItem(axisOrder="row-major")
         self.vb.addItem(self.image)
+        self.drr_item = pg.ImageItem(axisOrder="row-major")   # DRRs of TIF bones, in their colours (#25)
+        self.drr_item.setZValue(5)
+        self.vb.addItem(self.drr_item)
         self.gv.setToolTip("Drag: pan · Scroll: zoom · Double-click: fit the image")
         self.gv.scene().sigMouseClicked.connect(self._clicked)
         v.addWidget(self.gv, 1)
@@ -146,9 +155,10 @@ class CameraView(QWidget):
         self.vb.setRange(QRectF(0, 0, cal.width, cal.height), padding=0.02)
 
     def update_view(self, frame: int, models, shapes: dict, lut: np.ndarray, overlay: str, alpha: float,
-                    fill: bool = True, density: float = 1.0) -> None:
+                    fill: bool = True, density: float = 1.0, drr: tuple = (0.7, 1.0, 0.0)) -> None:
         """Draw this frame: the radiograph, and each bone as a silhouette (filled at ``alpha``, or not shown when
-        ``fill`` is off), a point cloud (``density``: the share of its points shown, thinned evenly), or nothing."""
+        ``fill`` is off), a point cloud (``density``: the share of its points shown, thinned evenly), a DRR
+        (TIF bones, with ``drr`` = (opacity, brightness, cutoff); other bones as silhouettes), or nothing."""
         cam, cal = self.cam, self.cam.calibration
         self.title.setText(cam.name)
         i = cam.image_index(frame)
@@ -167,8 +177,22 @@ class CameraView(QWidget):
                 self.fit()
                 self._fitted = True
         live = set()
+        drr_layers = []                              # (DRR grid, colour) of each TIF bone shown as a DRR
         for m in models:
-            item = self._bone_item(m, overlay)
+            pose = m.tracking.pose(frame, "hide") if m.tracking is not None else None
+            if overlay == "drr" and getattr(m, "drr", None) is not None:
+                old = self.items.pop(id(m), None)
+                if old is not None:
+                    self.vb.removeItem(old)
+                live.add(id(m))
+                if pose is not None and m.visible:
+                    from ..core import drr as D
+
+                    r = D.render_region(m.drr, pose, cal, D.grid_scale(cal), drr[2])
+                    if r is not None:
+                        drr_layers.append((*r, m.color))
+                continue
+            item = self._bone_item(m, "silhouette" if overlay == "drr" else overlay)
             live.add(id(m))
             pose = m.tracking.pose(frame, "hide") if m.tracking is not None else None
             if item is None:
@@ -193,6 +217,38 @@ class CameraView(QWidget):
             item.setVisible(bool(fill))
         for k in [k for k in self.items if k not in live]:
             self.vb.removeItem(self.items.pop(k))
+        self._show_drr(drr_layers, drr[0], drr[1])
+
+    def _show_drr(self, layers, opacity: float, brightness: float) -> None:
+        """Lay the bones' DRRs over the radiograph: each in its bone's colour, as opaque as its DRR value. Only the
+        part of the image the bones cover is drawn."""
+        if not layers:
+            self.drr_item.setVisible(False)
+            return
+        x0 = min(x for _img, x, _y, _c in layers)
+        y0 = min(y for _img, _x, y, _c in layers)
+        x1 = max(x + img.shape[1] for img, x, _y, _c in layers)
+        y1 = max(y + img.shape[0] for img, _x, y, _c in layers)
+        H, W = y1 - y0, x1 - x0
+        rgb = np.zeros((H, W, 3), np.float32)
+        a_out = np.zeros((H, W), np.float32)
+        for img, x, y, colour in layers:
+            c = QColor(colour)
+            a = np.clip(img * brightness, 0.0, 1.0) * opacity
+            sl = (slice(y - y0, y - y0 + img.shape[0]), slice(x - x0, x - x0 + img.shape[1]))
+            col = np.array([c.redF(), c.greenF(), c.blueF()], np.float32)
+            rgb[sl] = rgb[sl] * (1 - a[..., None]) + col * a[..., None]
+            a_out[sl] = a_out[sl] + a * (1 - a_out[sl])
+        rgba = np.empty((H, W, 4), np.uint8)
+        colour = rgb / np.maximum(a_out[..., None], 1e-6)
+        rgba[..., :3] = np.clip(colour * 255, 0, 255)
+        rgba[..., 3] = np.clip(a_out * 255, 0, 255)
+        from ..core.drr import grid_scale
+
+        s = grid_scale(self.cam.calibration)
+        self.drr_item.setImage(rgba, levels=(0, 255), autoLevels=False)
+        self.drr_item.setRect(QRectF(x0 * s, y0 * s, W * s, H * s))
+        self.drr_item.setVisible(True)
 
     def _bone_item(self, m: BoneModel, overlay: str):
         want = pg.ScatterPlotItem if overlay == "points" else QGraphicsPathItem
@@ -246,15 +302,16 @@ class CameraViews(QWidget):
         return s
 
     def render_args(self) -> tuple:
-        """(models, shapes, lut, overlay, opacity, fill, point density) for CameraView.update_view, as the panels
-        draw them."""
+        """(models, shapes, lut, overlay, opacity, fill, point density, DRR settings) for CameraView.update_view, as
+        the panels draw them."""
         st = self.scene.state.settings
         models = [m for m in self.scene.state.models if m.tracking is not None and self._shape(m) is not None]
         live = {id(m) for m in self.scene.state.models}
         for k in [k for k in self._shapes if k not in live]:
             del self._shapes[k]
         shapes = {id(m): self._shapes[id(m)] for m in models}
-        return models, shapes, self.scene._lut(), st.overlay, st.overlay_opacity, st.overlay_fill, st.point_density
+        return (models, shapes, self.scene._lut(), st.overlay, st.overlay_opacity, st.overlay_fill, st.point_density,
+                (st.drr_opacity, st.drr_brightness, st.drr_cutoff))
 
     def update_frame(self, frame: int) -> None:
         if not self.isVisible():
